@@ -17,9 +17,9 @@ makes, without per-vehicle licences.
 | Live data | 48 standard values with graphs, CSV logs | each make's own values (Toyota transmission temperature...); a log viewer | trail gauges for the off-road builds |
 | Bidirectional | actuator tests, fenced (hold-to-run, conditions, airbag ban) | learn tests by watching a shop tool on the bus | each make's test lists |
 | Service functions | | | relearns (throttle, idle, steering angle), resets (oil life, battery), TPMS IDs, injector coding: per make |
-| Configuration | | | FORScan/Techstream-style customizations (tire size, features), with a backup and a way back |
+| Configuration | tires/gears calculator, speedometer check, battery and charging check | | FORScan/Techstream-style customizations (tire size, axle ratio, features) and battery registration (BMW, VW/Audi, Ford, Ram...), with a backup and a way back; on a Tacoma, tire size and axle ratio live in the ECM calibration (a tuning edit) |
 | Tuning | map viewer, tune diff (XDF) | map editing with checksums | read and flash ECUs (STI first, bench ECU), A2L; open ECUs through LibreTune |
-| Vehicle info | VIN decoder, make profiles, named vehicles | model and engine from NHTSA's public vPIC data (offline) | recalls (NHTSA, asks before sending the VIN) |
+| Vehicle info | VIN decoder, make profiles, named vehicles, vehicle folders, NHTSA model/engine (asks first) and recalls | an offline copy of NHTSA's vPIC data | |
 | Bus | monitor (OBDLink monitor mode, Linux SocketCAN): ID table with changing bytes, diagnostics in words, tests learned from another tool | naming IDs per make | DBC files |
 | Hardware | ELM327/STN over USB, Bluetooth, Wi-Fi | SocketCAN (CANable and friends) | J2534 cables (Tactrix OpenPort 2.0) for flashing |
 | Vehicles | 12 makes + generic, addresses from public sources | extended addressing (Toyota body, BMW), 29-bit IDs (Honda), Ford's MS-CAN | each make's addresses checked on real vehicles |
@@ -92,6 +92,24 @@ stock file it saved.
 
 The desktop app (Yggdrasil's look, egui) with map editing in a table, 2D and 3D, versions ("stock" plus named versions,
 each a set of changes against the original), checksum correction per family, A2L definitions (ASAM MCD-2 MC) beside XDF.
+
+## Never brick a module (the rules every write follows)
+
+A module is bricked when a write stops halfway or puts the wrong thing in. Icarus's writes follow these, in code:
+
+1. **A verified backup first.** The whole module is read twice and the two reads must match before anything is written;
+   the image goes into the vehicle's OEM tunes folder, read-only, never replaced (done: the folder rule).
+2. **Only an image made for this module.** Its identity (part number, hardware and software numbers, calibration ID) must
+   match what the module reports; a file for another module is refused.
+3. **Checksums right.** The image's checksums are corrected and checked for its ECU family before writing.
+4. **Steady power.** A battery charger or maintainer on (the battery above 12.5 V and holding steady, sampled during the
+   write too); the computer kept awake (done: power_guard blocks sleep, lid switch and power keys).
+5. **A wired cable.** Never over Bluetooth or Wi-Fi: a dropped wireless link mid-write is a classic brick.
+6. **Calibration only, when the family allows it.** Write the calibration area and leave the boot loader alone, so the
+   module can always be reached and written again.
+7. **Read back and compare** after writing; on any doubt, write the backup back.
+8. **Every first on the bench.** A family's first read and write happen on a spare ECU on the bench, never in the vehicle.
+9. **Logged.** Every write in the action log.
 
 ## 4. Write (flash): only after all of this
 

@@ -12,3 +12,5 @@ libc = "0.2"
 # vehicle profiles are TOML files (MIT/Apache-2.0)
 serde = { version = "1", features = ["derive"] }
 toml = "0.9"
+# NHTSA's answers are JSON (MIT/Apache-2.0)
+serde_json = "1"

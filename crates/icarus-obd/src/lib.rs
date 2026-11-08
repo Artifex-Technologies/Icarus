@@ -13,6 +13,7 @@ pub mod garage;
 pub mod j1979;
 pub mod lookup;
 pub mod mode06;
+pub mod nhtsa;
 pub mod port;
 pub mod power_guard;
 pub mod report;

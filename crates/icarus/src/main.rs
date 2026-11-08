@@ -8,8 +8,8 @@ use icarus_obd::elm::Elm;
 use icarus_obd::j1979::{self, DtcKind};
 use icarus_obd::port::Target;
 use icarus_obd::{
-    actuator, bus, charging, clear, dtc, garage, lookup, mode06, report, socketcan, uds, vehicles,
-    vin,
+    actuator, bus, charging, clear, dtc, garage, lookup, mode06, nhtsa, report, socketcan, uds,
+    vehicles, vin,
 };
 use std::io::Write;
 use std::process::ExitCode;
@@ -45,7 +45,9 @@ Tools:
                                              what new tires do to the speedometer and gearing, and which regear restores it
 
 Vehicles:
-  icarus vin VIN                             what a VIN says: where it was built, maker, model year, check digit
+  icarus vin VIN [--nhtsa]                   what a VIN says: where it was built, maker, model year, check digit;
+                                             --nhtsa adds model, engine and drive from NHTSA (sends the VIN to NHTSA)
+  icarus recalls \"2017 Toyota Tacoma\"        recalls on record at NHTSA (sends only year, make and model)
   icarus vehicles                            the makes Icarus knows (one editable file each)
   icarus garage [VIN \"2017 Toyota Tacoma 3.5L V6\"]
                                              name a vehicle (searches and parts links use it), or list the named ones
@@ -86,6 +88,7 @@ fn main() -> ExitCode {
         Some("garage") => cmd_garage(&args[1..]),
         Some("bus") => cmd_bus(&args[1..]),
         Some("tires") => cmd_tires(&args[1..]),
+        Some("recalls") => cmd_recalls(&args[1..]),
         Some("-h" | "--help" | "help") | None => {
             println!("{HELP}");
             Ok(())
@@ -576,8 +579,10 @@ fn obd_module(elm: &mut Elm, args: &Args) -> Result<(), String> {
 }
 
 fn cmd_vin(a: &[String]) -> Result<(), String> {
-    let [v] = a else {
-        return Err("usage: icarus vin VIN".into());
+    let online = a.iter().any(|x| x == "--nhtsa");
+    let rest: Vec<&String> = a.iter().filter(|x| *x != "--nhtsa").collect();
+    let [v] = rest.as_slice() else {
+        return Err("usage: icarus vin VIN [--nhtsa]".into());
     };
     let i = vin::decode(v)?;
     let all = profiles();
@@ -611,6 +616,26 @@ fn cmd_vin(a: &[String]) -> Result<(), String> {
     println!("serial       {} (positions 12-17)", &i.vin[11..]);
     for p in i.problems {
         println!("note: {p}");
+    }
+    if online {
+        eprintln!("asking NHTSA (this sends the VIN to NHTSA)...");
+        let d = nhtsa::decode_vin(&i.vin)?;
+        println!("\nNHTSA: {}", d.name());
+        for (k, val) in [
+            ("trim", &d.trim),
+            ("drive", &d.drive),
+            ("body", &d.body),
+            ("fuel", &d.fuel),
+            ("built in", &d.plant_country),
+        ] {
+            if !val.is_empty() {
+                println!("  {k:<9} {val}");
+            }
+        }
+        if let Some(n) = &d.note {
+            println!("  note: {n}");
+        }
+        println!("Name it: icarus garage {} \"{}\"", i.vin, d.name());
     }
     Ok(())
 }
@@ -1176,6 +1201,32 @@ fn cmd_bus(a: &[String]) -> Result<(), String> {
             println!("{}", bus::to_toml(t));
         }
     }
+    Ok(())
+}
+
+fn cmd_recalls(a: &[String]) -> Result<(), String> {
+    let v = garage::Described::parse(&a.join(" "));
+    let (Some(year), false, false) = (v.year, v.make.is_empty(), v.model.is_empty()) else {
+        return Err("usage: icarus recalls \"2017 Toyota Tacoma\"   (year make model; sends only those to NHTSA)".into());
+    };
+    let list = nhtsa::recalls(&v.make, &v.model, year)?;
+    println!(
+        "{} recall(s) on record for the {year} {} {}:",
+        list.len(),
+        v.make,
+        v.model
+    );
+    for r in &list {
+        println!("\n{} ({}) {}", r.campaign, r.date, r.component);
+        println!("  {}", r.summary);
+        if !r.remedy.is_empty() {
+            println!("  Remedy: {}", r.remedy);
+        }
+    }
+    println!(
+        "\nWhether one vehicle is affected and still open: its VIN at {}",
+        nhtsa::VIN_RECALL_CHECK
+    );
     Ok(())
 }
 

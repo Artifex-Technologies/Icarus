@@ -37,6 +37,13 @@ report before it erases anything: the freeze frame goes with the codes, and ever
 clearing requests go out (OBD-II `04`, UDS `14 FF FF FF`, KWP2000 `14 FF 00`); permanent codes stay until their monitor
 passes. Every clear is in `~/.local/state/icarus/actions.log`.
 
+## NHTSA
+
+`icarus vin VIN --nhtsa` (or "Fill in from NHTSA" next to the vehicle's name) asks NHTSA's public vPIC database for the
+model, engine, trim and drive; it sends the VIN to NHTSA, so only when asked. `icarus recalls "2017 Toyota Tacoma"` (or the
+Recalls card) lists the recalls on record for that year, make and model, sending only those three; whether one vehicle is
+affected and still open is a VIN check at nhtsa.gov/recalls (the button opens it).
+
 ## Battery and charging
 
 `icarus obd charging --battery agm` (or the Battery and charging card): the voltage the engine computer sees for about 20

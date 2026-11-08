@@ -41,6 +41,12 @@ const PAGES: [(Page, &str); 8] = [
     (Page::Tools, "Tools"),
 ];
 
+/// Answers from the NHTSA thread.
+enum Bg {
+    Vin(Result<icarus_obd::nhtsa::VinDecode, String>),
+    Recalls(Result<Vec<icarus_obd::nhtsa::Recall>, String>),
+}
+
 #[derive(PartialEq, Eq)]
 enum Link {
     Off,
@@ -137,6 +143,12 @@ struct App {
     confirm_clear: Option<(Option<(u16, u16, Dialect)>, String)>,
     selftests: Option<Vec<icarus_obd::mode06::TestResult>>,
     battery_agm: bool,
+    /// NHTSA lookups run on their own thread; answers come back here.
+    bg_tx: Sender<Bg>,
+    bg_rx: Receiver<Bg>,
+    nhtsa: Option<icarus_obd::nhtsa::VinDecode>,
+    recalls: Option<Vec<icarus_obd::nhtsa::Recall>>,
+    asking: bool,
     charging: Option<icarus_obd::charging::Check>,
     /// The bus monitor: the source (adapter or a Linux CAN interface), its last view.
     bus_can: bool,
@@ -177,6 +189,7 @@ struct App {
 
 impl App {
     fn new(ctx: &egui::Context, start: Start) -> App {
+        let (bg_tx, bg_rx) = channel::<Bg>();
         let (tx, wrx) = channel();
         let (wtx, rx) = channel();
         let c = ctx.clone();
@@ -193,6 +206,11 @@ impl App {
             confirm_clear: None,
             selftests: None,
             battery_agm: true,
+            bg_tx: bg_tx.clone(),
+            bg_rx,
+            nhtsa: None,
+            recalls: None,
+            asking: false,
             charging: None,
             bus_can: false,
             bus_ifname: "can0".into(),
@@ -253,6 +271,33 @@ impl App {
             let _ = app.tx.send(Cmd::Connect(app.adapter.trim().to_string()));
         }
         app
+    }
+
+    fn background(&mut self) {
+        while let Ok(b) = self.bg_rx.try_recv() {
+            self.asking = false;
+            match b {
+                Bg::Vin(Ok(d)) => {
+                    self.name_edit = d.name();
+                    self.status = "NHTSA's answer is in the name field: Save keeps it.".into();
+                    self.nhtsa = Some(d);
+                }
+                Bg::Recalls(Ok(r)) => {
+                    self.status = format!("{} recall(s) on record.", r.len());
+                    self.recalls = Some(r);
+                }
+                Bg::Vin(Err(e)) | Bg::Recalls(Err(e)) => self.error = Some(e),
+            }
+        }
+    }
+
+    fn ask_nhtsa(&mut self, ctx: &egui::Context, job: impl FnOnce() -> Bg + Send + 'static) {
+        self.asking = true;
+        let (tx, c) = (self.bg_tx.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(job());
+            c.request_repaint();
+        });
     }
 
     fn events(&mut self) {
@@ -450,6 +495,8 @@ impl App {
         });
         let mut links: Vec<String> = Vec::new();
         let mut ask_clear = false;
+        let mut ask_vin = false;
+        let mut ask_recalls = false;
         let mut read_selftests = false;
         let mut measure = false;
         let mut save_name = false;
@@ -467,6 +514,9 @@ impl App {
                     .clicked()
                 {
                     save_name = true;
+                }
+                if ui.add_enabled(info.vin.is_some() && !self.asking, egui::Button::new("Fill in from NHTSA")).on_hover_text("Asks NHTSA (US Department of Transportation) for the model, engine and drive: this sends the VIN to NHTSA").clicked() {
+                    ask_vin = true;
                 }
                 if let Some(url) = info.vehicle.as_ref().and_then(lookup::parts_catalog) {
                     if ui.button("Parts catalog").on_hover_text(&url).clicked() {
@@ -568,6 +618,80 @@ impl App {
                 },
             );
         }
+        if let Some(d) = &self.nhtsa {
+            card(ui, pal, "NHTSA's record for this VIN", |ui| {
+                egui::Grid::new("vpic")
+                    .num_columns(2)
+                    .spacing(vec2(16.0, 4.0))
+                    .show(ui, |ui| {
+                        for (k, v) in [
+                            ("Model", d.name()),
+                            ("Trim", d.trim.clone()),
+                            ("Drive", d.drive.clone()),
+                            ("Body", d.body.clone()),
+                            ("Fuel", d.fuel.clone()),
+                            ("Built in", d.plant_country.clone()),
+                        ] {
+                            if !v.is_empty() {
+                                row(ui, k, &v);
+                            }
+                        }
+                    });
+                if let Some(n) = &d.note {
+                    ui.label(RichText::new(n).small().weak());
+                }
+            });
+        }
+        card(ui, pal, "Recalls", |ui| {
+            let named = info
+                .vehicle
+                .as_ref()
+                .filter(|v| v.year.is_some() && !v.make.is_empty() && !v.model.is_empty());
+            ui.label(RichText::new("Recalls on record at NHTSA for this year, make and model (only those three are sent).").weak());
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
+                        named.is_some() && !self.asking,
+                        egui::Button::new("Look up recalls"),
+                    )
+                    .clicked()
+                {
+                    ask_recalls = true;
+                }
+                if ui
+                    .button("Check this VIN at NHTSA")
+                    .on_hover_text(
+                        "Whether this vehicle is affected and still open (opens nhtsa.gov)",
+                    )
+                    .clicked()
+                {
+                    links.push(icarus_obd::nhtsa::VIN_RECALL_CHECK.to_string());
+                }
+                if named.is_none() {
+                    ui.label(
+                        RichText::new("Name the vehicle first (year make model).")
+                            .small()
+                            .weak(),
+                    );
+                }
+            });
+            if let Some(list) = &self.recalls {
+                if list.is_empty() {
+                    ui.label(RichText::new("None on record.").color(pal.green));
+                }
+                for r in list {
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(format!("{} ({}) {}", r.campaign, r.date, r.component))
+                            .strong(),
+                    );
+                    ui.label(&r.summary);
+                    if !r.remedy.is_empty() {
+                        ui.label(RichText::new(format!("Remedy: {}", r.remedy)).weak());
+                    }
+                }
+            }
+        });
         card(ui, pal, "Battery and charging", |ui| {
             ui.label(RichText::new("About 20 seconds of the voltage the engine computer sees. Engine running: is it charging this battery well. Engine off, after the vehicle has sat an hour: how charged it is.").weak());
             ui.horizontal(|ui| {
@@ -652,7 +776,7 @@ impl App {
         let vin = info.vin.clone();
         self.open_links(links);
         if save_name {
-            if let Some(v) = vin {
+            if let Some(v) = vin.clone() {
                 match garage::set(&v, &self.name_edit) {
                     Ok(()) => {
                         if let Some(i) = self.info.as_mut() {
@@ -668,6 +792,20 @@ impl App {
         if report {
             self.live_on = false;
             let _ = self.tx.send(Cmd::Report(self.report_all));
+        }
+        if ask_vin {
+            if let Some(v) = vin.clone() {
+                self.ask_nhtsa(ui.ctx(), move || Bg::Vin(icarus_obd::nhtsa::decode_vin(&v)));
+            }
+        }
+        if ask_recalls {
+            if let Some(v) = self.info.as_ref().and_then(|i| i.vehicle.clone()) {
+                if let Some(y) = v.year {
+                    self.ask_nhtsa(ui.ctx(), move || {
+                        Bg::Recalls(icarus_obd::nhtsa::recalls(&v.make, &v.model, y))
+                    });
+                }
+            }
         }
         if measure {
             self.live_on = false;
@@ -1885,6 +2023,7 @@ impl eframe::App for App {
         theme::apply(&ctx, dark, accent);
         let pal = theme::palette_for(dark, accent);
         self.events();
+        self.background();
 
         egui::Panel::left("pages")
             .default_size(190.0)
