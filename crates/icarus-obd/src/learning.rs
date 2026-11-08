@@ -4,8 +4,8 @@
 //! marks, what was learned, what was seen but not learned, and every diagnostic message in words.
 //!
 //! What Icarus cannot work out by itself (what an identifier is, what a routine did, why a write was refused) can go to
-//! Sarina, when she is installed: she reads the session file and answers, read-only (`sarina_question`). The file has no
-//! VIN in it.
+//! Sarina, only when Sarina is installed (`sarina`): Sarina reads the session file and answers, read-only
+//! (`sarina_question`). The file has no VIN in it.
 
 use crate::bus::{self, Analyzer};
 use crate::settings;
@@ -127,13 +127,21 @@ pub fn sessions(dir: &Path) -> Vec<PathBuf> {
     v
 }
 
-/// The program Sarina is asked through (Labyrinth's), when it is installed.
+/// The program Sarina is asked through, only when Sarina is installed. Sarina is optional: Labyrinth OS ships its
+/// `labyrinth-ask-sarina` on every system, so that alone does not count; Sarina's own program (`sarina`) must be there too.
+/// Nothing about Sarina is offered without it.
 pub fn sarina() -> Option<PathBuf> {
-    std::env::var_os("PATH").and_then(|path| {
-        std::env::split_paths(&path)
-            .map(|d| d.join("labyrinth-ask-sarina"))
+    sarina_in(&std::env::var_os("PATH")?)
+}
+
+fn sarina_in(path: &std::ffi::OsStr) -> Option<PathBuf> {
+    let find = |name: &str| {
+        std::env::split_paths(path)
+            .map(|d| d.join(name))
             .find(|p| p.is_file())
-    })
+    };
+    find("sarina")?;
+    find("labyrinth-ask-sarina")
 }
 
 /// What Sarina is asked about a saved session (she runs in its folder, read-only).
@@ -240,5 +248,28 @@ mod tests {
         assert_eq!(sessions(&dir).len(), 2);
         assert!(sarina_question(&p1).contains(p1.file_name().unwrap().to_str().unwrap()));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sarina_counts_only_when_she_is_installed() {
+        let root = std::env::temp_dir().join(format!("icarus-sarina-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (labyrinth, sarina) = (root.join("labyrinth"), root.join("sarina"));
+        std::fs::create_dir_all(&labyrinth).unwrap();
+        std::fs::create_dir_all(&sarina).unwrap();
+        std::fs::write(labyrinth.join("labyrinth-ask-sarina"), "").unwrap();
+        let only_labyrinth = std::env::join_paths([&labyrinth]).unwrap();
+        assert_eq!(
+            sarina_in(&only_labyrinth),
+            None,
+            "Labyrinth's ask script alone is not Sarina"
+        );
+        std::fs::write(sarina.join("sarina"), "").unwrap();
+        let both = std::env::join_paths([&labyrinth, &sarina]).unwrap();
+        assert_eq!(
+            sarina_in(&both),
+            Some(labyrinth.join("labyrinth-ask-sarina"))
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

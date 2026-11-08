@@ -116,7 +116,9 @@ Or the **Learning** page: Start learning, type what you are about to do and pres
 - **Naming and adding.** On the Learning page each learned setting gets a name and names for its values ("was"/"set"
   become "on"/"off"), and one button adds it to the vehicle's file (`~/.config/icarus/vehicles/MAKE.toml`); the Settings
   and Tests pages then offer it.
-- **Sarina**, when installed (optional): Ask Sarina on a session (or `--ask-sarina`) has Sarina read the file
+- **Sarina**, only when Sarina is installed (Sarina's own `sarina` program, not just Labyrinth's `labyrinth-ask-sarina`,
+  which every Labyrinth system has; without Sarina the page says nothing about Sarina): Ask Sarina on a session (or
+  `--ask-sarina`) has Sarina read the file
   (`labyrinth-ask-sarina`, read-only) and say what each setting most likely is, names for it and its values, and what the
   tool did that Icarus could not learn. Sarina's answer is a suggestion; the names are mine to give. Sarina can also open
   the sessions through `icarus mcp` (`learning_sessions`).

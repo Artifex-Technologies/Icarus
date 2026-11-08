@@ -51,7 +51,8 @@ Bus (watching only: nothing is sent onto the bus):
                                              type what you are about to do in it and press Enter (a mark), then do it;
                                              \"stop\" or Ctrl+C ends. The settings and tests it changed come out named by
                                              your marks, saved with everything seen in the vehicle's Logs folder;
-                                             --ask-sarina has Sarina read the session and say what she makes of it
+                                             --ask-sarina (only when Sarina is installed) has Sarina read the session
+                                             and say what Sarina makes of it
 
 Interfaces:
   icarus devices                             the tuners and interfaces plugged in (SCT, COBB, HP Tuners, CP210x/FTDI
@@ -1526,9 +1527,7 @@ fn cmd_learn(a: &[String]) -> Result<(), String> {
     )?;
     let ask = a.iter().any(|x| x == "--ask-sarina");
     if ask && icarus_obd::learning::sarina().is_none() {
-        return Err(
-            "--ask-sarina: Sarina is not installed (labyrinth-ask-sarina is not on PATH)".into(),
-        );
+        return Err("--ask-sarina: Sarina is not installed".into());
     }
     let secs: Option<f64> = args
         .opt("seconds")

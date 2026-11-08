@@ -1577,13 +1577,19 @@ impl App {
     }
 
     fn page_learn(&mut self, ui: &mut egui::Ui, pal: &theme::Palette) {
+        // Sarina is optional: nothing about her shows unless she is installed
+        let sarina = icarus_obd::learning::sarina().is_some();
         let running = self.bus.as_ref().is_some_and(|b| b.running && b.learning);
         let other_watch = self.bus.as_ref().is_some_and(|b| b.running && !b.learning);
         card(ui, pal, "Learning from another tool", |ui| {
             ui.label("Icarus learns a vehicle's settings and output tests by watching another tool use them on it: a dealer tool, a shop scan tool, a phone app that does customizations. It only listens; the other tool does the work.");
             ui.label("1. A Y-splitter on the OBD port: the other tool on one side, Icarus's adapter on the other (or a CAN interface tapped into the bus). Ignition on, engine off.");
             ui.label("2. Start learning. Before each change in the other tool, type what you are about to do (\"seat belt chime off\") and press Mark: what the module accepts next is named by it. One change per mark works best.");
-            ui.label("3. Stop. Name the values, add each to the vehicle's file; the Settings and Tests pages then offer them. The session is saved in the vehicle's Logs folder, and Sarina can read it and say what she makes of anything Icarus could not work out.");
+            ui.label(if sarina {
+                "3. Stop. Name the values, add each to the vehicle's file; the Settings and Tests pages then offer them. The session is saved in the vehicle's Logs folder, and Sarina can read it and say what she makes of anything Icarus could not work out."
+            } else {
+                "3. Stop. Name the values, add each to the vehicle's file; the Settings and Tests pages then offer them. The session is saved in the vehicle's Logs folder."
+            });
         });
         ui.horizontal(|ui| {
             ui.add_enabled_ui(!running && !other_watch, |ui| {
@@ -1769,7 +1775,11 @@ impl App {
         }
         if !self.learn_notes.is_empty() {
             card(ui, pal, "Seen but not learned", |ui| {
-                ui.label(RichText::new("What the other tool did that Icarus does not make into a setting or a test. Sarina can say what she makes of it.").weak());
+                ui.label(RichText::new(if sarina {
+                    "What the other tool did that Icarus does not make into a setting or a test. Sarina can say what she makes of it."
+                } else {
+                    "What the other tool did that Icarus does not make into a setting or a test."
+                }).weak());
                 for n in &self.learn_notes {
                     ui.label(format!("• {n}"));
                 }
@@ -1812,14 +1822,10 @@ impl App {
                 Err(e) => self.error = Some(e),
             }
         }
-        // Sarina, for what Icarus could not work out
-        let sarina = icarus_obd::learning::sarina().is_some();
+        // the saved sessions (Ask Sarina only when Sarina is installed)
         if !self.learn_sessions.is_empty() {
             let mut ask: Option<std::path::PathBuf> = None;
             card(ui, pal, "Sessions", |ui| {
-                if !sarina {
-                    ui.label(RichText::new("With Sarina installed (optional), she can read a session and say what each setting most likely is and what the tool did that Icarus could not learn.").weak());
-                }
                 for p in self.learn_sessions.iter().take(8) {
                     let name = p
                         .file_name()
@@ -1848,7 +1854,7 @@ impl App {
                 self.ask_sarina(ui.ctx(), p);
             }
         }
-        if let Some((name, answer)) = &self.sarina_answer {
+        if let Some((name, answer)) = self.sarina_answer.as_ref().filter(|_| sarina) {
             card(ui, pal, &format!("Sarina on {name}"), |ui| {
                 if self.sarina_busy {
                     ui.horizontal(|ui| {
