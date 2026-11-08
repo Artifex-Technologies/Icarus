@@ -15,9 +15,9 @@
 //! The tests themselves are data: `[[test]]` entries in a vehicle profile. Their IDs are each maker's own; a profile carries
 //! only IDs from a source, `checked = false` until seen working on a vehicle.
 
-use crate::link::Link;
 use crate::elm::{Answer, ObdError};
 use crate::j1979;
+use crate::link::Link;
 use serde::Deserialize;
 use std::time::{Duration, Instant};
 

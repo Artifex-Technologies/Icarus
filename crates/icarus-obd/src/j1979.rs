@@ -4,8 +4,8 @@
 //!
 //! Each value carries a short "about" so the numbers teach something while you watch them.
 
-use crate::link::Link;
 use crate::elm::{Answer, ObdError};
+use crate::link::Link;
 
 /// One entry per answering module: its header, what it most likely is, and what it said.
 pub type PerModule<T> = Vec<(String, &'static str, T)>;

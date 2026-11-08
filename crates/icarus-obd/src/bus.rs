@@ -300,18 +300,24 @@ impl Analyzer {
                 self.extended.remove(&id);
             }
             [0x62, hi, lo, v @ ..] if !v.is_empty() => {
-                self.read_values.insert((rx_tx, u16::from_be_bytes([*hi, *lo]), false), v.to_vec());
+                self.read_values
+                    .insert((rx_tx, u16::from_be_bytes([*hi, *lo]), false), v.to_vec());
             }
             [0x61, lid, v @ ..] if !v.is_empty() => {
-                self.read_values.insert((rx_tx, *lid as u16, true), v.to_vec());
+                self.read_values
+                    .insert((rx_tx, *lid as u16, true), v.to_vec());
             }
             [0x2E, hi, lo, v @ ..] if !v.is_empty() && v.len() <= 16 => {
-                self.pending_writes.insert((id, u16::from_be_bytes([*hi, *lo]), false), v.to_vec());
+                self.pending_writes
+                    .insert((id, u16::from_be_bytes([*hi, *lo]), false), v.to_vec());
             }
             [0x3B, lid, v @ ..] if !v.is_empty() && v.len() <= 16 => {
-                self.pending_writes.insert((id, *lid as u16, true), v.to_vec());
+                self.pending_writes
+                    .insert((id, *lid as u16, true), v.to_vec());
             }
-            [0x6E, hi, lo, ..] => self.setting_written(rx_tx, u16::from_be_bytes([*hi, *lo]), Protocol::Uds),
+            [0x6E, hi, lo, ..] => {
+                self.setting_written(rx_tx, u16::from_be_bytes([*hi, *lo]), Protocol::Uds)
+            }
             [0x7B, lid, ..] => self.setting_written(rx_tx, *lid as u16, Protocol::Kwp),
             _ => {}
         }
@@ -319,15 +325,29 @@ impl Analyzer {
 
     fn setting_written(&mut self, tx: u16, did: u16, protocol: Protocol) {
         let key = (tx, did, protocol == Protocol::Kwp);
-        let Some(value) = self.pending_writes.remove(&key) else { return };
-        let before = self.read_values.get(&key).filter(|b| b.len() == value.len()).cloned();
+        let Some(value) = self.pending_writes.remove(&key) else {
+            return;
+        };
+        let before = self
+            .read_values
+            .get(&key)
+            .filter(|b| b.len() == value.len())
+            .cloned();
         // what was written is what the module now holds
         self.read_values.insert(key, value.clone());
         let extended = protocol == Protocol::Uds && self.extended.contains(&tx);
-        if let Some(s) = self.settings.iter_mut().find(|s| s.module == tx && s.id == did && s.protocol == protocol) {
+        if let Some(s) = self
+            .settings
+            .iter_mut()
+            .find(|s| s.module == tx && s.id == did && s.protocol == protocol)
+        {
             s.extended |= extended;
-            if value.len() == s.values.values().next().map_or(0, Vec::len) && s.name_of(&value).is_none() {
-                let n = (2..).find(|n| !s.values.contains_key(&format!("set-{n}"))).unwrap_or(2);
+            if value.len() == s.values.values().next().map_or(0, Vec::len)
+                && s.name_of(&value).is_none()
+            {
+                let n = (2..)
+                    .find(|n| !s.values.contains_key(&format!("set-{n}")))
+                    .unwrap_or(2);
                 s.values.insert(format!("set-{n}"), value);
             }
             return;
@@ -525,12 +545,30 @@ mod tests {
         for (i, (id, d)) in convo.iter().enumerate() {
             a.add(&f(*id, d, i as f64));
         }
-        assert!(a.log[4].contains("write data by identifier: A001 to 00"), "{:?}", a.log);
+        assert!(
+            a.log[4].contains("write data by identifier: A001 to 00"),
+            "{:?}",
+            a.log
+        );
         assert_eq!(a.settings.len(), 1, "{:?}", a.settings);
         let s = &a.settings[0];
-        assert_eq!((s.module, s.id, s.protocol, s.extended, s.checked), (0x7C0, 0xA001, Protocol::Uds, true, false));
-        let v: Vec<(&str, &[u8])> = s.values.iter().map(|(k, v)| (k.as_str(), v.as_slice())).collect();
-        assert_eq!(v, vec![("set", &[0x00][..]), ("set-2", &[0x02][..]), ("was", &[0x01][..])]);
+        assert_eq!(
+            (s.module, s.id, s.protocol, s.extended, s.checked),
+            (0x7C0, 0xA001, Protocol::Uds, true, false)
+        );
+        let v: Vec<(&str, &[u8])> = s
+            .values
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_slice()))
+            .collect();
+        assert_eq!(
+            v,
+            vec![
+                ("set", &[0x00][..]),
+                ("set-2", &[0x02][..]),
+                ("was", &[0x01][..])
+            ]
+        );
         let entry = crate::settings::to_toml(s);
         let p = crate::vehicles::parse("x", "test", &format!("name = \"x\"\n{entry}")).unwrap();
         assert_eq!(&p.settings[0], s, "{entry}");

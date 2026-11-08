@@ -6,9 +6,9 @@
 //! trouble codes, tester present). Clearing codes, writing data, routines, security access and programming are refused here
 //! until Icarus has the safety steps of docs/PLAN.md section 4.
 
-use crate::link::Link;
 use crate::elm::{Answer, ObdError};
 use crate::j1979::dtc;
+use crate::link::Link;
 use std::thread::sleep;
 use std::time::Duration;
 

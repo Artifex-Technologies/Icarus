@@ -65,13 +65,38 @@ impl SettingDef {
     /// Why this definition is refused, whatever it says.
     pub fn refused(&self) -> Option<String> {
         let words = format!("{} {}", self.name, self.note).to_lowercase();
-        if SRS_IDS.contains(&self.module) || ["airbag", "srs", "restraint", "occupant", "pretension", "squib"].iter().any(|w| words.contains(w)) {
+        if SRS_IDS.contains(&self.module)
+            || [
+                "airbag",
+                "srs",
+                "restraint",
+                "occupant",
+                "pretension",
+                "squib",
+            ]
+            .iter()
+            .any(|w| words.contains(w))
+        {
             return Some("airbag and occupant-detection modules are never changed".into());
         }
-        if ["immobil", "transponder", "smart key", "key code", "pats", "anti-theft", "antitheft"].iter().any(|w| words.contains(w)) {
+        if [
+            "immobil",
+            "transponder",
+            "smart key",
+            "key code",
+            "pats",
+            "anti-theft",
+            "antitheft",
+        ]
+        .iter()
+        .any(|w| words.contains(w))
+        {
             return Some("immobiliser and key settings are never changed".into());
         }
-        if ["odometer", "mileage", "odo "].iter().any(|w| words.contains(w)) {
+        if ["odometer", "mileage", "odo "]
+            .iter()
+            .any(|w| words.contains(w))
+        {
             return Some("odometer values are never changed".into());
         }
         if self.protocol == Protocol::Kwp && self.id > 0xFF {
@@ -81,9 +106,13 @@ impl SettingDef {
             return Some("not an 11-bit CAN ID".into());
         }
         let mut lens = self.values.values().map(Vec::len);
-        let Some(len) = lens.next() else { return Some("a setting needs at least one value".into()) };
+        let Some(len) = lens.next() else {
+            return Some("a setting needs at least one value".into());
+        };
         if len == 0 || len > MAX_LEN || lens.any(|l| l != len) {
-            return Some(format!("every value is the same length, 1 to {MAX_LEN} bytes"));
+            return Some(format!(
+                "every value is the same length, 1 to {MAX_LEN} bytes"
+            ));
         }
         None
     }
@@ -107,8 +136,14 @@ impl SettingDef {
     /// The value's bytes from a read answer (62 hi lo ... / 61 lid ...).
     fn value_in(&self, a: &Answer) -> Option<Vec<u8>> {
         match (self.protocol, a.data.as_slice()) {
-            (Protocol::Uds, [0x62, hi, lo, v @ ..]) if u16::from_be_bytes([*hi, *lo]) == self.id && !v.is_empty() => Some(v.to_vec()),
-            (Protocol::Kwp, [0x61, lid, v @ ..]) if *lid as u16 == self.id && !v.is_empty() => Some(v.to_vec()),
+            (Protocol::Uds, [0x62, hi, lo, v @ ..])
+                if u16::from_be_bytes([*hi, *lo]) == self.id && !v.is_empty() =>
+            {
+                Some(v.to_vec())
+            }
+            (Protocol::Kwp, [0x61, lid, v @ ..]) if *lid as u16 == self.id && !v.is_empty() => {
+                Some(v.to_vec())
+            }
             _ => None,
         }
     }
@@ -123,7 +158,10 @@ impl SettingDef {
 
     /// The name of a value, when it is one of the setting's.
     pub fn name_of(&self, value: &[u8]) -> Option<&str> {
-        self.values.iter().find(|(_, v)| v.as_slice() == value).map(|(n, _)| n.as_str())
+        self.values
+            .iter()
+            .find(|(_, v)| v.as_slice() == value)
+            .map(|(n, _)| n.as_str())
     }
 }
 
@@ -141,18 +179,26 @@ pub fn check(data: &[u8]) -> Result<(), String> {
     if ok {
         Ok(())
     } else {
-        Err(format!("refused: {data:02X?} is not a request the settings path sends"))
+        Err(format!(
+            "refused: {data:02X?} is not a request the settings path sends"
+        ))
     }
 }
 
 fn send(link: &mut dyn Link, s: &SettingDef, data: &[u8]) -> Result<Answer, String> {
     check(data)?;
     for _ in 0..4 {
-        let a = link.request_to(s.module, s.rx(), data).map_err(|e| e.to_string())?;
-        let Some(a) = a.into_iter().last() else { return Err("no answer".into()) };
+        let a = link
+            .request_to(s.module, s.rx(), data)
+            .map_err(|e| e.to_string())?;
+        let Some(a) = a.into_iter().last() else {
+            return Err("no answer".into());
+        };
         match a.refusal() {
             Some((_, 0x78)) | Some((_, 0x21)) => std::thread::sleep(Duration::from_millis(300)),
-            Some((_, code)) => return Err(format!("the module refused: {}", crate::uds::nrc(code))),
+            Some((_, code)) => {
+                return Err(format!("the module refused: {}", crate::uds::nrc(code)))
+            }
             None => return Ok(a),
         }
     }
@@ -165,7 +211,9 @@ pub fn read(link: &mut dyn Link, s: &SettingDef) -> Result<(Vec<u8>, Option<Stri
         return Err(why);
     }
     let a = send(link, s, &s.read_request())?;
-    let v = s.value_in(&a).ok_or_else(|| format!("an answer that is not the value: {:02X?}", a.data))?;
+    let v = s
+        .value_in(&a)
+        .ok_or_else(|| format!("an answer that is not the value: {:02X?}", a.data))?;
     let name = s.name_of(&v).map(str::to_string);
     Ok((v, name))
 }
@@ -182,7 +230,14 @@ pub struct Change {
 
 impl Change {
     fn line(&self, when: &str) -> String {
-        format!("{when}\t{}\t{:03X}\t{:04X}\t{}\t{}", self.setting, self.module, self.id, hexs(&self.before), hexs(&self.after))
+        format!(
+            "{when}\t{}\t{:03X}\t{:04X}\t{}\t{}",
+            self.setting,
+            self.module,
+            self.id,
+            hexs(&self.before),
+            hexs(&self.after)
+        )
     }
 }
 
@@ -194,7 +249,10 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
     if s.is_empty() || !s.len().is_multiple_of(2) || !s.is_ascii() {
         return None;
     }
-    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok()).collect()
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
 }
 
 /// The vehicle's change log (`Logs/settings-changes.tsv` in its folder): when, setting, module, identifier, before, after.
@@ -207,7 +265,11 @@ fn append(log: &Path, c: &Change) -> Result<(), String> {
         std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
     }
     use std::io::Write;
-    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(log).map_err(|e| format!("{}: {e}", log.display()))?;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log)
+        .map_err(|e| format!("{}: {e}", log.display()))?;
     writeln!(f, "{}", c.line(&crate::report::now())).map_err(|e| e.to_string())
 }
 
@@ -216,12 +278,23 @@ pub fn last_change(log: &Path, s: &SettingDef) -> Option<Change> {
     let text = std::fs::read_to_string(log).ok()?;
     text.lines().rev().find_map(|l| {
         let f: Vec<&str> = l.split('\t').collect();
-        let [_, name, module, id, before, after] = f.as_slice() else { return None };
-        let (module, id) = (u16::from_str_radix(module, 16).ok()?, u16::from_str_radix(id, 16).ok()?);
+        let [_, name, module, id, before, after] = f.as_slice() else {
+            return None;
+        };
+        let (module, id) = (
+            u16::from_str_radix(module, 16).ok()?,
+            u16::from_str_radix(id, 16).ok()?,
+        );
         if module != s.module || id != s.id {
             return None;
         }
-        Some(Change { setting: name.to_string(), module, id, before: unhex(before)?, after: unhex(after)? })
+        Some(Change {
+            setting: name.to_string(),
+            module,
+            id,
+            before: unhex(before)?,
+            after: unhex(after)?,
+        })
     })
 }
 
@@ -243,7 +316,12 @@ pub fn ready(link: &mut dyn Link, s: &SettingDef) -> Result<(), String> {
 /// Changes the setting to `value` (bytes): conditions and battery first, the value there before read and written to `log`,
 /// the new one written and read back (the old one written back if it did not take). Returns the change, or None when the
 /// setting already had that value (nothing written).
-pub fn change(link: &mut dyn Link, s: &SettingDef, value: &[u8], log: &Path) -> Result<Option<Change>, String> {
+pub fn change(
+    link: &mut dyn Link,
+    s: &SettingDef,
+    value: &[u8],
+    log: &Path,
+) -> Result<Option<Change>, String> {
     if let Some(why) = s.refused() {
         return Err(why);
     }
@@ -261,9 +339,16 @@ pub fn change(link: &mut dyn Link, s: &SettingDef, value: &[u8], log: &Path) -> 
         if before == value {
             return Ok(None);
         }
-        let c = Change { setting: s.name.clone(), module: s.module, id: s.id, before: before.clone(), after: value.to_vec() };
+        let c = Change {
+            setting: s.name.clone(),
+            module: s.module,
+            id: s.id,
+            before: before.clone(),
+            after: value.to_vec(),
+        };
         // the way back is on disk before anything is written
-        append(log, &c).map_err(|e| format!("not changed: the change log could not be written ({e})"))?;
+        append(log, &c)
+            .map_err(|e| format!("not changed: the change log could not be written ({e})"))?;
         send(link, s, &s.write_request(value))?;
         let (now, _) = read(link, s)?;
         if now != value {
@@ -272,10 +357,21 @@ pub fn change(link: &mut dyn Link, s: &SettingDef, value: &[u8], log: &Path) -> 
                 "the module kept {} instead of {}; {}",
                 hexs(&now),
                 hexs(value),
-                if back.is_ok() { format!("{} written back", hexs(&before)) } else { "writing the old value back failed too".into() }
+                if back.is_ok() {
+                    format!("{} written back", hexs(&before))
+                } else {
+                    "writing the old value back failed too".into()
+                }
             ));
         }
-        crate::audit::log(&format!("setting {:?} on {:03X} {:04X}: {} -> {}", s.name, s.module, s.id, hexs(&before), hexs(value)));
+        crate::audit::log(&format!(
+            "setting {:?} on {:03X} {:04X}: {} -> {}",
+            s.name,
+            s.module,
+            s.id,
+            hexs(&before),
+            hexs(value)
+        ));
         Ok(Some(c))
     })();
     if session {
@@ -286,18 +382,43 @@ pub fn change(link: &mut dyn Link, s: &SettingDef, value: &[u8], log: &Path) -> 
 
 /// Puts the setting back to what it was before its last change in `log`.
 pub fn undo(link: &mut dyn Link, s: &SettingDef, log: &Path) -> Result<Option<Change>, String> {
-    let last = last_change(log, s).ok_or_else(|| format!("no change of {} in {}", s.name, log.display()))?;
+    let last = last_change(log, s)
+        .ok_or_else(|| format!("no change of {} in {}", s.name, log.display()))?;
     change(link, s, &last.before, log)
 }
 
 /// A `[[setting]]` entry for a vehicle profile.
 pub fn to_toml(s: &SettingDef) -> String {
-    let mut t = format!("[[setting]]\nname = {:?}\nmodule = 0x{:03X}\n", s.name, s.module);
+    let mut t = format!(
+        "[[setting]]\nname = {:?}\nmodule = 0x{:03X}\n",
+        s.name, s.module
+    );
     if let Some(rx) = s.rx {
         t += &format!("rx = 0x{rx:03X}\n");
     }
-    t += &format!("protocol = \"{}\"\nid = 0x{:X}\n", if s.protocol == Protocol::Uds { "uds" } else { "kwp" }, s.id);
-    let vals: Vec<String> = s.values.iter().map(|(n, v)| format!("{} = [{}]", toml_key(n), v.iter().map(|b| format!("0x{b:02X}")).collect::<Vec<_>>().join(", "))).collect();
+    t += &format!(
+        "protocol = \"{}\"\nid = 0x{:X}\n",
+        if s.protocol == Protocol::Uds {
+            "uds"
+        } else {
+            "kwp"
+        },
+        s.id
+    );
+    let vals: Vec<String> = s
+        .values
+        .iter()
+        .map(|(n, v)| {
+            format!(
+                "{} = [{}]",
+                toml_key(n),
+                v.iter()
+                    .map(|b| format!("0x{b:02X}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+        .collect();
     t += &format!("values = {{ {} }}\n", vals.join(", "));
     if s.extended {
         t += "extended = true\n";
@@ -322,7 +443,10 @@ pub fn to_toml(s: &SettingDef) -> String {
 }
 
 fn toml_key(k: &str) -> String {
-    if !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+    if !k.is_empty()
+        && k.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
         k.to_string()
     } else {
         format!("{k:?}")
@@ -336,7 +460,10 @@ mod tests {
     use crate::sim::SimCar;
 
     fn chime() -> SettingDef {
-        crate::sim::settings().into_iter().find(|s| s.module == 0x7C0).unwrap()
+        crate::sim::settings()
+            .into_iter()
+            .find(|s| s.module == 0x7C0)
+            .unwrap()
     }
 
     fn scratch(name: &str) -> std::path::PathBuf {
@@ -352,11 +479,25 @@ mod tests {
         let dir = scratch("change");
         let log = log_path(&dir);
         assert_eq!(read(&mut elm, &s).unwrap(), (vec![0x01], Some("on".into())));
-        let c = change(&mut elm, &s, &s.values["off"], &log).unwrap().unwrap();
-        assert_eq!((c.before.clone(), c.after.clone()), (vec![0x01], vec![0x00]));
+        let c = change(&mut elm, &s, &s.values["off"], &log)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (c.before.clone(), c.after.clone()),
+            (vec![0x01], vec![0x00])
+        );
         assert_eq!(read(&mut elm, &s).unwrap().1.as_deref(), Some("off"));
-        assert_eq!(last_change(&log, &s), Some(c), "the way back is in the vehicle's log");
-        assert!(change(&mut elm, &s, &s.values["off"], &log).unwrap().is_none(), "already so: nothing written");
+        assert_eq!(
+            last_change(&log, &s),
+            Some(c),
+            "the way back is in the vehicle's log"
+        );
+        assert!(
+            change(&mut elm, &s, &s.values["off"], &log)
+                .unwrap()
+                .is_none(),
+            "already so: nothing written"
+        );
         undo(&mut elm, &s, &log).unwrap();
         assert_eq!(read(&mut elm, &s).unwrap().1.as_deref(), Some("on"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -364,10 +505,18 @@ mod tests {
 
     #[test]
     fn kwp_settings_and_the_conditions() {
-        let s = crate::sim::settings().into_iter().find(|s| s.protocol == Protocol::Kwp).unwrap();
+        let s = crate::sim::settings()
+            .into_iter()
+            .find(|s| s.protocol == Protocol::Kwp)
+            .unwrap();
         let dir = scratch("kwp");
         let mut running = Elm::connect(Box::new(SimCar::new())).unwrap();
-        assert!(change(&mut running, &s, &s.values["on"], &log_path(&dir)).unwrap_err().contains("engine must be off"), "parked, engine off");
+        assert!(
+            change(&mut running, &s, &s.values["on"], &log_path(&dir))
+                .unwrap_err()
+                .contains("engine must be off"),
+            "parked, engine off"
+        );
         let mut off = Elm::connect(Box::new(SimCar::engine_off())).unwrap();
         change(&mut off, &s, &s.values["on"], &log_path(&dir)).unwrap();
         assert_eq!(read(&mut off, &s).unwrap().1.as_deref(), Some("on"));
@@ -380,7 +529,9 @@ mod tests {
         let mut link = PassThruLink::connect(SimPassThru::new(SimCar::engine_off())).unwrap();
         let s = chime();
         let dir = scratch("j2534");
-        change(&mut link, &s, &s.values["off"], &log_path(&dir)).unwrap().unwrap();
+        change(&mut link, &s, &s.values["off"], &log_path(&dir))
+            .unwrap()
+            .unwrap();
         assert_eq!(read(&mut link, &s).unwrap().1.as_deref(), Some("off"));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -393,10 +544,16 @@ mod tests {
         let dir = scratch("refused");
         let e = change(&mut elm, &s, &[0x02], &log_path(&dir)).unwrap_err();
         assert!(e.contains("refused"), "{e}");
-        assert_eq!(read(&mut elm, &s).unwrap().1.as_deref(), Some("on"), "unchanged");
+        assert_eq!(
+            read(&mut elm, &s).unwrap().1.as_deref(),
+            Some("on"),
+            "unchanged"
+        );
         let mut no_session = chime();
         no_session.extended = false;
-        assert!(change(&mut elm, &no_session, &[0x00], &log_path(&dir)).unwrap_err().contains("refused"));
+        assert!(change(&mut elm, &no_session, &[0x00], &log_path(&dir))
+            .unwrap_err()
+            .contains("refused"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -414,7 +571,11 @@ mod tests {
         let mut s = chime();
         s.values.insert("long".into(), vec![0, 0]);
         assert!(s.refused().is_some(), "values of different lengths");
-        assert!(check(&[0x27, 0x01]).is_err() && check(&[0x31, 0x01, 0xFF, 0x00]).is_err() && check(&[0x34, 0, 0x44]).is_err());
+        assert!(
+            check(&[0x27, 0x01]).is_err()
+                && check(&[0x31, 0x01, 0xFF, 0x00]).is_err()
+                && check(&[0x34, 0, 0x44]).is_err()
+        );
         assert!(check(&[0x2E, 0xA0, 0x01, 0x00]).is_ok() && check(&[0x2E, 0xA0, 0x01]).is_err());
     }
 

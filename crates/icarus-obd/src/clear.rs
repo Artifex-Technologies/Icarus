@@ -8,8 +8,8 @@
 //! - permanent codes are not cleared by any of these: they go when the monitor that set them passes again;
 //! - every clear is written to the action log.
 
-use crate::link::Link;
 use crate::actuator::{conditions_hold, Condition};
+use crate::link::Link;
 use crate::uds::Dialect;
 
 pub fn check(data: &[u8]) -> Result<(), String> {

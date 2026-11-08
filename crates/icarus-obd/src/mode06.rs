@@ -6,9 +6,9 @@
 //! test ID (TID), unit and scaling ID (UASID), value, minimum, maximum. Pass or fail compares the raw numbers, which needs no
 //! scaling; a value in real units is shown only for the scalings Icarus knows for certain.
 
-use crate::link::Link;
 use crate::elm::ObdError;
 use crate::j1979::bitmap;
+use crate::link::Link;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TestResult {

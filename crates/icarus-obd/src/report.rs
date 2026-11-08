@@ -3,11 +3,11 @@
 //! search and parts links), the freeze frame, the modules and a snapshot of live values. Reports hold the VIN: they are
 //! saved on this computer (`~/Documents/Icarus/reports` by default) and never sent anywhere.
 
-use crate::link::Link;
 use crate::dtc;
 use crate::elm::ObdError;
 use crate::garage::{self, Described};
 use crate::j1979::{self, DtcKind, FreezeFrame, Monitors};
+use crate::link::Link;
 use crate::lookup;
 use crate::uds::{self, Dialect, ModuleDtc};
 use crate::vehicles::{self, ModuleAddr, Profile};
@@ -61,7 +61,11 @@ pub fn now() -> String {
 }
 
 /// Everything the standard services give (and, with `scan`, every module of the profile), read-only.
-pub fn collect(elm: &mut dyn Link, profiles: &[Profile], scan: bool) -> Result<Diagnosis, ObdError> {
+pub fn collect(
+    elm: &mut dyn Link,
+    profiles: &[Profile],
+    scan: bool,
+) -> Result<Diagnosis, ObdError> {
     let mut d = Diagnosis {
         when: now(),
         adapter: elm.adapter(),

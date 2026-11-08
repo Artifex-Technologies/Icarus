@@ -66,7 +66,9 @@ impl SimCar {
             driven: Default::default(),
             cleared: Default::default(),
             monitoring: None,
-            settings: [((0x7C0, 0xA001), vec![0x01]), ((0x7B0, 0x20), vec![0x00])].into_iter().collect(),
+            settings: [((0x7C0, 0xA001), vec![0x01]), ((0x7B0, 0x20), vec![0x00])]
+                .into_iter()
+                .collect(),
         }
     }
 
@@ -360,7 +362,9 @@ impl SimCar {
     /// followed by the real answer, as a module does (the simulated ELM327 leaves asking again to its caller).
     pub fn module_answers(&mut self, tx: u16, req: &[u8]) -> Vec<Vec<u8>> {
         self.tick += 1;
-        let Some(first) = self.module(tx, req) else { return vec![] };
+        let Some(first) = self.module(tx, req) else {
+            return vec![];
+        };
         if first.len() >= 3 && first[0] == 0x7F && first[2] == 0x78 {
             return [vec![first], self.module(tx, req).into_iter().collect()].concat();
         }
@@ -448,7 +452,9 @@ impl SimCar {
             ([0x18, ..], false) => Some([&[0x58, (codes.len() / 3) as u8][..], codes].concat()),
             // settings: the cluster's chime (UDS, changed only in the extended session), the ABS module's buzzer (KWP2000,
             // changed only with the engine off)
-            ([0x22, 0xA0, 0x01], true) if tx == 0x7C0 => Some([&[0x62, 0xA0, 0x01][..], &self.settings[&(tx, 0xA001)]].concat()),
+            ([0x22, 0xA0, 0x01], true) if tx == 0x7C0 => {
+                Some([&[0x62, 0xA0, 0x01][..], &self.settings[&(tx, 0xA001)]].concat())
+            }
             ([0x2E, hi, lo, v @ ..], true) if tx == 0x7C0 => {
                 if u16::from_be_bytes([*hi, *lo]) != 0xA001 {
                     return refuse(0x31);
@@ -462,7 +468,9 @@ impl SimCar {
                 self.settings.insert((tx, 0xA001), v.to_vec());
                 Some(vec![0x6E, *hi, *lo])
             }
-            ([0x21, 0x20], false) if tx == 0x7B0 => Some([&[0x61, 0x20][..], &self.settings[&(tx, 0x20)]].concat()),
+            ([0x21, 0x20], false) if tx == 0x7B0 => {
+                Some([&[0x61, 0x20][..], &self.settings[&(tx, 0x20)]].concat())
+            }
             ([0x3B, 0x20, v @ ..], false) if tx == 0x7B0 => {
                 if self.engine_on {
                     return refuse(0x22);
@@ -744,21 +752,40 @@ mod tests {
 /// in this simulation.
 pub fn settings() -> Vec<crate::settings::SettingDef> {
     use crate::actuator::{Condition::*, Protocol};
-    let s = |name: &str, module: u16, protocol: Protocol, id: u16, extended: bool| crate::settings::SettingDef {
-        name: name.into(),
-        module,
-        rx: None,
-        protocol,
-        id,
-        values: [("off".to_string(), vec![0x00]), ("on".to_string(), vec![0x01])].into_iter().collect(),
-        extended,
-        conditions: vec![EngineOff, Stationary],
-        note: String::new(),
-        checked: true,
+    let s = |name: &str, module: u16, protocol: Protocol, id: u16, extended: bool| {
+        crate::settings::SettingDef {
+            name: name.into(),
+            module,
+            rx: None,
+            protocol,
+            id,
+            values: [
+                ("off".to_string(), vec![0x00]),
+                ("on".to_string(), vec![0x01]),
+            ]
+            .into_iter()
+            .collect(),
+            extended,
+            conditions: vec![EngineOff, Stationary],
+            note: String::new(),
+            checked: true,
+        }
     };
     vec![
-        s("Cluster: seat belt chime", 0x7C0, Protocol::Uds, 0xA001, true),
-        s("ABS: buzzer when the system is switched off", 0x7B0, Protocol::Kwp, 0x20, false),
+        s(
+            "Cluster: seat belt chime",
+            0x7C0,
+            Protocol::Uds,
+            0xA001,
+            true,
+        ),
+        s(
+            "ABS: buzzer when the system is switched off",
+            0x7B0,
+            Protocol::Kwp,
+            0x20,
+            false,
+        ),
     ]
 }
 
@@ -864,10 +891,18 @@ mod monitor_tests {
         assert_eq!(ended, "stopped");
         assert!(a.ids.contains_key(&0x2C4) && a.ids.contains_key(&0x610));
         assert_eq!(a.learned.len(), 2, "{:?}", a.learned);
-        assert_eq!(a.settings.len(), 2, "the cluster's and the ABS module's setting: {:?}", a.settings);
+        assert_eq!(
+            a.settings.len(),
+            2,
+            "the cluster's and the ABS module's setting: {:?}",
+            a.settings
+        );
         let chime = a.settings.iter().find(|s| s.module == 0x7C0).unwrap();
         assert_eq!((chime.id, chime.extended), (0xA001, true));
-        assert_eq!((chime.values["was"].clone(), chime.values["set"].clone()), (vec![0x01], vec![0x00]));
+        assert_eq!(
+            (chime.values["was"].clone(), chime.values["set"].clone()),
+            (vec![0x01], vec![0x00])
+        );
         // the adapter answers normally afterwards
         assert_eq!(crate::j1979::vin(&mut elm).unwrap().as_deref(), Some(VIN));
     }

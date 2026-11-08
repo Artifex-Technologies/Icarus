@@ -8,8 +8,8 @@ use icarus_obd::elm::Elm;
 use icarus_obd::j1979::{self, DtcKind};
 use icarus_obd::port::Target;
 use icarus_obd::{
-    actuator, audit, bus, charging, clear, dtc, garage, lookup, mode06, nhtsa, report, settings, sim,
-    socketcan, uds, vehicles, vin,
+    actuator, audit, bus, charging, clear, dtc, garage, lookup, mode06, nhtsa, report, settings,
+    sim, socketcan, uds, vehicles, vin,
 };
 mod mcp;
 
@@ -1149,11 +1149,19 @@ fn obd_settings(elm: &mut Elm) -> Result<(), String> {
             s.name,
             s.module,
             s.protocol.label(),
-            if s.checked { "" } else { ", not yet checked on a vehicle" }
+            if s.checked {
+                ""
+            } else {
+                ", not yet checked on a vehicle"
+            }
         );
         println!(
             "    now: {now}   values: {}",
-            s.values.keys().map(String::as_str).collect::<Vec<_>>().join(", ")
+            s.values
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
         );
         if !s.note.is_empty() {
             println!("    {}", s.note);
@@ -1175,7 +1183,11 @@ fn obd_setting(args: &Args, undo: bool) -> Result<(), String> {
             .into())
         }
     };
-    let spec = args.opt("adapter").map(str::to_string).or_else(|| std::env::var("ICARUS_ADAPTER").ok()).unwrap_or_default();
+    let spec = args
+        .opt("adapter")
+        .map(str::to_string)
+        .or_else(|| std::env::var("ICARUS_ADAPTER").ok())
+        .unwrap_or_default();
     if let Ok(t) = Target::parse(&spec) {
         if !t.wired() {
             return Err("changing a setting writes the module's memory: use a wired adapter (USB), not Bluetooth or Wi-Fi".into());
@@ -1186,12 +1198,24 @@ fn obd_setting(args: &Args, undo: bool) -> Result<(), String> {
     let n = name.to_lowercase();
     let hits: Vec<&settings::SettingDef> = match list.iter().find(|s| s.name.to_lowercase() == n) {
         Some(s) => vec![s],
-        None => list.iter().filter(|s| s.name.to_lowercase().contains(&n)).collect(),
+        None => list
+            .iter()
+            .filter(|s| s.name.to_lowercase().contains(&n))
+            .collect(),
     };
     let s = match hits.as_slice() {
         [s] => *s,
-        [] => return Err(format!("no setting matches {name:?} (icarus obd settings lists them)")),
-        _ => return Err(format!("{name:?} matches {} settings; be more exact", hits.len())),
+        [] => {
+            return Err(format!(
+                "no setting matches {name:?} (icarus obd settings lists them)"
+            ))
+        }
+        _ => {
+            return Err(format!(
+                "{name:?} matches {} settings; be more exact",
+                hits.len()
+            ))
+        }
     };
     let log = settings_log(vin.as_deref())?;
     let target = match value {
@@ -1199,7 +1223,11 @@ fn obd_setting(args: &Args, undo: bool) -> Result<(), String> {
             format!(
                 "{} takes {} (a value not seen on the vehicle goes into its profile first)",
                 s.name,
-                s.values.keys().map(String::as_str).collect::<Vec<_>>().join(", ")
+                s.values
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )
         })?,
         None => {
@@ -1209,7 +1237,13 @@ fn obd_setting(args: &Args, undo: bool) -> Result<(), String> {
         }
     };
     let (now, _) = settings::read(&mut elm, s)?;
-    println!("{} on module {:03X}: {} -> {}", s.name, s.module, s.show(&now), s.show(&target));
+    println!(
+        "{} on module {:03X}: {} -> {}",
+        s.name,
+        s.module,
+        s.show(&now),
+        s.show(&target)
+    );
     if now == target {
         println!("Already so: nothing to write.");
         return Ok(());
@@ -1223,7 +1257,9 @@ fn obd_setting(args: &Args, undo: bool) -> Result<(), String> {
         print!("Type yes to change it: ");
         std::io::stdout().flush().ok();
         let mut line = String::new();
-        std::io::stdin().read_line(&mut line).map_err(|x| x.to_string())?;
+        std::io::stdin()
+            .read_line(&mut line)
+            .map_err(|x| x.to_string())?;
         if line.trim() != "yes" {
             return Err("not changed".into());
         }
@@ -1688,14 +1724,32 @@ fn cmd_devices() -> Result<(), String> {
     let found = devices::scan(std::path::Path::new("/sys/bus/usb/devices"));
     if found.is_empty() {
         println!("No tuner or vehicle interface Icarus knows is plugged in.");
-        println!("Known: {}.", devices::KNOWN.iter().filter(|k| k.product.is_some()).map(|k| format!("{} {}", k.maker, k.name)).collect::<Vec<_>>().join(", "));
+        println!(
+            "Known: {}.",
+            devices::KNOWN
+                .iter()
+                .filter(|k| k.product.is_some())
+                .map(|k| format!("{} {}", k.maker, k.name))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
         return Ok(());
     }
     for f in &found {
-        println!("{} {}  ({:04x}:{:04x}{})", f.known.maker, f.known.name, f.vendor, f.product, if f.label.is_empty() { String::new() } else { format!(", says \"{}\"", f.label) });
+        println!(
+            "{} {}  ({:04x}:{:04x}{})",
+            f.known.maker,
+            f.known.name,
+            f.vendor,
+            f.product,
+            if f.label.is_empty() {
+                String::new()
+            } else {
+                format!(", says \"{}\"", f.label)
+            }
+        );
         println!("    {}", f.status(devices::can_open));
         println!("    {}", f.known.note);
     }
     Ok(())
 }
-

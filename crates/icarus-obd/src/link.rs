@@ -28,12 +28,22 @@ impl Link for Elm {
         self.protocol
     }
     fn adapter(&self) -> String {
-        format!("{}{}", self.id, self.stn.as_ref().map(|s| format!(" ({s})")).unwrap_or_default())
+        format!(
+            "{}{}",
+            self.id,
+            self.stn
+                .as_ref()
+                .map(|s| format!(" ({s})"))
+                .unwrap_or_default()
+        )
     }
     fn voltage(&mut self) -> Option<f64> {
         self.command("ATRV", std::time::Duration::from_secs(2))
             .ok()
-            .and_then(|r| r.first().and_then(|v| v.trim().trim_end_matches('V').parse::<f64>().ok()))
+            .and_then(|r| {
+                r.first()
+                    .and_then(|v| v.trim().trim_end_matches('V').parse::<f64>().ok())
+            })
             .or(self.voltage)
     }
 }

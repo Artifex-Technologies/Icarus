@@ -50,7 +50,8 @@ pub trait PassThru {
     /// flow control for them is sent to `tx`. Returns the filter's ID.
     fn flow_control(&mut self, channel: u32, tx: u32, rx: u32) -> Result<u32, ObdError>;
     /// Sends one message (PassThruWriteMsgs).
-    fn write(&mut self, channel: u32, msg: &PassThruMsg, timeout: Duration) -> Result<(), ObdError>;
+    fn write(&mut self, channel: u32, msg: &PassThruMsg, timeout: Duration)
+        -> Result<(), ObdError>;
     /// The next message received on the channel, or None when none came in `timeout` (PassThruReadMsgs).
     fn read(&mut self, channel: u32, timeout: Duration) -> Result<Option<PassThruMsg>, ObdError>;
     /// The voltage at the OBD port (PassThruIoctl READ_VBATT), when the device measures it.
@@ -84,8 +85,18 @@ impl<D: PassThru> PassThruLink<D> {
             pairs.push((0x7E0 + i, 0x7E8 + i));
         }
         let voltage = dev.battery_voltage()?;
-        let name = [v.device, v.firmware].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" ");
-        Ok(PassThruLink { dev, channel, name, voltage, pairs })
+        let name = [v.device, v.firmware]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        Ok(PassThruLink {
+            dev,
+            channel,
+            name,
+            voltage,
+            pairs,
+        })
     }
 
     /// The device itself (to close it, or for device-specific things).
@@ -95,12 +106,27 @@ impl<D: PassThru> PassThruLink<D> {
 
     /// Sends `data` to `to` and gathers the answers from IDs `from` accepts: a module that says "response pending"
     /// (7F xx 78) is waited for (P2* each time); with `one`, the first real answer ends it.
-    fn exchange(&mut self, to: u32, from: impl Fn(u32) -> bool, data: &[u8], one: bool) -> Result<Vec<Answer>, ObdError> {
-        self.dev.write(self.channel, &PassThruMsg { id: to, data: data.to_vec() }, P2)?;
+    fn exchange(
+        &mut self,
+        to: u32,
+        from: impl Fn(u32) -> bool,
+        data: &[u8],
+        one: bool,
+    ) -> Result<Vec<Answer>, ObdError> {
+        self.dev.write(
+            self.channel,
+            &PassThruMsg {
+                id: to,
+                data: data.to_vec(),
+            },
+            P2,
+        )?;
         let mut answers = Vec::new();
         let mut deadline = Instant::now() + P2;
         while let Some(left) = deadline.checked_duration_since(Instant::now()) {
-            let Some(m) = self.dev.read(self.channel, left)? else { break };
+            let Some(m) = self.dev.read(self.channel, left)? else {
+                break;
+            };
             if !from(m.id) {
                 continue;
             }
@@ -108,7 +134,10 @@ impl<D: PassThru> PassThruLink<D> {
                 deadline = Instant::now() + P2_STAR;
                 continue;
             }
-            answers.push(Answer { from: format!("{:03X}", m.id), data: m.data });
+            answers.push(Answer {
+                from: format!("{:03X}", m.id),
+                data: m.data,
+            });
             if one {
                 break;
             }
@@ -122,12 +151,19 @@ impl<D: PassThru> PassThruLink<D> {
 
 impl<D: PassThru> Link for PassThruLink<D> {
     fn request(&mut self, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
-        self.exchange(OBD_FUNCTIONAL, |id| (0x7E8..=0x7EF).contains(&id), data, false)
+        self.exchange(
+            OBD_FUNCTIONAL,
+            |id| (0x7E8..=0x7EF).contains(&id),
+            data,
+            false,
+        )
     }
 
     fn request_to(&mut self, tx: u16, rx: u16, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
         if tx > 0x7FF || rx > 0x7FF {
-            return Err(ObdError::Adapter(format!("{tx:X}/{rx:X} are not 11-bit CAN IDs")));
+            return Err(ObdError::Adapter(format!(
+                "{tx:X}/{rx:X} are not 11-bit CAN IDs"
+            )));
         }
         let (tx, rx) = (tx as u32, rx as u32);
         if !self.pairs.contains(&(tx, rx)) {
@@ -163,7 +199,12 @@ pub struct SimPassThru {
 
 impl SimPassThru {
     pub fn new(car: SimCar) -> SimPassThru {
-        SimPassThru { car, channel: None, filters: Vec::new(), inbox: Default::default() }
+        SimPassThru {
+            car,
+            channel: None,
+            filters: Vec::new(),
+            inbox: Default::default(),
+        }
     }
 
     fn open(&self, channel: u32) -> Result<(), ObdError> {
@@ -177,12 +218,18 @@ impl SimPassThru {
 
 impl PassThru for SimPassThru {
     fn version(&mut self) -> Result<Versions, ObdError> {
-        Ok(Versions { device: "Icarus simulated J2534".into(), firmware: "1.0".into(), api: "04.04".into() })
+        Ok(Versions {
+            device: "Icarus simulated J2534".into(),
+            firmware: "1.0".into(),
+            api: "04.04".into(),
+        })
     }
 
     fn connect(&mut self, protocol: J2534Protocol, baud: u32) -> Result<u32, ObdError> {
         if protocol != J2534Protocol::Iso15765 || baud != 500_000 {
-            return Err(ObdError::Adapter("the simulated car speaks ISO 15765 at 500 kbit/s".into()));
+            return Err(ObdError::Adapter(
+                "the simulated car speaks ISO 15765 at 500 kbit/s".into(),
+            ));
         }
         self.channel = Some(1);
         Ok(1)
@@ -201,12 +248,25 @@ impl PassThru for SimPassThru {
         Ok(self.filters.len() as u32)
     }
 
-    fn write(&mut self, channel: u32, msg: &PassThruMsg, _timeout: Duration) -> Result<(), ObdError> {
+    fn write(
+        &mut self,
+        channel: u32,
+        msg: &PassThruMsg,
+        _timeout: Duration,
+    ) -> Result<(), ObdError> {
         self.open(channel)?;
         let answers: Vec<(u32, Vec<u8>)> = if msg.id == OBD_FUNCTIONAL {
-            self.car.broadcast_answers(&msg.data).into_iter().filter_map(|(h, d)| u32::from_str_radix(h, 16).ok().map(|id| (id, d))).collect()
+            self.car
+                .broadcast_answers(&msg.data)
+                .into_iter()
+                .filter_map(|(h, d)| u32::from_str_radix(h, 16).ok().map(|id| (id, d)))
+                .collect()
         } else {
-            self.car.module_answers(msg.id as u16, &msg.data).into_iter().map(|d| (msg.id + 8, d)).collect()
+            self.car
+                .module_answers(msg.id as u16, &msg.data)
+                .into_iter()
+                .map(|d| (msg.id + 8, d))
+                .collect()
         };
         for (id, data) in answers {
             if self.filters.contains(&id) {
@@ -240,7 +300,10 @@ mod tests {
         let mut l = link();
         assert_eq!(l.adapter(), "Icarus simulated J2534 1.0");
         assert_eq!(l.voltage(), Some(12.6));
-        assert_eq!(j1979::vin(&mut l).unwrap().as_deref(), Some(crate::sim::VIN));
+        assert_eq!(
+            j1979::vin(&mut l).unwrap().as_deref(),
+            Some(crate::sim::VIN)
+        );
         let rpm = l.request(&[0x01, 0x0C]).unwrap();
         assert_eq!(rpm[0].from, "7E8");
         assert_eq!(&rpm[0].data[..2], &[0x41, 0x0C]);
@@ -254,8 +317,17 @@ mod tests {
         assert_eq!(a.len(), 1);
         assert_eq!(a[0].data[0], 0x62);
         let m = l.request_to(0x7C0, 0x7C8, &[0x19, 0x02, 0xFF]).unwrap();
-        assert_eq!(m[0].data[0], 0x59, "the pending answer is waited out, not returned: {m:?}");
-        assert!(matches!(l.request_to(0x700, 0x708, &[0x3E, 0x00]), Err(ObdError::NoData)));
-        assert!(l.request_to(0x800, 0x808, &[0x3E, 0x00]).is_err(), "29-bit IDs are refused");
+        assert_eq!(
+            m[0].data[0], 0x59,
+            "the pending answer is waited out, not returned: {m:?}"
+        );
+        assert!(matches!(
+            l.request_to(0x700, 0x708, &[0x3E, 0x00]),
+            Err(ObdError::NoData)
+        ));
+        assert!(
+            l.request_to(0x800, 0x808, &[0x3E, 0x00]).is_err(),
+            "29-bit IDs are refused"
+        );
     }
 }

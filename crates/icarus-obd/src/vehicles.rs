@@ -315,7 +315,10 @@ pub fn tests_for(profile: Option<&Profile>, vin: Option<&str>) -> Vec<crate::act
 }
 
 /// The module settings for a vehicle: its profile's, and the simulated vehicle's own when it is the simulation.
-pub fn settings_for(profile: Option<&Profile>, vin: Option<&str>) -> Vec<crate::settings::SettingDef> {
+pub fn settings_for(
+    profile: Option<&Profile>,
+    vin: Option<&str>,
+) -> Vec<crate::settings::SettingDef> {
     let mut v: Vec<_> = profile.map(|p| p.settings.clone()).unwrap_or_default();
     if vin == Some(crate::sim::VIN) {
         v.extend(crate::sim::settings());

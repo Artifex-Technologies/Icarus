@@ -7,9 +7,9 @@
 //! reading is a little below the battery's terminals (wiring), and many newer vehicles lower the alternator voltage on
 //! purpose once the battery is full ("smart charging"), so one low reading is not a fault: watch a whole drive.
 
-use crate::link::Link;
 use crate::elm::ObdError;
 use crate::j1979;
+use crate::link::Link;
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
