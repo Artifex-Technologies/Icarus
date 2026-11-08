@@ -107,7 +107,9 @@ A module is bricked when a write stops halfway or puts the wrong thing in. Icaru
    match what the module reports; a file for another module is refused.
 3. **Checksums right.** The image's checksums are corrected and checked for its ECU family before writing.
 4. **Steady power.** A battery charger or maintainer on (the battery above 12.5 V and holding steady, sampled during the
-   write too); the computer kept awake (done: power_guard blocks sleep, lid switch and power keys).
+   write too); the computer kept awake (done: power_guard blocks sleep, lid switch and power keys). The computer's own
+   battery working and charged (above 50 %), not mains only: a laptop with a dead battery switches off the moment its
+   cable is pulled or the supply dips, halfway through the write.
 5. **A wired cable.** Never over Bluetooth or Wi-Fi: a dropped wireless link mid-write is a classic brick.
 6. **Calibration only, when the family allows it.** Write the calibration area and leave the boot loader alone, so the
    module can always be reached and written again.
