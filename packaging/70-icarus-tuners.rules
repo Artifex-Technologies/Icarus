@@ -4,3 +4,7 @@
 
 # SCT / Derive Power (Bully Dog): the X4 (5059:4040, "SCT MB103"), and the newer devices on Derive's WinUSB driver (5059:4080)
 SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="5059", TAG+="uaccess"
+
+# Silicon Labs CP210x USB-serial (10c4:ea60 and family): VF Tuner's WiFlash (an ESP32 J2534 interface) and many OBD cables.
+# Linux's cp210x driver makes it /dev/ttyUSB*; this gives the person at the seat the port without joining the uucp group.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60|ea63|ea70", TAG+="uaccess"
