@@ -5,6 +5,25 @@ on 2026-11-07 it had only nightly builds, no stable release, AUR or Flathub pack
 stable release, whichever comes first).
 Every step reads before it writes, and nothing writes to a module until reading, checking and restoring are proven on a bench.
 
+## Scope: an all-in-one vehicle tool
+
+The aim (2026-11-07): one tool for everything a vehicle's electronics need, in place of a code reader, a dealer tool
+(Techstream, FORScan), a bidirectional shop scanner (Mucar, Snap-on), a tuning suite and a bus analyser: on Linux, for many
+makes, without per-vehicle licences.
+
+| Area | Have | Next | Later |
+| --- | --- | --- | --- |
+| Codes | every module (UDS, KWP2000), meanings, where to start, parts and look-up links, freeze frame, readiness, reports | clear codes (asks first, saves the freeze frame and a report before); Mode 06 test results | code history per vehicle |
+| Live data | 48 standard values with graphs, CSV logs | each make's own values (Toyota transmission temperature...); a log viewer | trail gauges for the off-road builds |
+| Bidirectional | actuator tests, fenced (hold-to-run, conditions, airbag ban) | learn tests by watching a shop tool on the bus | each make's test lists |
+| Service functions | | | relearns (throttle, idle, steering angle), resets (oil life, battery), TPMS IDs, injector coding: per make |
+| Configuration | | | FORScan/Techstream-style customizations (tire size, features), with a backup and a way back |
+| Tuning | map viewer, tune diff (XDF) | map editing with checksums | read and flash ECUs (STI first, bench ECU), A2L; open ECUs through LibreTune |
+| Vehicle info | VIN decoder, make profiles, named vehicles | model and engine from NHTSA's public vPIC data (offline) | recalls (NHTSA, asks before sending the VIN) |
+| Bus | | CAN monitor (OBDLink's monitor mode, Linux SocketCAN adapters), decoding of what it sees | DBC files |
+| Hardware | ELM327/STN over USB, Bluetooth, Wi-Fi | SocketCAN (CANable and friends) | J2534 cables (Tactrix OpenPort 2.0) for flashing |
+| Vehicles | 12 makes + generic, addresses from public sources | extended addressing (Toyota body, BMW), 29-bit IDs (Honda), Ford's MS-CAN | each make's addresses checked on real vehicles |
+
 ## 0. Foundation (done 2026-11-07)
 
 - `icarus-core`: ROM images (original and edited kept side by side, byte diff), definitions (maps, curves, values, switches),
