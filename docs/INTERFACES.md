@@ -5,6 +5,14 @@ reading the makers' installers as data (never running them on the host) and by w
 (Limbo's USB passthrough, 2026-11-08). Clean-room: what is written here is behaviour seen from outside (USB IDs, file types,
 exported function names, traffic), never the makers' code; their encrypted files stay encrypted.
 
+## Which makers' programs can run under Wine in a Limbo guest
+
+What decides it is how the program reaches its device. A serial port works (Wine maps `COM` ports to `/dev/ttyUSB*`), and
+so can WinUSB or libusb-style access through Wine's own USB layer. A maker's own Windows kernel driver never works: Wine
+loads no Windows kernel drivers. So far: SCT's Device Updater uses Jungo WinDriver (no); VF Tuner's WiFlash is a CP210x
+serial port (likely yes); COBB's AccessPort Manager uses libusb-win32 or WinUSB (maybe); HP Tuners' MPVI uses FTDI's D2XX
+(its kernel driver: no, unless a D2XX shim over Linux's own access is used). Where Wine cannot, a Windows guest can.
+
 ## The way in
 
 1. **Read the installer as data** in a quarantine folder: what kind of installer, who signed it, which drivers (their `.inf`
@@ -44,7 +52,8 @@ sends nothing to any device. Speaking each device's own protocol is the next ste
 | USB | `5059:4040` "SCT LLC SCT MB103": one vendor-specific interface, three bulk endpoints (0x81 in, 0x02 out, 0x83 in), no mass storage |
 | Linux | no driver binds; raw USB (libusb/usbfs) only |
 | Maker's software | SCT Device Updater: a WiX bundle; the app is a packed .NET program (needs .NET 4.8); drivers: Derive's WinUSB driver for `5059:4080` (newer devices) and an older InstallShield-packed driver for the X4 |
-| State | passed through to a Limbo guest and seen there (2026-11-08); the updater under Wine not yet tried with it |
+| State | passed through to a Limbo guest and seen there (2026-11-08). The Device Updater (with .NET 4.8) runs under Wine in that guest, but never sees the device: it reaches the X4 through **Jungo WinDriver 10.1.1** (`wdapi_dotnet1011.dll` over WinDriver's own kernel driver), and Wine cannot load Windows kernel drivers. A USB recording inside the guest showed no traffic at all while it ran |
+| Next | the maker's program needs real Windows with WinDriver's driver: a Windows guest in Limbo (an evaluation edition needs no licence key for its trial period) with the X4 passed through, and its traffic recorded on the host. Or the X4's protocol learned without the maker's program (what it says when plugged in, its file transfer) |
 
 ## VF Tuner (OVT) — Toyota and Lexus
 
