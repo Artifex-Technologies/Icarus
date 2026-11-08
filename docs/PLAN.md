@@ -20,7 +20,7 @@ makes, without per-vehicle licences.
 | Configuration | | | FORScan/Techstream-style customizations (tire size, features), with a backup and a way back |
 | Tuning | map viewer, tune diff (XDF) | map editing with checksums | read and flash ECUs (STI first, bench ECU), A2L; open ECUs through LibreTune |
 | Vehicle info | VIN decoder, make profiles, named vehicles | model and engine from NHTSA's public vPIC data (offline) | recalls (NHTSA, asks before sending the VIN) |
-| Bus | | CAN monitor (OBDLink's monitor mode, Linux SocketCAN adapters), decoding of what it sees | DBC files |
+| Bus | monitor (OBDLink monitor mode, Linux SocketCAN): ID table with changing bytes, diagnostics in words, tests learned from another tool | naming IDs per make | DBC files |
 | Hardware | ELM327/STN over USB, Bluetooth, Wi-Fi | SocketCAN (CANable and friends) | J2534 cables (Tactrix OpenPort 2.0) for flashing |
 | Vehicles | 12 makes + generic, addresses from public sources | extended addressing (Toyota body, BMW), 29-bit IDs (Honda), Ford's MS-CAN | each make's addresses checked on real vehicles |
 
@@ -71,7 +71,7 @@ What those tools do, and where Icarus is:
 | Mode 06 (on-board test results), a VIN decoder from NHTSA's public vPIC data (model, engine) | next |
 | Clear codes | done 2026-11-07: asks first, engine off, a report saved before; OBD-II 04, UDS/KWP 14 per module; logged |
 | Actuator tests (run the fan, open the throttle, cycle the ABS pump, click a relay) | done 2026-11-07: the engine (actuator.rs: allow-list, airbag ban, conditions, 30 s cap, hold-to-run, control returned on every path, log), `[[test]]` profile entries, five on the simulated vehicle. No real IDs yet: each maker's own |
-| Learn a test from another tool: watch the bus (adapter monitor mode, a Y-cable) while a shop tool runs it, decode its 2F/30 requests into a `[[test]]` entry | next: the way to fill real vehicles' tests |
+| Learn a test from another tool: watch the bus (adapter monitor mode, a Y-cable) while a shop tool runs it, decode its 2F/30 requests into a `[[test]]` entry | done 2026-11-07 (Bus page, icarus bus watch); one button adds it to the vehicle's file |
 | Customizations / as-built configuration (FORScan's paddle shifters and tire size; Toyota's customizations) | after: writes; a backup of the whole configuration before any change, and the way back |
 | Service functions (relearns, resets, bleeding, injector coding, TPMS IDs) | after: per vehicle |
 

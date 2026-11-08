@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Profile {
+    /// Required for a make of its own; a user file that adds to a built-in profile may leave it out.
+    #[serde(default)]
     pub name: String,
     #[serde(default)]
     pub wmi: Vec<String>,
@@ -171,13 +173,81 @@ pub fn load(dir: Option<&Path>) -> (Vec<Profile>, Vec<String>) {
             .and_then(|t| parse(&id, &f.display().to_string(), &t));
         match parsed {
             Ok(p) => match all.iter_mut().find(|q| q.id == p.id) {
-                Some(q) => *q = p,
+                Some(q) => merge(q, p),
+                None if p.name.is_empty() => {
+                    problems.push(format!("{}: a new make needs a name", f.display()))
+                }
                 None => all.push(p),
             },
             Err(e) => problems.push(e),
         }
     }
     (all, problems)
+}
+
+/// A user file adds to the built-in profile of the same name: its name and notes (when given) replace, VIN prefixes and
+/// codes add, a module at the same address or a test of the same name replaces, others add.
+fn merge(base: &mut Profile, user: Profile) {
+    if !user.name.is_empty() {
+        base.name = user.name;
+    }
+    if !user.notes.is_empty() {
+        base.notes = user.notes;
+    }
+    for w in user.wmi {
+        if !base.wmi.contains(&w) {
+            base.wmi.push(w);
+        }
+    }
+    for m in user.modules {
+        match base
+            .modules
+            .iter_mut()
+            .find(|b| b.tx == m.tx && b.ext == m.ext)
+        {
+            Some(b) => *b = m,
+            None => base.modules.push(m),
+        }
+    }
+    base.codes.extend(user.codes);
+    for t in user.tests {
+        match base.tests.iter_mut().find(|b| b.name == t.name) {
+            Some(b) => *b = t,
+            None => base.tests.push(t),
+        }
+    }
+    base.source = user.source;
+}
+
+/// Adds a test (a `[[test]]` entry) to the user's file for this make, creating the file if needed: it then adds to the
+/// built-in profile of the same name. The entry is checked before anything is written.
+pub fn add_test_to_user_file(profile_id: &str, entry: &str) -> Result<PathBuf, String> {
+    if profile_id.is_empty()
+        || !profile_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return Err(format!("bad profile name {profile_id:?}"));
+    }
+    parse(
+        profile_id,
+        "the new entry",
+        &format!("name = \"check\"\n{entry}"),
+    )?;
+    let dir = user_dir().ok_or("no config folder")?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let p = dir.join(format!("{profile_id}.toml"));
+    let mut text = std::fs::read_to_string(&p).unwrap_or_else(|_| {
+        format!("# My additions to Icarus's {profile_id} profile (merged into the built-in one).\n")
+    });
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push('\n');
+    text.push_str(entry);
+    parse(profile_id, &p.display().to_string(), &text)?;
+    std::fs::write(&p, text).map_err(|e| format!("{}: {e}", p.display()))?;
+    Ok(p)
 }
 
 /// The profile for a VIN: the longest matching manufacturer prefix wins (5TF before 5T).
@@ -324,7 +394,18 @@ mod tests {
         std::fs::write(dir.join("sneaky.toml"), "name = \"z\"\n[[test]]\nname = \"Seat belt pretensioner\"\nmodule = 0x7E0\nprotocol = \"uds\"\nid = 0x1234\n").unwrap();
         std::fs::write(dir.join("ok-test.toml"), "name = \"w\"\n[[test]]\nname = \"Radiator fan\"\nmodule = 0x7E0\nprotocol = \"uds\"\nid = 0x1234\nconditions = [\"stationary\"]\n").unwrap();
         let (all, problems) = load(Some(&dir));
-        assert_eq!(find(&all, "toyota").unwrap().name, "My Toyota notes");
+        let t = find(&all, "toyota").unwrap();
+        assert_eq!(t.name, "My Toyota notes");
+        assert!(
+            t.wmi.contains(&"JT".to_string()) && t.wmi.contains(&"3TM".to_string()),
+            "prefixes add"
+        );
+        assert!(
+            t.modules.iter().any(|m| m.tx == 0x7B0 && m.checked)
+                && t.modules.iter().any(|m| m.tx == 0x780),
+            "modules merge"
+        );
+        assert!(t.codes.contains_key("C1241"), "built-in codes stay");
         assert!(find(&all, "kart").is_ok());
         assert_eq!(problems.len(), 3, "{problems:?}");
         assert!(

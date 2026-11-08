@@ -37,6 +37,14 @@ report before it erases anything: the freeze frame goes with the codes, and ever
 clearing requests go out (OBD-II `04`, UDS `14 FF FF FF`, KWP2000 `14 FF 00`); permanent codes stay until their monitor
 passes. Every clear is in `~/.local/state/icarus/actions.log`.
 
+## The bus
+
+`icarus bus watch --adapter A` (the OBDLink's monitor mode) or `--can can0` (a Linux CAN interface such as a CANable),
+or the Bus page: every ID with its rate and last bytes, the bytes that just changed lit up (press a pedal or a switch and
+watch which byte follows), diagnostic messages between a tool and the modules put in words, and actuator tests another tool
+runs learned as `[[test]]` entries (unchecked, the most cautious conditions) that one button adds to the vehicle's file.
+Watching only: nothing is sent onto the bus.
+
 ## Actuator tests (bidirectional controls)
 
 Like the bidirectional controls of shop scan tools: Icarus asks a module to drive one output for a short while (throttle

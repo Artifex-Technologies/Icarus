@@ -24,14 +24,16 @@ enum Page {
     Modules,
     Live,
     Tests,
+    Bus,
     Maps,
 }
 
-const PAGES: [(Page, &str); 5] = [
+const PAGES: [(Page, &str); 6] = [
     (Page::Vehicle, "Vehicle"),
     (Page::Modules, "Modules"),
     (Page::Live, "Live data"),
     (Page::Tests, "Tests"),
+    (Page::Bus, "Bus"),
     (Page::Maps, "Maps"),
 ];
 
@@ -66,6 +68,7 @@ struct Start {
     page: Option<Page>,
     scan: bool,
     live: bool,
+    bus: bool,
     maps: Option<(String, String, String)>,
 }
 
@@ -78,6 +81,7 @@ impl Start {
                 "--connect" => s.connect = true,
                 "--scan" => s.scan = true,
                 "--live" => s.live = true,
+                "--bus" => s.bus = true,
                 "--adapter" => {
                     i += 1;
                     s.adapter = Some(a.get(i).ok_or("--adapter needs a value")?.clone());
@@ -128,6 +132,10 @@ struct App {
     /// A clear waiting for the person's yes: None = every OBD-II module, Some = one module (tx, rx, dialect).
     confirm_clear: Option<(Option<(u16, u16, Dialect)>, String)>,
     selftests: Option<Vec<icarus_obd::mode06::TestResult>>,
+    /// The bus monitor: the source (adapter or a Linux CAN interface), its last view.
+    bus_can: bool,
+    bus_ifname: String,
+    bus: Option<worker::BusView>,
     page: Page,
     tx: Sender<Cmd>,
     rx: Receiver<Event>,
@@ -165,6 +173,9 @@ impl App {
             test_reading: None,
             confirm_clear: None,
             selftests: None,
+            bus_can: false,
+            bus_ifname: "can0".into(),
+            bus: None,
             page: start.page.unwrap_or(Page::Vehicle),
             tx,
             rx,
@@ -247,6 +258,9 @@ impl App {
                             sweep: false,
                         });
                     }
+                    if std::mem::take(&mut self.start.bus) {
+                        let _ = self.tx.send(Cmd::BusStart(None));
+                    }
                     if std::mem::take(&mut self.start.live) && !self.chosen.is_empty() {
                         self.live_on = true;
                         let _ = self
@@ -290,6 +304,12 @@ impl App {
                     self.release_needed = true;
                 }
                 Event::TestReading(v) => self.test_reading = Some(v),
+                Event::Bus(v) => {
+                    if let Some(e) = &v.ended {
+                        self.status = format!("Bus: {e}.");
+                    }
+                    self.bus = Some(*v);
+                }
                 Event::SelfTests(r) => {
                     self.status = format!("{} on-board test results read.", r.len());
                     self.selftests = Some(r);
@@ -954,6 +974,148 @@ impl App {
         }
     }
 
+    fn page_bus(&mut self, ui: &mut egui::Ui, pal: &theme::Palette) {
+        let running = self.bus.as_ref().is_some_and(|b| b.running);
+        ui.horizontal(|ui| {
+            ui.add_enabled_ui(!running, |ui| {
+                ui.radio_value(&mut self.bus_can, false, "the connected adapter");
+                ui.radio_value(&mut self.bus_can, true, "a Linux CAN interface");
+                if self.bus_can {
+                    ui.add(egui::TextEdit::singleline(&mut self.bus_ifname).desired_width(80.0));
+                }
+            });
+            if running {
+                if ui.button("Stop").clicked() {
+                    let _ = self.tx.send(Cmd::BusStop);
+                }
+                ui.spinner();
+            } else if ui.button("Watch").clicked() {
+                self.live_on = false;
+                self.bus = None;
+                let _ = self.tx.send(Cmd::BusStart(
+                    self.bus_can.then(|| self.bus_ifname.trim().to_string()),
+                ));
+            }
+        });
+        ui.label(RichText::new("Watching only: nothing is sent onto the bus. Press a pedal or a switch and see which byte follows (changed bytes light up). Diagnostic messages are put in words; actuator tests another tool runs are learned.").weak());
+        let Some(b) = &self.bus else { return };
+        ui.label(
+            RichText::new(format!(
+                "{} frames, {} IDs{}",
+                b.frames,
+                b.rows.len(),
+                b.ended
+                    .as_ref()
+                    .map(|e| format!(" ({e})"))
+                    .unwrap_or_default()
+            ))
+            .weak(),
+        );
+        let mut add: Option<icarus_obd::actuator::TestDef> = None;
+        ui.columns(2, |cols| {
+            egui::ScrollArea::vertical()
+                .id_salt("bus-ids")
+                .max_height(420.0)
+                .show(&mut cols[0], |ui| {
+                    egui::Grid::new("bus-table")
+                        .striped(true)
+                        .spacing(vec2(12.0, 2.0))
+                        .show(ui, |ui| {
+                            for h in ["ID", "Hz", "count", "bytes"] {
+                                ui.label(RichText::new(h).small().weak());
+                            }
+                            ui.end_row();
+                            for (id, count, hz, data, ages) in &b.rows {
+                                ui.label(
+                                    RichText::new(if *id > 0x7FF {
+                                        format!("{id:08X}")
+                                    } else {
+                                        format!("{id:03X}")
+                                    })
+                                    .monospace(),
+                                );
+                                ui.label(RichText::new(format!("{hz:.1}")).monospace());
+                                ui.label(RichText::new(count.to_string()).monospace());
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 4.0;
+                                    for (i, byte) in data.iter().enumerate() {
+                                        let age = ages.get(i).copied().unwrap_or(f64::INFINITY);
+                                        let col = if age < 1.0 { pal.amber } else { pal.text };
+                                        ui.label(
+                                            RichText::new(format!("{byte:02X}"))
+                                                .monospace()
+                                                .color(col),
+                                        );
+                                    }
+                                });
+                                ui.end_row();
+                            }
+                        });
+                });
+            egui::ScrollArea::vertical()
+                .id_salt("bus-log")
+                .max_height(420.0)
+                .stick_to_bottom(true)
+                .show(&mut cols[1], |ui| {
+                    if b.log.is_empty() {
+                        ui.label(RichText::new("No diagnostic messages yet.").weak());
+                    }
+                    for l in &b.log {
+                        ui.label(RichText::new(l).monospace().small());
+                    }
+                });
+        });
+        if !b.learned.is_empty() {
+            ui.add_space(8.0);
+            let profile = self
+                .info
+                .as_ref()
+                .and_then(|i| i.profile.as_ref())
+                .map(|p| (p.id.clone(), p.name.clone()));
+            for t in &b.learned {
+                card(ui, pal, &t.name, |ui| {
+                    ui.label(RichText::new("Another tool ran this output test. Check what it drives before relying on it; it is added unchecked, with the most cautious conditions.").weak());
+                    ui.label(
+                        RichText::new(icarus_obd::bus::to_toml(t))
+                            .monospace()
+                            .small(),
+                    );
+                    let label = profile.as_ref().map_or(
+                        "Connect to a vehicle with a make profile to add it".to_string(),
+                        |p| format!("Add to the {} file", p.1),
+                    );
+                    if ui
+                        .add_enabled(profile.is_some(), egui::Button::new(label))
+                        .clicked()
+                    {
+                        add = Some(t.clone());
+                    }
+                });
+            }
+        }
+        if let Some(t) = add {
+            let id = self
+                .info
+                .as_ref()
+                .and_then(|i| i.profile.as_ref())
+                .map(|p| p.id.clone())
+                .unwrap_or_default();
+            match icarus_obd::vehicles::add_test_to_user_file(&id, &icarus_obd::bus::to_toml(&t)) {
+                Ok(p) => {
+                    self.status = format!("Added to {}: it is on the Tests page now.", p.display());
+                    if let Some(i) = self.info.as_mut() {
+                        i.tests.push(t);
+                    }
+                }
+                Err(e) => self.error = Some(e),
+            }
+        }
+        if running {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(250));
+        }
+    }
+
     fn load_maps(&mut self) {
         let m = &mut self.maps;
         m.note.clear();
@@ -1488,6 +1650,7 @@ impl eframe::App for App {
                                 Page::Vehicle => self.page_vehicle(ui, &pal),
                                 Page::Modules => self.page_modules(ui, &pal),
                                 Page::Tests => self.page_tests(ui, &pal),
+                                Page::Bus => self.page_bus(ui, &pal),
                                 _ => self.page_live(ui, &pal),
                             });
                     }

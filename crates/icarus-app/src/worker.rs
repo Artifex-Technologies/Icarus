@@ -31,6 +31,10 @@ pub enum Cmd {
     },
     /// Read the on-board test results (service 06).
     SelfTests,
+    /// Watch the bus: through the connected adapter (None) or a Linux CAN interface (its name). Ends with BusStop or any
+    /// other command.
+    BusStart(Option<String>),
+    BusStop,
     /// Clear codes: every OBD-II module (None) or one module (request ID, answer ID, its dialect). A report is saved first.
     Clear(Option<(u16, u16, Dialect)>),
     TestHold,
@@ -58,6 +62,47 @@ pub struct Info {
     pub tests: Vec<actuator::TestDef>,
 }
 
+/// One ID in the bus table: (ID, count, Hz, last bytes, seconds since each byte changed).
+pub type BusRow = (u32, u64, f64, Vec<u8>, Vec<f64>);
+
+/// What the bus monitor shows, sent a few times a second.
+#[derive(Default)]
+pub struct BusView {
+    /// (ID, count, Hz, last bytes, seconds since each byte changed).
+    pub rows: Vec<BusRow>,
+    pub log: Vec<String>,
+    pub learned: Vec<actuator::TestDef>,
+    pub frames: u64,
+    pub running: bool,
+    pub ended: Option<String>,
+}
+
+fn view(a: &icarus_obd::bus::Analyzer, now: f64, running: bool, ended: Option<String>) -> BusView {
+    BusView {
+        rows: a
+            .ids
+            .iter()
+            .map(|(id, s)| {
+                (
+                    *id,
+                    s.count,
+                    s.hz(),
+                    s.data.clone(),
+                    s.changed_at
+                        .iter()
+                        .map(|t| if s.count > 1 { now - t } else { f64::INFINITY })
+                        .collect(),
+                )
+            })
+            .collect(),
+        log: a.log.iter().rev().take(200).rev().cloned().collect(),
+        learned: a.learned.clone(),
+        frames: a.frames,
+        running,
+        ended,
+    }
+}
+
 pub struct ModuleView {
     pub addr: ModuleAddr,
     pub identity: Vec<(&'static str, String)>,
@@ -77,6 +122,7 @@ pub enum Event {
     },
     ReportSaved(String),
     SelfTests(Vec<icarus_obd::mode06::TestResult>),
+    Bus(Box<BusView>),
     /// Codes cleared (what was said), and the Vehicle page's information read again.
     Cleared(String, Box<Info>),
     TestStarted(String),
@@ -106,9 +152,13 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
     let mut last_watch = Instant::now();
     let start = Instant::now();
     let profiles = vehicles::load(vehicles::user_dir().as_deref()).0;
+    // a command that arrived while the bus was watched, handled next
+    let mut queued: Option<Cmd> = None;
     loop {
         let busy = test.is_some() || (!live.is_empty() && elm.is_some());
-        let cmd = if !busy {
+        let cmd = if let Some(c) = queued.take() {
+            Some(c)
+        } else if !busy {
             match rx.recv() {
                 Ok(c) => Some(c),
                 Err(_) => return,
@@ -231,6 +281,83 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
                     Err(x) => send(Event::Failed(x.to_string())),
                 }
             }
+            Some(Cmd::BusStart(source)) => {
+                live.clear();
+                let mut a = icarus_obd::bus::Analyzer::default();
+                let t0 = Instant::now();
+                let mut last_view = Instant::now();
+                let mut pending: Option<Cmd> = None;
+                // keep watching? (a stop or any other command ends it; another command is handled afterwards)
+                let mut go_on =
+                    |a: &icarus_obd::bus::Analyzer, pending: &mut Option<Cmd>| -> bool {
+                        match rx.try_recv() {
+                            Ok(Cmd::BusStop) => return false,
+                            Ok(Cmd::TestHold) => {}
+                            Ok(other) => {
+                                *pending = Some(other);
+                                return false;
+                            }
+                            Err(_) => {}
+                        }
+                        if last_view.elapsed() >= Duration::from_millis(250) {
+                            last_view = Instant::now();
+                            send(Event::Bus(Box::new(view(
+                                a,
+                                t0.elapsed().as_secs_f64(),
+                                true,
+                                None,
+                            ))));
+                        }
+                        true
+                    };
+                let ended = match &source {
+                    Some(ifname) => match icarus_obd::socketcan::open(ifname) {
+                        Err(x) => Err(x.to_string()),
+                        Ok(sock) => loop {
+                            match sock.read(Duration::from_millis(50), t0.elapsed().as_secs_f64()) {
+                                Ok(Some(f)) => a.add(&f),
+                                Ok(None) => {}
+                                Err(x) => break Err(x.to_string()),
+                            }
+                            if !go_on(&a, &mut pending) {
+                                break Ok("stopped".to_string());
+                            }
+                        },
+                    },
+                    None => match elm.as_mut() {
+                        None => Err("connect first, or choose a Linux CAN interface".into()),
+                        Some(e) => {
+                            let proto = e.protocol;
+                            e.monitor(|line| {
+                                if let Some(f) = icarus_obd::bus::parse_line(
+                                    line,
+                                    proto,
+                                    t0.elapsed().as_secs_f64(),
+                                ) {
+                                    a.add(&f);
+                                }
+                                go_on(&a, &mut pending)
+                            })
+                            .map_err(|x| x.to_string())
+                        }
+                    },
+                };
+                let ended = match ended {
+                    Ok(how) => how,
+                    Err(m) => format!("could not watch: {m}"),
+                };
+                send(Event::Bus(Box::new(view(
+                    &a,
+                    t0.elapsed().as_secs_f64(),
+                    false,
+                    Some(ended),
+                ))));
+                if let Some(c) = pending {
+                    // the command that ended the watch is handled next
+                    queued = Some(c);
+                }
+            }
+            Some(Cmd::BusStop) => {}
             Some(Cmd::TestHold) | Some(Cmd::TestStop) => {}
             None if test.is_some() => {
                 if last_hold.elapsed() > Duration::from_millis(500) {
@@ -315,7 +442,7 @@ fn connect(spec: &str, profiles: &[Profile]) -> Result<(Elm, Info), String> {
 fn gather(elm: &mut Elm, profiles: &[Profile]) -> Result<Info, String> {
     let mut elm = elm;
     let e = |x: ObdError| x.to_string();
-    let vin = j1979::vin(&mut elm).map_err(e)?;
+    let vin = j1979::vin(elm).map_err(e)?;
     let vin_info = vin.as_deref().and_then(|v| vin::decode(v).ok());
     let profile = vin
         .as_deref()
@@ -340,7 +467,7 @@ fn gather(elm: &mut Elm, profiles: &[Profile]) -> Result<Info, String> {
                 .find(|x| x.data.len() >= 3 && x.data[..2] == [0x41, 0x03])
         })
         .map(|x| j1979::fuel_system(x.data[2]));
-    let mut live: Vec<u8> = j1979::supported(&mut elm)
+    let mut live: Vec<u8> = j1979::supported(elm)
         .map_err(e)?
         .into_iter()
         .flat_map(|s| s.2)
@@ -354,13 +481,13 @@ fn gather(elm: &mut Elm, profiles: &[Profile]) -> Result<Info, String> {
         (DtcKind::Pending, "pending"),
         (DtcKind::Permanent, "permanent"),
     ] {
-        for (from, module, list) in j1979::dtcs(&mut elm, kind).map_err(e)? {
+        for (from, module, list) in j1979::dtcs(elm, kind).map_err(e)? {
             if !list.is_empty() {
                 codes.push((label, format!("{module} ({from})"), list));
             }
         }
     }
-    let freeze = j1979::freeze_frame(&mut elm).map_err(e)?;
+    let freeze = j1979::freeze_frame(elm).map_err(e)?;
     let vehicle = vin.as_deref().and_then(garage::get);
     let tests = vehicles::tests_for(profile.as_ref(), vin.as_deref());
     let info = Info {

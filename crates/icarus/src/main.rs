@@ -7,7 +7,9 @@ use icarus_core::xdf;
 use icarus_obd::elm::Elm;
 use icarus_obd::j1979::{self, DtcKind};
 use icarus_obd::port::Target;
-use icarus_obd::{actuator, clear, dtc, garage, lookup, mode06, report, uds, vehicles, vin};
+use icarus_obd::{
+    actuator, bus, clear, dtc, garage, lookup, mode06, report, socketcan, uds, vehicles, vin,
+};
 use std::io::Write;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
@@ -31,6 +33,11 @@ Vehicle, through an OBD adapter (read-only: nothing is cleared or written):
                                              as dealer tools do. The make comes from the VIN (or --make, see icarus
                                              vehicles); --sweep tries every ID from 700 to 7F7 (slower)
   icarus obd module ID[/ANSWER] --adapter A  one module (request ID in hex, e.g. 7B0, or 713/77D): identity and codes
+
+Bus (watching only: nothing is sent onto the bus):
+  icarus bus watch (--adapter A | --can can0) [--seconds N] [--raw]
+                                             every ID with its rate and changing bytes, diagnostic messages in words, and
+                                             actuator tests another tool runs, as entries for the vehicle's file
 
 Vehicles:
   icarus vin VIN                             what a VIN says: where it was built, maker, model year, check digit
@@ -69,6 +76,7 @@ fn main() -> ExitCode {
         Some("vehicles") => cmd_vehicles(),
         Some("dtc") => cmd_dtc(&args[1..]),
         Some("garage") => cmd_garage(&args[1..]),
+        Some("bus") => cmd_bus(&args[1..]),
         Some("-h" | "--help" | "help") | None => {
             println!("{HELP}");
             Ok(())
@@ -1026,6 +1034,112 @@ fn cmd_dtc(a: &[String]) -> Result<(), String> {
             println!("    parts catalog: {url}");
         }
         println!();
+    }
+    Ok(())
+}
+
+fn cmd_bus(a: &[String]) -> Result<(), String> {
+    if a.first().map(String::as_str) != Some("watch") {
+        return Err(
+            "usage: icarus bus watch (--adapter A | --can can0) [--seconds N] [--raw]".into(),
+        );
+    }
+    let args = parse_args(&a[1..], &["adapter", "can", "seconds"])?;
+    let raw = a.iter().any(|x| x == "--raw");
+    let secs: f64 = args
+        .opt("seconds")
+        .map(|v| v.parse().map_err(|_| "--seconds needs a number"))
+        .transpose()?
+        .unwrap_or(10.0);
+    actuator::catch_interrupt();
+    let mut an = bus::Analyzer::default();
+    let start = std::time::Instant::now();
+    let mut printed = 0u64;
+    let mut step = |an: &mut bus::Analyzer, f: Option<bus::Frame>| {
+        if let Some(f) = f {
+            if raw {
+                println!(
+                    "{:8.3}  {:>8X}  {}",
+                    f.at,
+                    f.id,
+                    f.data
+                        .iter()
+                        .map(|b| format!("{b:02X}"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                );
+            }
+            an.add(&f);
+        }
+        let new = (an.logged - printed).min(an.log.len() as u64) as usize;
+        for l in an.log.iter().skip(an.log.len() - new) {
+            println!("{l}");
+        }
+        printed = an.logged;
+        start.elapsed().as_secs_f64() < secs && !actuator::interrupted()
+    };
+    eprintln!("watching for {secs} s (Ctrl+C stops); nothing is sent onto the bus...");
+    let ended = if let Some(ifn) = args.opt("can") {
+        let sock = socketcan::open(ifn).map_err(|x| x.to_string())?;
+        loop {
+            let f = sock
+                .read(
+                    std::time::Duration::from_millis(100),
+                    start.elapsed().as_secs_f64(),
+                )
+                .map_err(|x| x.to_string())?;
+            if !step(&mut an, f) {
+                break "stopped".to_string();
+            }
+        }
+    } else {
+        let mut elm = connect(&args)?;
+        let proto = elm.protocol;
+        elm.monitor(|line| {
+            let f = bus::parse_line(line, proto, start.elapsed().as_secs_f64());
+            step(&mut an, f)
+        })
+        .map_err(e)?
+    };
+    let now = start.elapsed().as_secs_f64();
+    println!(
+        "\n{} frames, {} IDs ({ended}). Bytes that changed in the last second are marked *:",
+        an.frames,
+        an.ids.len()
+    );
+    for (id, s) in &an.ids {
+        let bytes: Vec<String> = s
+            .data
+            .iter()
+            .enumerate()
+            .map(|(i, b)| {
+                format!(
+                    "{b:02X}{}",
+                    if now - s.changed_at.get(i).copied().unwrap_or(0.0) < 1.0 && s.count > 1 {
+                        "*"
+                    } else {
+                        " "
+                    }
+                )
+            })
+            .collect();
+        let shown = if *id > 0x7FF {
+            format!("{id:08X}")
+        } else {
+            format!("{id:03X}")
+        };
+        println!(
+            "  {shown:>8}  {:7.1} Hz  {:>7}  {}",
+            s.hz(),
+            s.count,
+            bytes.join(" ")
+        );
+    }
+    if !an.learned.is_empty() {
+        println!("\nTests seen run by another tool (add them to the vehicle's file, ~/.config/icarus/vehicles/MAKE.toml, after checking what each drives):\n");
+        for t in &an.learned {
+            println!("{}", bus::to_toml(t));
+        }
     }
     Ok(())
 }

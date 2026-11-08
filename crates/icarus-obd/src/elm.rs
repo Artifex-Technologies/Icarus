@@ -306,6 +306,69 @@ impl Elm {
         self.send_request(data)
     }
 
+    /// Watches every frame on the bus (STMA on an STN chip, else ATMA), handing each line to `each` until it returns false or
+    /// the adapter stops by itself (its buffer full, for one). Returns how it ended. Nothing is sent onto the bus.
+    pub fn monitor(&mut self, mut each: impl FnMut(&str) -> bool) -> Result<String, ObdError> {
+        if self.target.is_some() {
+            self.ok_commands(&["ATSH7DF", "ATCRA", "ATFCSM0"])?;
+            self.target = None;
+        }
+        let cmd = if self.stn.is_some() { "STMA" } else { "ATMA" };
+        let mut junk = [0u8; 256];
+        while self.port.recv(&mut junk, Duration::ZERO)? > 0 {}
+        self.port.send(format!("{cmd}\r").as_bytes())?;
+        let mut buf: Vec<u8> = Vec::new();
+        let mut tmp = [0u8; 2048];
+        let mut last = String::new();
+        loop {
+            let n = self.port.recv(&mut tmp, Duration::from_millis(100))?;
+            buf.extend_from_slice(&tmp[..n]);
+            if n == 0 && !each("") {
+                break;
+            }
+            while let Some(i) = buf.iter().position(|b| *b == b'\r' || *b == b'>') {
+                let prompt = buf[i] == b'>';
+                let line = String::from_utf8_lossy(&buf[..i]).trim().to_string();
+                buf.drain(..=i);
+                if prompt {
+                    return Ok(format!(
+                        "the adapter stopped by itself{}",
+                        if last.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" ({last})")
+                        }
+                    ));
+                }
+                if line.is_empty() || line.eq_ignore_ascii_case(cmd) {
+                    continue;
+                }
+                last = line.clone();
+                if !each(&line) {
+                    // any character ends monitoring; then the prompt comes back
+                    self.port.send(b"\r")?;
+                    let deadline = Instant::now() + Duration::from_secs(3);
+                    while Instant::now() < deadline {
+                        let n = self.port.recv(&mut tmp, Duration::from_millis(100))?;
+                        if tmp[..n].contains(&b'>') {
+                            break;
+                        }
+                    }
+                    return Ok("stopped".into());
+                }
+            }
+        }
+        self.port.send(b"\r")?;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            let n = self.port.recv(&mut tmp, Duration::from_millis(100))?;
+            if tmp[..n].contains(&b'>') {
+                break;
+            }
+        }
+        Ok("stopped".into())
+    }
+
     fn ok_commands(&mut self, cmds: &[&str]) -> Result<(), ObdError> {
         for c in cmds {
             let r = self.command(c, Duration::from_secs(2))?;

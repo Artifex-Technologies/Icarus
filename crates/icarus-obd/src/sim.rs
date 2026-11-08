@@ -31,6 +31,8 @@ pub struct SimCar {
     driven: std::collections::HashMap<(u16, u16), Vec<u8>>,
     /// Modules whose codes were cleared (OBD-II 04 clears the engine and transmission; UDS/KWP 14 one module).
     cleared: std::collections::HashSet<u16>,
+    /// In monitor mode (ATMA/STMA): the bus tick, frames streamed until any byte arrives.
+    monitoring: Option<u64>,
 }
 
 impl Default for SimCar {
@@ -61,6 +63,7 @@ impl SimCar {
             extended: Default::default(),
             driven: Default::default(),
             cleared: Default::default(),
+            monitoring: None,
         }
     }
 
@@ -132,6 +135,55 @@ impl SimCar {
             }
         }
         m
+    }
+
+    /// What the bus carries in one tick (5 ms): wheel speeds and an engine message every tick, a status message every 10, a
+    /// door switch every 20 (it flips every 400), and every 400 ticks another tool running a throttle test and an ABS pump
+    /// test, for the analyser to learn.
+    fn bus_tick(&self, t: u64) -> Vec<String> {
+        let mut out = Vec::new();
+        let rpm = (790.0 + 40.0 * (t as f64 * 0.05).sin()) as u16;
+        out.push(format!("0B4 00 00 00 00 00 00 00 {:02X}", t as u8));
+        out.push(format!(
+            "2C4 {:02X} {:02X} 00 1C 00 00 00 00",
+            (rpm >> 8) as u8,
+            rpm as u8
+        ));
+        if t.is_multiple_of(10) {
+            out.push("3B7 01 00 50 00 00".into());
+        }
+        if t.is_multiple_of(20) {
+            out.push(format!(
+                "610 20 00 {:02X} 00",
+                if (t / 400).is_multiple_of(2) {
+                    0x00
+                } else {
+                    0x08
+                }
+            ));
+        }
+        let step = t % 400;
+        let script: &[&str] = &[
+            "7E0 02 10 03",
+            "7E8 02 50 03",
+            "7E0 05 2F F0 02 03 4C",
+            "7E8 05 6F F0 02 03 4C",
+            "7E0 05 2F F0 02 03 80",
+            "7E8 05 6F F0 02 03 80",
+            "7E0 04 2F F0 02 00",
+            "7E8 04 6F F0 02 00",
+            "7E0 02 10 01",
+            "7E8 02 50 01",
+            "7B0 04 30 10 07 01",
+            "7B8 03 70 10 07",
+            "7B0 03 30 10 00",
+            "7B8 03 70 10 00",
+        ];
+        if (100..100 + script.len() as u64 * 10).contains(&step) && (step - 100).is_multiple_of(10)
+        {
+            out.push(script[((step - 100) / 10) as usize].to_string());
+        }
+        out
     }
 
     /// On-board test results (service 06): an oxygen sensor, the catalyst (passing, at 43 % of its limit), the evaporative
@@ -482,6 +534,10 @@ impl SimCar {
                 ok
             }
             "ATDPN" => vec!["A6".into()],
+            "ATMA" | "STMA" => {
+                self.monitoring = Some(0);
+                return;
+            }
             "ATCRA" => {
                 self.filter = None;
                 ok
@@ -529,6 +585,12 @@ impl SimCar {
 
 impl Port for SimCar {
     fn send(&mut self, data: &[u8]) -> io::Result<()> {
+        if self.monitoring.is_some() && !data.is_empty() {
+            // any character ends monitor mode
+            self.monitoring = None;
+            self.output.extend(b"STOPPED\r\r>");
+            return Ok(());
+        }
         for &b in data {
             if b == b'\r' {
                 let cmd = String::from_utf8_lossy(&std::mem::take(&mut self.input)).to_string();
@@ -541,6 +603,16 @@ impl Port for SimCar {
     }
 
     fn recv(&mut self, buf: &mut [u8], _timeout: Duration) -> io::Result<usize> {
+        if let Some(t) = self.monitoring {
+            if self.output.len() < 4096 {
+                std::thread::sleep(Duration::from_millis(5));
+                for line in self.bus_tick(t) {
+                    self.output.extend(line.as_bytes());
+                    self.output.push_back(b'\r');
+                }
+                self.monitoring = Some(t + 1);
+            }
+        }
         let n = buf.len().min(self.output.len());
         for (i, b) in self.output.drain(..n).enumerate() {
             buf[i] = b;
@@ -686,4 +758,35 @@ pub fn tests() -> Vec<crate::actuator::TestDef> {
             "The ABS pump is loud, and the brake pedal may move.",
         ),
     ]
+}
+
+#[cfg(test)]
+mod monitor_tests {
+    use super::*;
+    use crate::bus::{parse_line, Analyzer};
+    use crate::elm::Elm;
+
+    #[test]
+    fn watching_the_simulated_bus_learns_the_other_tools_tests() {
+        let mut elm = Elm::connect(Box::new(SimCar::new())).unwrap();
+        let mut a = Analyzer::default();
+        let start = std::time::Instant::now();
+        let ended = elm
+            .monitor(|line| {
+                if let Some(f) = parse_line(line, elm_bus(), start.elapsed().as_secs_f64()) {
+                    a.add(&f);
+                }
+                a.frames < 1500
+            })
+            .unwrap();
+        assert_eq!(ended, "stopped");
+        assert!(a.ids.contains_key(&0x2C4) && a.ids.contains_key(&0x610));
+        assert_eq!(a.learned.len(), 2, "{:?}", a.learned);
+        // the adapter answers normally afterwards
+        assert_eq!(crate::j1979::vin(&mut elm).unwrap().as_deref(), Some(VIN));
+    }
+
+    fn elm_bus() -> crate::elm::Protocol {
+        crate::elm::Protocol::Can11At500
+    }
 }

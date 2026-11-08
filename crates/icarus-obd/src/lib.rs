@@ -4,6 +4,7 @@
 
 pub mod actuator;
 pub mod audit;
+pub mod bus;
 pub mod clear;
 pub mod dtc;
 pub mod elm;
@@ -14,6 +15,7 @@ pub mod mode06;
 pub mod port;
 pub mod report;
 pub mod sim;
+pub mod socketcan;
 pub mod uds;
 pub mod vehicles;
 pub mod vin;
