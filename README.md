@@ -28,6 +28,10 @@ icarus obd report --adapter A --scan                             # everything in
 
 The freeze frame (service 02) is what the engine was doing when the code set: speed, load, temperatures, fuel trims.
 
+On-board test results (`icarus obd selftests`, Mode 06, CAN vehicles): each emissions monitor's last measurement against
+its limits (a catalyst near its limit fails soon) and misfire counts per cylinder; pass or fail compares raw numbers, real
+units only where the scaling is certain.
+
 Clearing (`icarus obd clear [--module ID]`, or Clear codes in the window) asks first, needs the engine off, and saves a
 report before it erases anything: the freeze frame goes with the codes, and every readiness monitor starts over. Only the
 clearing requests go out (OBD-II `04`, UDS `14 FF FF FF`, KWP2000 `14 FF 00`); permanent codes stay until their monitor

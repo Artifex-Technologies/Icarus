@@ -38,6 +38,8 @@ pub struct Diagnosis {
     pub freeze: Vec<FreezeFrame>,
     pub modules: Vec<ModuleFound>,
     pub snapshot: Vec<(u8, f64)>,
+    /// On-board test results (service 06; CAN vehicles).
+    pub selftests: Vec<crate::mode06::TestResult>,
 }
 
 /// The local date and time, "2026-11-07 19:40".
@@ -109,6 +111,7 @@ pub fn collect(elm: &mut Elm, profiles: &[Profile], scan: bool) -> Result<Diagno
         }
     }
     d.freeze = j1979::freeze_frame(elm)?;
+    d.selftests = crate::mode06::read(elm).unwrap_or_default();
     for p in [0x05, 0x0C, 0x04, 0x06, 0x07, 0x08, 0x09, 0x0F, 0x42, 0x44] {
         if let Ok(r) = j1979::read(elm, p) {
             if let Some(x) = r.iter().find(|x| x.from == "7E8").or(r.first()) {
@@ -271,6 +274,29 @@ pub fn markdown(d: &Diagnosis) -> String {
             let _ = writeln!(o);
         }
     }
+    if !d.selftests.is_empty() {
+        let _ = writeln!(o, "## On-board test results\n\nThe engine module's own measurements and their limits (service 06):\n");
+        let mut last = None;
+        for t in &d.selftests {
+            if last != Some(t.mid) {
+                let _ = writeln!(
+                    o,
+                    "{}{}:\n",
+                    if last.is_some() { "\n" } else { "" },
+                    crate::mode06::monitor_name(t.mid)
+                );
+                last = Some(t.mid);
+            }
+            let _ = writeln!(
+                o,
+                "- {}: **{}**, {}",
+                crate::mode06::test_name(t.mid, t.tid),
+                if t.passed() { "pass" } else { "FAIL" },
+                selftest_values(t)
+            );
+        }
+        let _ = writeln!(o);
+    }
     if !d.modules.is_empty() {
         let _ = writeln!(o, "## Modules\n");
         for (m, id, codes) in &d.modules {
@@ -306,6 +332,32 @@ pub fn markdown(d: &Diagnosis) -> String {
     }
     let _ = writeln!(o, "---\nMade by Icarus, read-only: nothing on the vehicle was changed. The parts listed are where faults usually lie, a starting point for testing, not a diagnosis.");
     o
+}
+
+/// "288 (limits 0 to 672)" or with units.
+pub fn selftest_values(t: &crate::mode06::TestResult) -> String {
+    match t.scaled() {
+        Some((v, lo, hi, unit)) => {
+            let f = |x: f64| {
+                if x.fract() == 0.0 {
+                    format!("{x:.0}")
+                } else {
+                    format!("{x:.3}")
+                }
+            };
+            format!(
+                "{}{}{unit} (limits {} to {})",
+                f(v),
+                if unit.is_empty() { "" } else { " " },
+                f(lo),
+                f(hi)
+            )
+        }
+        None => format!(
+            "{} (limits {} to {}, unit code {:02X})",
+            t.value, t.min, t.max, t.uasid
+        ),
+    }
 }
 
 /// `~/Documents/Icarus/reports/icarus-report-2026-11-07-1940.md`.

@@ -134,6 +134,50 @@ impl SimCar {
         m
     }
 
+    /// On-board test results (service 06): an oxygen sensor, the catalyst (passing, at 43 % of its limit), the evaporative
+    /// system, and misfire counts for six cylinders, cylinder 3 misfiring a little.
+    fn mode06(mid: u8) -> Option<Vec<u8>> {
+        const MIDS: &[u8] = &[
+            0x01, 0x20, 0x21, 0x39, 0x40, 0x60, 0x80, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6,
+            0xA7,
+        ];
+        let block = |tid: u8, uasid: u8, v: u16, lo: u16, hi: u16| {
+            [
+                &[mid, tid, uasid][..],
+                &v.to_be_bytes(),
+                &lo.to_be_bytes(),
+                &hi.to_be_bytes(),
+            ]
+            .concat()
+        };
+        Some(match mid {
+            0x00 | 0x20 | 0x40 | 0x60 | 0x80 | 0xA0 => {
+                [&[mid][..], &Self::bitmap(MIDS, mid)].concat()
+            }
+            0x01 => [
+                block(0x01, 0x0A, 0x0E10, 0x0E10, 0x0E10),
+                block(0x05, 0x10, 70, 0, 150),
+            ]
+            .concat(),
+            0x21 => block(0x80, 0x01, 0x0120, 0, 0x02A0),
+            0x39 => block(0x80, 0x01, 0, 0, 1),
+            0xA1 => [
+                block(0x0B, 0x24, 4, 0, 0xFFFF),
+                block(0x0C, 0x24, 7, 0, 0xFFFF),
+            ]
+            .concat(),
+            0xA2..=0xA7 => {
+                let (avg, now) = if mid == 0xA4 { (3, 7) } else { (0, 0) };
+                [
+                    block(0x0B, 0x24, avg, 0, 0xFFFF),
+                    block(0x0C, 0x24, now, 0, 0xFFFF),
+                ]
+                .concat()
+            }
+            _ => return None,
+        })
+    }
+
     /// The freeze frame stored with P0171: cruising at 72 km/h, warm, both trims adding fuel.
     fn frozen(pid: u8) -> Option<Vec<u8>> {
         const FROZEN: &[u8] = &[0x02, 0x04, 0x05, 0x06, 0x07, 0x0B, 0x0C, 0x0D, 0x0F, 0x11];
@@ -370,6 +414,11 @@ impl SimCar {
             [0x02, pid, 0x00] if !self.cleared.contains(&0x7E0) => {
                 if let Some(d) = Self::frozen(*pid) {
                     msgs.push(("7E8", [&[0x42, *pid, 0x00][..], &d].concat()));
+                }
+            }
+            [0x06, mid] => {
+                if let Some(d) = Self::mode06(*mid) {
+                    msgs.push(("7E8", [&[0x46][..], &d].concat()));
                 }
             }
             [0x07] => msgs.push(("7E8", vec![0x47, 0x00])),

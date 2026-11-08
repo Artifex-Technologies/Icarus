@@ -7,7 +7,7 @@ use icarus_core::xdf;
 use icarus_obd::elm::Elm;
 use icarus_obd::j1979::{self, DtcKind};
 use icarus_obd::port::Target;
-use icarus_obd::{actuator, clear, dtc, garage, lookup, report, uds, vehicles, vin};
+use icarus_obd::{actuator, clear, dtc, garage, lookup, mode06, report, uds, vehicles, vin};
 use std::io::Write;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
@@ -47,6 +47,8 @@ Trouble codes:
   icarus obd test NAME --adapter A [--value PERCENT] [--seconds N] [--yes]
                                              run one: asks first, checks its conditions, stops after N seconds or Ctrl+C
                                              and hands control back to the module (sim:off = the simulated engine off)
+  icarus obd selftests --adapter A           on-board test results (Mode 06): each monitor's last measurement and limits,
+                                             misfire counts per cylinder
   icarus obd clear --adapter A [--module ID] [--yes]
                                              clear codes (every OBD-II module, or one): saves a report first, engine off
   icarus obd report --adapter A [--scan] [--out FILE]
@@ -409,6 +411,7 @@ fn cmd_obd(a: &[String]) -> Result<(), String> {
         Some("report") => obd_report(&mut connect(&args)?, &args),
         Some("tests") => obd_tests(&mut connect(&args)?),
         Some("clear") => obd_clear(&mut connect(&args)?, &args),
+        Some("selftests") => obd_selftests(&mut connect(&args)?),
         Some("test") => obd_test(&mut connect(&args)?, &args),
         _ => Err(
             "usage: icarus obd info|codes|pids|live|scan|module --adapter A (see icarus --help)"
@@ -913,6 +916,28 @@ fn obd_test(elm: &mut Elm, args: &Args) -> Result<(), String> {
     };
     actuator::stop(elm, &mut run, &why)?;
     println!("Stopped ({why}); control is back with the module.");
+    Ok(())
+}
+
+fn obd_selftests(elm: &mut Elm) -> Result<(), String> {
+    let r = mode06::read(elm).map_err(e)?;
+    if r.is_empty() {
+        println!("The engine module gave no on-board test results.");
+    }
+    let mut last = None;
+    for t in &r {
+        if last != Some(t.mid) {
+            println!("\n{}", mode06::monitor_name(t.mid));
+            last = Some(t.mid);
+        }
+        println!(
+            "  {:<46} {:<4} {}",
+            mode06::test_name(t.mid, t.tid),
+            if t.passed() { "pass" } else { "FAIL" },
+            report::selftest_values(t)
+        );
+    }
+    println!("\nEach result is the module's own last measurement against its limits: a value near a limit shows a part on its way out before a code sets.");
     Ok(())
 }
 

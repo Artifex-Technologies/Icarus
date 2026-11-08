@@ -13,7 +13,7 @@ makes, without per-vehicle licences.
 
 | Area | Have | Next | Later |
 | --- | --- | --- | --- |
-| Codes | every module (UDS, KWP2000), meanings, where to start, parts and look-up links, freeze frame, readiness, reports, clearing (report first) | Mode 06 test results | code history per vehicle |
+| Codes | every module (UDS, KWP2000), meanings, where to start, parts and look-up links, freeze frame, readiness, reports, clearing (report first), Mode 06 test results (CAN) | Mode 06 on older protocols | code history per vehicle |
 | Live data | 48 standard values with graphs, CSV logs | each make's own values (Toyota transmission temperature...); a log viewer | trail gauges for the off-road builds |
 | Bidirectional | actuator tests, fenced (hold-to-run, conditions, airbag ban) | learn tests by watching a shop tool on the bus | each make's test lists |
 | Service functions | | | relearns (throttle, idle, steering angle), resets (oil life, battery), TPMS IDs, injector coding: per make |

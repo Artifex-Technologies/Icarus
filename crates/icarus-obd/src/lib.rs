@@ -10,6 +10,7 @@ pub mod elm;
 pub mod garage;
 pub mod j1979;
 pub mod lookup;
+pub mod mode06;
 pub mod port;
 pub mod report;
 pub mod sim;

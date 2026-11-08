@@ -127,6 +127,7 @@ struct App {
     test_reading: Option<f64>,
     /// A clear waiting for the person's yes: None = every OBD-II module, Some = one module (tx, rx, dialect).
     confirm_clear: Option<(Option<(u16, u16, Dialect)>, String)>,
+    selftests: Option<Vec<icarus_obd::mode06::TestResult>>,
     page: Page,
     tx: Sender<Cmd>,
     rx: Receiver<Event>,
@@ -163,6 +164,7 @@ impl App {
             test_note: String::new(),
             test_reading: None,
             confirm_clear: None,
+            selftests: None,
             page: start.page.unwrap_or(Page::Vehicle),
             tx,
             rx,
@@ -237,6 +239,7 @@ impl App {
                     self.info = Some(*info);
                     self.modules.clear();
                     self.history.clear();
+                    self.selftests = None;
                     if std::mem::take(&mut self.start.scan) {
                         self.scanning = true;
                         let _ = self.tx.send(Cmd::Scan {
@@ -287,6 +290,10 @@ impl App {
                     self.release_needed = true;
                 }
                 Event::TestReading(v) => self.test_reading = Some(v),
+                Event::SelfTests(r) => {
+                    self.status = format!("{} on-board test results read.", r.len());
+                    self.selftests = Some(r);
+                }
                 Event::Cleared(msg, info) => {
                     self.status = msg;
                     self.error = None;
@@ -382,6 +389,7 @@ impl App {
         });
         let mut links: Vec<String> = Vec::new();
         let mut ask_clear = false;
+        let mut read_selftests = false;
         let mut save_name = false;
         let mut report = false;
         card(ui, pal, "This vehicle's name", |ui| {
@@ -498,6 +506,41 @@ impl App {
                 },
             );
         }
+        card(ui, pal, "On-board test results (Mode 06)", |ui| {
+            ui.label(RichText::new("Each emissions monitor's last measurement against its limits: a value near a limit shows a part on its way out before a code sets; misfire counts per cylinder.").weak());
+            if ui
+                .button(if self.selftests.is_some() {
+                    "Read again"
+                } else {
+                    "Read"
+                })
+                .clicked()
+            {
+                read_selftests = true;
+            }
+            if let Some(r) = &self.selftests {
+                if r.is_empty() {
+                    ui.label("The engine module gave none.");
+                }
+                let mut last = None;
+                for t in r {
+                    if last != Some(t.mid) {
+                        ui.add_space(4.0);
+                        ui.label(RichText::new(icarus_obd::mode06::monitor_name(t.mid)).strong());
+                        last = Some(t.mid);
+                    }
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            RichText::new(if t.passed() { "pass" } else { "FAIL" })
+                                .strong()
+                                .color(if t.passed() { pal.green } else { pal.red }),
+                        );
+                        ui.label(icarus_obd::mode06::test_name(t.mid, t.tid));
+                        ui.label(RichText::new(icarus_obd::report::selftest_values(t)).weak());
+                    });
+                }
+            }
+        });
         card(ui, pal, "Report", |ui| {
             ui.label(RichText::new("Everything above (and, if chosen, every module's codes) in one file to keep or show a mechanic, with search and parts links. Saved in ~/Documents/Icarus/reports.").weak());
             ui.horizontal(|ui| {
@@ -538,6 +581,10 @@ impl App {
         if report {
             self.live_on = false;
             let _ = self.tx.send(Cmd::Report(self.report_all));
+        }
+        if read_selftests {
+            self.live_on = false;
+            let _ = self.tx.send(Cmd::SelfTests);
         }
         if ask_clear {
             self.confirm_clear =

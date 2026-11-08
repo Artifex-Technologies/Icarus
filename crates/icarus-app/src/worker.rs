@@ -29,6 +29,8 @@ pub enum Cmd {
         def: actuator::TestDef,
         value: f64,
     },
+    /// Read the on-board test results (service 06).
+    SelfTests,
     /// Clear codes: every OBD-II module (None) or one module (request ID, answer ID, its dialect). A report is saved first.
     Clear(Option<(u16, u16, Dialect)>),
     TestHold,
@@ -74,6 +76,7 @@ pub enum Event {
         unreachable: Vec<String>,
     },
     ReportSaved(String),
+    SelfTests(Vec<icarus_obd::mode06::TestResult>),
     /// Codes cleared (what was said), and the Vehicle page's information read again.
     Cleared(String, Box<Info>),
     TestStarted(String),
@@ -217,6 +220,15 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
                         "{m} (the report from before is {})",
                         saved.display()
                     ))),
+                }
+            }
+            Some(Cmd::SelfTests) => {
+                let Some(e) = elm.as_mut() else { continue };
+                live.clear();
+                send(Event::Status("Reading the on-board test results...".into()));
+                match icarus_obd::mode06::read(e) {
+                    Ok(r) => send(Event::SelfTests(r)),
+                    Err(x) => send(Event::Failed(x.to_string())),
                 }
             }
             Some(Cmd::TestHold) | Some(Cmd::TestStop) => {}
