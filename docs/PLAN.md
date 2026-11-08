@@ -139,6 +139,8 @@ TCM shift tables, line pressure and converter lock-up through the same steps (id
 
 ## Hardware worth having
 
+What each tuner and interface is on the wire, and how Icarus reaches it from Linux: [INTERFACES.md](INTERFACES.md).
+
 | What | Why |
 | --- | --- |
 | OBDLink MX+ (have) | reading, logging, CAN monitoring |
