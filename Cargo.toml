@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = ["crates/icarus-core", "crates/icarus-obd", "crates/icarus"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MPL-2.0"
+repository = "https://github.com/Artifex-Technologies/Icarus"

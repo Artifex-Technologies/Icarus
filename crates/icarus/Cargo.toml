@@ -1,0 +1,11 @@
+[package]
+name = "icarus"
+description = "Icarus: vehicle tuning, learning and diagnostics (command line)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+icarus-core = { path = "../icarus-core" }
+icarus-obd = { path = "../icarus-obd" }

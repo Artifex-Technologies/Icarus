@@ -1,0 +1,11 @@
+[package]
+name = "icarus-core"
+description = "Icarus's ROM images and map definitions (TunerPro XDF)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# XML for .xdf definitions (MIT/Apache-2.0, no dependencies of its own)
+roxmltree = "0.20"

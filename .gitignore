@@ -1,0 +1,6 @@
+/target
+# never commit a car's ECU dump, calibration, log or VIN: keep them here (or anywhere outside the repo)
+/private
+*.bin
+*.ori
+*.mod

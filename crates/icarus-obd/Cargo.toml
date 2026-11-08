@@ -1,0 +1,11 @@
+[package]
+name = "icarus-obd"
+description = "Icarus's link to a vehicle: OBD adapters (ELM327/STN) and the standard OBD-II services"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# serial ports, Bluetooth RFCOMM sockets and poll (MIT/Apache-2.0)
+libc = "0.2"
