@@ -18,7 +18,13 @@ Every step reads before it writes, and nothing writes to a module until reading,
 
 Not yet tried on a real vehicle or adapter: everything in `icarus-obd` was tested against the simulated adapter only.
 
-## 1. Know the vehicles (needs: the vehicles named, the OBDLink MX+)
+## 1. Know the vehicles (needs: a Linux laptop, the OBDLink MX+)
+
+The vehicles: a 2017 Toyota Tacoma TRD Sport 4x4 (3.5 V6, Denso engine computer) to test on now, and a 2019 Subaru WRX STI
+(EJ257, Denso) planned for rally. The STI's ECU family is the best documented for open tools (read and flashed over OBD with a
+Tactrix OpenPort 2.0), so it is the likely first ECU Icarus reads in full; Toyota protects the Tacoma's flash more, so there
+the first goals are everything readable: live data, codes, Toyota's own values (transmission fluid temperature, which the
+Tacoma has no gauge for) and the CAN bus.
 
 1. First real connection: `icarus obd info` on each vehicle; note protocol, modules, calibration IDs (they identify the
    ECU software, which decides what definitions and tools apply).
