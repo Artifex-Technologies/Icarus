@@ -1,0 +1,53 @@
+name = "Ford / Lincoln / Mercury"
+wmi = ["1F", "2F", "3F", "1L", "2L", "3L", "5L", "MAJ"]
+notes = """Ford names modules by function (PCM, ABS, RCM, IPC, BCM...), as FORScan shows them. Older models put body modules on
+a second, medium-speed CAN bus (pins 3 and 11): OBDLink adapters can switch to it, Icarus cannot yet. Configuration
+(as-built data: tire size, features) lives in these modules; Icarus only reads for now."""
+
+[[module]]
+tx = 0x7E0
+name = "PCM (engine)"
+
+[[module]]
+tx = 0x7E1
+name = "TCM (transmission)"
+
+[[module]]
+tx = 0x760
+name = "ABS"
+
+[[module]]
+tx = 0x737
+name = "RCM (airbags)"
+
+[[module]]
+tx = 0x720
+name = "IPC (instrument cluster)"
+
+[[module]]
+tx = 0x726
+name = "BCM (body)"
+
+[[module]]
+tx = 0x730
+name = "PSCM (power steering)"
+
+[[module]]
+tx = 0x733
+name = "HVAC"
+
+[[module]]
+tx = 0x736
+name = "PAM (parking aid)"
+
+[[module]]
+tx = 0x716
+name = "GWM (gateway)"
+
+[[module]]
+tx = 0x727
+name = "ACM (audio)"
+
+[[module]]
+tx = 0x7D0
+name = "APIM (SYNC)"

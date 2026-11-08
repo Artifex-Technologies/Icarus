@@ -1,0 +1,12 @@
+name = "Stellantis (Chrysler, Dodge, Jeep, Ram, Fiat)"
+wmi = ["1C", "2C", "3C", "1J", "1B", "2B", "3D", "ZAC", "ZFA"]
+notes = """From 2018 most models have a secure gateway (SGW) that blocks requests from tools without an authorised login;
+reading codes and data usually still works, changing anything does not."""
+
+[[module]]
+tx = 0x7E0
+name = "PCM (engine)"
+
+[[module]]
+tx = 0x7E1
+name = "TCM (transmission)"

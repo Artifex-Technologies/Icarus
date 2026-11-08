@@ -36,6 +36,17 @@ icarus obd module 7B0 --adapter A            # one module, by its request ID
 the older KWP2000 that many Toyota modules still use, not only to the engine's standard OBD-II side. A guard in the code lets
 only reading services out: clearing codes, writing, actuator tests and programming are refused until the safety steps exist.
 
+**Vehicles.** Icarus is for any make: what it knows about each one (where its modules answer, its quirks) is a small TOML
+file in `crates/icarus-obd/vehicles/`, picked by the VIN. Built in: Toyota/Lexus, Subaru, Ford/Lincoln, GM, Stellantis,
+Honda/Acura, Nissan, Hyundai/Kia, Mazda, VW/Audi, BMW/Mini, Mitsubishi, and a generic OBD-II profile. A file of the same name
+in `~/.config/icarus/vehicles/` replaces a built-in one, and a new name adds a make, so a module found on a vehicle can be
+written down without rebuilding. Addresses from public sources are marked "not yet checked" until seen on a real vehicle.
+
+```sh
+icarus vin VIN       # where it was built, maker, model year, check digit
+icarus vehicles      # the makes Icarus knows
+```
+
 The adapter `A` is one of:
 
 | | |

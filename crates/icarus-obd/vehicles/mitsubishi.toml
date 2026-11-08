@@ -1,0 +1,3 @@
+name = "Mitsubishi"
+wmi = ["JA", "4A"]
+notes = "Only the OBD-II side is listed so far; --sweep finds the rest."

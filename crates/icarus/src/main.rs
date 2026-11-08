@@ -7,7 +7,7 @@ use icarus_core::xdf;
 use icarus_obd::elm::Elm;
 use icarus_obd::j1979::{self, DtcKind};
 use icarus_obd::port::Target;
-use icarus_obd::uds;
+use icarus_obd::{uds, vehicles, vin};
 use std::io::Write;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
@@ -26,10 +26,15 @@ Vehicle, through an OBD adapter (read-only: nothing is cleared or written):
   icarus obd pids  --adapter A               the live values each module offers, and what they mean
   icarus obd live  --adapter A [PID...] [--every MS] [--count N] [--csv FILE]
                                              watch live values (PIDs in hex, e.g. 0C 05 06 07); Ctrl+C stops
-  icarus obd scan  --adapter A [--make toyota|subaru|generic] [--sweep]
+  icarus obd scan  --adapter A [--make NAME] [--sweep]
                                              find every module (ABS, airbags, cluster...): identity and trouble codes,
-                                             as dealer tools do; --sweep tries every ID from 700 to 7F7 (slower)
-  icarus obd module ID --adapter A           one module (request ID in hex, e.g. 7B0): identity and all its codes
+                                             as dealer tools do. The make comes from the VIN (or --make, see icarus
+                                             vehicles); --sweep tries every ID from 700 to 7F7 (slower)
+  icarus obd module ID[/ANSWER] --adapter A  one module (request ID in hex, e.g. 7B0, or 713/77D): identity and codes
+
+Vehicles:
+  icarus vin VIN                             what a VIN says: where it was built, maker, model year, check digit
+  icarus vehicles                            the makes Icarus knows (one editable file each)
 
   The adapter A: sim (a simulated vehicle), /dev/ttyUSB0[@baud], bt:AA:BB:CC:DD:EE:FF[#channel] (paired Bluetooth, such as
   an OBDLink MX+), tcp:host:port (Wi-Fi). ICARUS_ADAPTER sets a default.";
@@ -41,6 +46,8 @@ fn main() -> ExitCode {
         Some("show") => cmd_show(&args[1..]),
         Some("diff") => cmd_diff(&args[1..]),
         Some("obd") => cmd_obd(&args[1..]),
+        Some("vin") => cmd_vin(&args[1..]),
+        Some("vehicles") => cmd_vehicles(),
         Some("-h" | "--help" | "help") | None => {
             println!("{HELP}");
             Ok(())
@@ -385,12 +392,26 @@ fn cmd_obd(a: &[String]) -> Result<(), String> {
     }
 }
 
-fn print_module(elm: &mut Elm, tx: u16, name: &str) -> Result<(), String> {
-    println!("\n{tx:03X}  {name}");
-    for (what, value) in uds::module_identity(elm, tx).map_err(e)? {
+fn print_module(elm: &mut Elm, m: &vehicles::ModuleAddr) -> Result<(), String> {
+    let (tx, rx) = (m.tx, m.rx());
+    let at = if rx == tx + 8 {
+        format!("{tx:03X}")
+    } else {
+        format!("{tx:03X}/{rx:03X}")
+    };
+    println!(
+        "\n{at}  {}{}",
+        m.name,
+        if m.checked {
+            ""
+        } else {
+            "  (address not yet checked on a vehicle)"
+        }
+    );
+    for (what, value) in uds::module_identity(elm, tx, rx).map_err(e)? {
         println!("     {what:<17} {value}");
     }
-    match uds::module_dtcs(elm, tx).map_err(e)? {
+    match uds::module_dtcs(elm, tx, rx).map_err(e)? {
         None => println!("     trouble codes     (the module would not say)"),
         Some((dialect, codes)) => {
             let lang = if dialect == uds::Dialect::Uds {
@@ -417,43 +438,154 @@ fn print_module(elm: &mut Elm, tx: u16, name: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn profiles() -> Vec<vehicles::Profile> {
+    let (all, problems) = vehicles::load(vehicles::user_dir().as_deref());
+    for p in problems {
+        eprintln!("note: a vehicle file was left out: {p}");
+    }
+    all
+}
+
 fn obd_scan(elm: &mut Elm, args: &Args) -> Result<(), String> {
-    let make = match args.opt("make") {
-        Some(m) => {
-            uds::Make::parse(m).ok_or(format!("unknown make {m:?}: toyota, subaru or generic"))?
+    let all = profiles();
+    let profile = match args.opt("make") {
+        Some(m) => vehicles::find(&all, m)?.clone(),
+        None => {
+            let vin = j1979::vin(elm).map_err(e)?;
+            match vin.as_deref().and_then(|v| vehicles::for_vin(&all, v)) {
+                Some(p) => p.clone(),
+                None => {
+                    eprintln!("note: no vehicle profile for this VIN ({}); scanning the OBD-II range only (--make or --sweep look further)", vin.as_deref().unwrap_or("none given"));
+                    vehicles::find(&all, "generic")?.clone()
+                }
+            }
         }
-        None => uds::Make::Generic,
     };
     let list = if args.opt("sweep").is_some() {
         uds::sweep()
     } else {
-        uds::candidates(make)
+        vehicles::candidates(&profile)
     };
+    println!("Vehicle profile: {} ({})", profile.name, profile.source);
+    if !profile.notes.is_empty() {
+        println!(
+            "{}",
+            profile
+                .notes
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+    }
     eprintln!("looking at {} addresses...", list.len());
-    let mut found = 0;
-    for (tx, name) in list {
-        if uds::present(elm, tx).map_err(e)? {
+    let (mut found, mut later) = (0, Vec::new());
+    for m in &list {
+        if let Some(why) = m.unreachable() {
+            later.push(format!("{:03X}  {}: {why}", m.tx, m.name));
+            continue;
+        }
+        if uds::present(elm, m.tx, m.rx()).map_err(e)? {
             found += 1;
-            print_module(elm, tx, name)?;
+            print_module(elm, m)?;
         }
     }
     println!("\n{found} module(s) answered. Codes: P powertrain, C chassis (ABS, steering), B body (airbags, lights), U network.");
+    if !later.is_empty() {
+        println!("Not reachable yet:\n  {}", later.join("\n  "));
+    }
     Ok(())
 }
 
 fn obd_module(elm: &mut Elm, args: &Args) -> Result<(), String> {
     let [id] = args.pos.as_slice() else {
-        return Err("usage: icarus obd module ID --adapter A (ID in hex, e.g. 7B0)".into());
+        return Err(
+            "usage: icarus obd module ID[/ANSWER_ID] --adapter A (hex, e.g. 7B0 or 713/77D)".into(),
+        );
     };
-    let tx = u16::from_str_radix(id.trim_start_matches("0x"), 16)
-        .map_err(|_| format!("{id} is not a module ID in hex"))?;
+    let (t, r) = id
+        .split_once('/')
+        .map_or((id.as_str(), None), |(a, b)| (a, Some(b)));
+    let hex = |s: &str| {
+        u16::from_str_radix(s.trim_start_matches("0x"), 16)
+            .map_err(|_| format!("{s} is not a module ID in hex"))
+    };
+    let tx = hex(t)?;
+    let rx = r.map(hex).transpose()?;
     if !(0x700..=0x7F7).contains(&tx) || tx == 0x7DF {
         return Err("module request IDs are 700-7F7 (7DF is the broadcast)".into());
     }
-    if !uds::present(elm, tx).map_err(e)? {
+    let m = vehicles::ModuleAddr {
+        tx,
+        rx,
+        name: "module".into(),
+        ext: None,
+        bus: None,
+        checked: false,
+    };
+    if !uds::present(elm, tx, m.rx()).map_err(e)? {
         return Err(format!("nothing answered at {tx:03X}"));
     }
-    print_module(elm, tx, "module")
+    print_module(elm, &m)
+}
+
+fn cmd_vin(a: &[String]) -> Result<(), String> {
+    let [v] = a else {
+        return Err("usage: icarus vin VIN".into());
+    };
+    let i = vin::decode(v)?;
+    let all = profiles();
+    println!("VIN          {}", i.vin);
+    println!("made in      {} (position 1)", i.region);
+    println!(
+        "maker code   {} (positions 1-3){}",
+        i.wmi,
+        vehicles::for_vin(&all, &i.vin)
+            .map(|p| format!(": {}", p.name))
+            .unwrap_or_default()
+    );
+    println!(
+        "vehicle      {} (positions 4-8: model, body, engine; the maker's own code)",
+        &i.vin[3..8]
+    );
+    println!(
+        "check digit  {} (position 9){}",
+        &i.vin[8..9],
+        match i.check_digit_ok {
+            Some(true) => ": adds up",
+            Some(false) => ": does NOT add up",
+            None => "",
+        }
+    );
+    println!(
+        "model year   {} (position 10)",
+        i.year.map_or("-".to_string(), |y| y.to_string())
+    );
+    println!("plant        {} (position 11)", &i.vin[10..11]);
+    println!("serial       {} (positions 12-17)", &i.vin[11..]);
+    for p in i.problems {
+        println!("note: {p}");
+    }
+    Ok(())
+}
+
+fn cmd_vehicles() -> Result<(), String> {
+    for p in profiles() {
+        let n = vehicles::candidates(&p).len();
+        println!("{:<12} {}  [{}]", p.id, p.name, p.source);
+        if !p.wmi.is_empty() {
+            println!(
+                "             VIN starts {}; {n} module addresses",
+                p.wmi.join(" ")
+            );
+        }
+    }
+    println!(
+        "\nAdd or correct a make: copy one of crates/icarus-obd/vehicles/*.toml into {}.",
+        vehicles::user_dir().map_or("~/.config/icarus/vehicles".into(), |d| d
+            .display()
+            .to_string())
+    );
+    Ok(())
 }
 
 fn e(x: icarus_obd::elm::ObdError) -> String {

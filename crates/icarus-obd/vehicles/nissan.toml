@@ -1,0 +1,3 @@
+name = "Nissan / Infiniti"
+wmi = ["JN", "1N", "3N", "5N1"]
+notes = "Only the OBD-II side is listed so far; --sweep finds the rest."

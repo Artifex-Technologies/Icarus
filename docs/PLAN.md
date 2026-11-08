@@ -44,7 +44,10 @@ What those tools do, and where Icarus is:
 | --- | --- |
 | Find every module, read its identity and trouble codes (UDS and KWP2000) | done (`obd scan`, `obd module`), read-only, tested on the simulated vehicle |
 | Each module's own live data (Toyota: KWP2000 `21` local identifiers and UDS `22`; e.g. transmission fluid temperature) | next: needs the identifiers per module, from public sources, checked on the Tacoma |
-| Toyota body modules behind the gateway (ID 750 with an extended address byte) | next: `ATCEA` on the adapter |
+| Many makes, not one vehicle: a TOML profile per make (module addresses, quirks), picked by the VIN; user files add or correct | done: 12 makes + generic; addresses from public sources, each `checked = false` until seen on a vehicle |
+| Toyota body modules behind the gateway (ID 750 with an extended address byte), BMW's gateway | next: extended addressing (`ATCEA`) |
+| Honda's and others' 29-bit module IDs (18DAxxF1); GM's body range (24x answering at 64x) | next |
+| Ford's medium-speed CAN (pins 3/11) | next: OBDLink's bus switching |
 | Freeze frames, readiness per module, code descriptions | next |
 | Clear codes | after: a write (small, but it erases the evidence of a fault; asks first, shows what is cleared) |
 | Actuator tests (run the fan, cycle the ABS pump, click a relay) | after: writes; each test with its conditions (engine off, vehicle still) |

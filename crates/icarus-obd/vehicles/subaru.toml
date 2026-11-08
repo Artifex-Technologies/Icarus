@@ -1,0 +1,28 @@
+name = "Subaru"
+wmi = ["JF1", "JF2", "4S3", "4S4", "4S6"]
+notes = """The engine computer also answers Subaru's own SSM protocol, which tuning tools use for logging and flashing; Icarus
+speaks only OBD-II and UDS/KWP2000 to it so far. Addresses below are from public sources and still to be checked."""
+
+[[module]]
+tx = 0x7E0
+name = "engine (ECM)"
+
+[[module]]
+tx = 0x7E1
+name = "transmission (TCM)"
+
+[[module]]
+tx = 0x7B0
+name = "ABS / VDC"
+
+[[module]]
+tx = 0x780
+name = "airbags (SRS)"
+
+[[module]]
+tx = 0x7C0
+name = "instrument cluster"
+
+[[module]]
+tx = 0x7A1
+name = "electric power steering"

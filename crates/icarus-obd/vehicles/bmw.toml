@@ -1,0 +1,4 @@
+name = "BMW / Mini"
+wmi = ["WBA", "WBS", "WBX", "WBY", "5UX", "5UJ", "5YM", "WMW"]
+notes = """BMW modules are reached through the gateway with extended addressing (requests from 6F1 carrying the module's
+address byte, answers from 600 plus that address), which Icarus does not do yet: only the OBD-II side works here."""

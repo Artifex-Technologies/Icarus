@@ -75,10 +75,10 @@ pub fn nrc(code: u8) -> &'static str {
 }
 
 /// One module's answer to a request, pending responses (7F xx 78) waited out.
-fn ask(elm: &mut Elm, tx: u16, data: &[u8]) -> Result<Option<Answer>, ObdError> {
+fn ask(elm: &mut Elm, tx: u16, rx: u16, data: &[u8]) -> Result<Option<Answer>, ObdError> {
     check_read_only(data)?;
     for attempt in 0..4 {
-        let answers = match elm.request_to(tx, tx + 8, data) {
+        let answers = match elm.request_to(tx, rx, data) {
             Ok(a) => a,
             Err(ObdError::NoData) => return Ok(None),
             Err(e) => return Err(e),
@@ -181,13 +181,17 @@ pub enum Dialect {
 }
 
 /// A module's trouble codes: UDS first, KWP2000 when the module does not know UDS's service.
-pub fn module_dtcs(elm: &mut Elm, tx: u16) -> Result<Option<(Dialect, Vec<ModuleDtc>)>, ObdError> {
-    if let Some(a) = ask(elm, tx, &[0x19, 0x02, 0xFF])? {
+pub fn module_dtcs(
+    elm: &mut Elm,
+    tx: u16,
+    rx: u16,
+) -> Result<Option<(Dialect, Vec<ModuleDtc>)>, ObdError> {
+    if let Some(a) = ask(elm, tx, rx, &[0x19, 0x02, 0xFF])? {
         if let Some(v) = parse_uds_dtcs(&a.data) {
             return Ok(Some((Dialect::Uds, v)));
         }
     }
-    if let Some(a) = ask(elm, tx, &[0x18, 0x02, 0xFF, 0x00])? {
+    if let Some(a) = ask(elm, tx, rx, &[0x18, 0x02, 0xFF, 0x00])? {
         if let Some(v) = parse_kwp_dtcs(&a.data) {
             return Ok(Some((Dialect::Kwp, v)));
         }
@@ -224,10 +228,14 @@ fn shown(b: &[u8]) -> String {
 }
 
 /// The identification values a module gives (each asked separately: many modules refuse several at once).
-pub fn module_identity(elm: &mut Elm, tx: u16) -> Result<Vec<(&'static str, String)>, ObdError> {
+pub fn module_identity(
+    elm: &mut Elm,
+    tx: u16,
+    rx: u16,
+) -> Result<Vec<(&'static str, String)>, ObdError> {
     let mut out = Vec::new();
     for (did, name) in IDENTITY {
-        if let Some(a) = ask(elm, tx, &[0x22, (did >> 8) as u8, *did as u8])? {
+        if let Some(a) = ask(elm, tx, rx, &[0x22, (did >> 8) as u8, *did as u8])? {
             if a.data.len() > 3
                 && a.data[0] == 0x62
                 && a.data[1..3] == [(did >> 8) as u8, *did as u8]
@@ -240,74 +248,27 @@ pub fn module_identity(elm: &mut Elm, tx: u16) -> Result<Vec<(&'static str, Stri
 }
 
 /// Whether a module answers at request ID `tx`: any answer counts, a refusal too.
-pub fn present(elm: &mut Elm, tx: u16) -> Result<bool, ObdError> {
+pub fn present(elm: &mut Elm, tx: u16, rx: u16) -> Result<bool, ObdError> {
     for req in [&[0x3E, 0x00][..], &[0x3E, 0x01][..]] {
-        if ask(elm, tx, req)?.is_some() {
+        if ask(elm, tx, rx, req)?.is_some() {
             return Ok(true);
         }
     }
     Ok(false)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Make {
-    Generic,
-    Toyota,
-    Subaru,
-}
-
-impl Make {
-    pub fn parse(s: &str) -> Option<Make> {
-        match s.to_lowercase().as_str() {
-            "generic" | "any" => Some(Make::Generic),
-            "toyota" | "lexus" | "scion" => Some(Make::Toyota),
-            "subaru" => Some(Make::Subaru),
-            _ => None,
-        }
-    }
-}
-
-/// Where to look for modules: request IDs (answers come from ID + 8) and what usually sits there. The OBD range 7E0-7E7 is
-/// standard; the others are each maker's habit, from public sources, and are to be checked on the vehicle (`--sweep` finds
-/// modules at any ID from 700 to 7F7).
-pub fn candidates(make: Make) -> Vec<(u16, &'static str)> {
-    let mut v = vec![
-        (0x7E0, "engine (ECM/PCM)"),
-        (0x7E1, "transmission (TCM)"),
-        (0x7E2, "hybrid / third OBD module"),
-        (0x7E3, "fourth OBD module"),
-        (0x7E4, "fifth OBD module"),
-        (0x7E5, "sixth OBD module"),
-        (0x7E6, "seventh OBD module"),
-        (0x7E7, "eighth OBD module"),
-    ];
-    match make {
-        Make::Generic => {}
-        Make::Toyota => v.extend([
-            (0x7B0, "ABS / VSC (skid control)"),
-            (0x780, "airbags (SRS)"),
-            (0x7C0, "instrument cluster (combination meter)"),
-            (0x7C4, "air conditioning"),
-            (0x7A1, "power steering"),
-            (0x7D0, "audio / navigation"),
-            (0x781, "occupant detection"),
-        ]),
-        Make::Subaru => v.extend([
-            (0x7B0, "ABS / VDC"),
-            (0x780, "airbags (SRS)"),
-            (0x7C0, "instrument cluster"),
-            (0x7A1, "power steering"),
-            (0x7D0, "audio / navigation"),
-        ]),
-    }
-    v
-}
-
 /// Every request ID from 700 to 7F7 except the OBD broadcast (7DF): a slower search that finds modules anywhere.
-pub fn sweep() -> Vec<(u16, &'static str)> {
+pub fn sweep() -> Vec<crate::vehicles::ModuleAddr> {
     (0x700..=0x7F7)
         .filter(|id| *id != 0x7DF)
-        .map(|id| (id, "found by sweep"))
+        .map(|tx| crate::vehicles::ModuleAddr {
+            tx,
+            rx: None,
+            name: "found by sweep".into(),
+            ext: None,
+            bus: None,
+            checked: false,
+        })
         .collect()
 }
 
@@ -366,28 +327,33 @@ mod tests {
     #[test]
     fn scanning_the_simulated_toyota() {
         let mut elm = Elm::connect(Box::new(SimCar::new())).unwrap();
-        let found: Vec<u16> = candidates(Make::Toyota)
+        let all = crate::vehicles::builtin();
+        let vin = crate::j1979::vin(&mut elm).unwrap().unwrap();
+        let toyota = crate::vehicles::for_vin(&all, &vin).unwrap();
+        assert_eq!(toyota.id, "toyota", "the VIN picks the profile");
+        let found: Vec<u16> = crate::vehicles::candidates(toyota)
             .into_iter()
-            .filter(|(tx, _)| present(&mut elm, *tx).unwrap())
-            .map(|c| c.0)
+            .filter(|m| m.unreachable().is_none())
+            .filter(|m| present(&mut elm, m.tx, m.rx()).unwrap())
+            .map(|m| m.tx)
             .collect();
         assert_eq!(found, vec![0x7E0, 0x7E1, 0x7B0, 0x780, 0x7C0]);
-        let id = module_identity(&mut elm, 0x7E0).unwrap();
+        let id = module_identity(&mut elm, 0x7E0, 0x7E0 + 8).unwrap();
         assert!(
             id.contains(&("part number", "89661-ICARUS".to_string())),
             "{id:?}"
         );
-        let (d, codes) = module_dtcs(&mut elm, 0x7E0).unwrap().unwrap();
+        let (d, codes) = module_dtcs(&mut elm, 0x7E0, 0x7E0 + 8).unwrap().unwrap();
         assert_eq!((d, codes[0].code.as_str()), (Dialect::Uds, "P0171"));
-        let (d, codes) = module_dtcs(&mut elm, 0x7B0).unwrap().unwrap();
+        let (d, codes) = module_dtcs(&mut elm, 0x7B0, 0x7B0 + 8).unwrap().unwrap();
         assert_eq!(
             (d, codes[0].code.as_str()),
             (Dialect::Kwp, "C1241"),
             "the ABS speaks KWP2000 only"
         );
-        let (_, codes) = module_dtcs(&mut elm, 0x780).unwrap().unwrap();
+        let (_, codes) = module_dtcs(&mut elm, 0x780, 0x780 + 8).unwrap().unwrap();
         assert!(codes.is_empty());
-        let (d, codes) = module_dtcs(&mut elm, 0x7C0).unwrap().unwrap();
+        let (d, codes) = module_dtcs(&mut elm, 0x7C0, 0x7C0 + 8).unwrap().unwrap();
         assert_eq!(
             (d, codes.len()),
             (Dialect::Uds, 0),

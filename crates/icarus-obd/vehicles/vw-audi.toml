@@ -1,0 +1,26 @@
+name = "Volkswagen / Audi / Seat / Skoda"
+wmi = ["WVW", "WV1", "WV2", "3VW", "1VW", "WAU", "WA1", "WUA"]
+notes = "On VW group cars most modules answer 6A above their request ID (713 -> 77D), not 8."
+
+[[module]]
+tx = 0x7E0
+name = "engine (01)"
+
+[[module]]
+tx = 0x7E1
+name = "transmission (02)"
+
+[[module]]
+tx = 0x713
+rx = 0x77D
+name = "brakes / ABS (03)"
+
+[[module]]
+tx = 0x714
+rx = 0x77E
+name = "instrument cluster (17)"
+
+[[module]]
+tx = 0x715
+rx = 0x77F
+name = "airbags (15)"

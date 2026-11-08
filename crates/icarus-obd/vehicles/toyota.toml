@@ -1,0 +1,44 @@
+# Toyota, Lexus, Scion. Addresses from public sources; `checked` turns true once Icarus has seen the module answer there.
+name = "Toyota / Lexus / Scion"
+wmi = ["JT", "2T", "3T", "4T", "5T"]
+notes = """Many Toyota modules speak KWP2000 on CAN rather than UDS; Icarus tries both. Body modules sit behind ID 750 with an
+extended address byte (main body 40), which Icarus does not reach yet. On many models the engine computer also runs the
+automatic transmission, so 7E1 may stay silent."""
+
+[[module]]
+tx = 0x7E0
+name = "engine (ECM)"
+
+[[module]]
+tx = 0x7E1
+name = "transmission (ECT)"
+
+[[module]]
+tx = 0x7B0
+name = "ABS / VSC / TRC (skid control)"
+
+[[module]]
+tx = 0x780
+name = "airbags (SRS)"
+
+[[module]]
+tx = 0x781
+name = "occupant classification"
+
+[[module]]
+tx = 0x7C0
+name = "instrument cluster (combination meter)"
+
+[[module]]
+tx = 0x7C4
+name = "air conditioning"
+
+[[module]]
+tx = 0x7A1
+name = "electric power steering"
+
+[[module]]
+tx = 0x750
+rx = 0x758
+ext = 0x40
+name = "main body"

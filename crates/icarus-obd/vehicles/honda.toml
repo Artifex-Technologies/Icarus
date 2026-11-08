@@ -1,0 +1,4 @@
+name = "Honda / Acura"
+wmi = ["JH", "1H", "2H", "5J", "5F", "19"]
+notes = """Most Honda modules use 29-bit CAN IDs (18DAxxF1); Icarus addresses single modules on 11-bit IDs only so far, so it
+reaches the OBD-II side here."""

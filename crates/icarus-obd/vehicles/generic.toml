@@ -1,0 +1,5 @@
+# Any vehicle: only the OBD-II range every vehicle sold in the US since 1996 has (request IDs 7E0-7E7 on CAN, answers from
+# 7E8-7EF). Each make's file adds its other modules; `icarus obd scan --sweep` looks at every ID from 700 to 7F7.
+name = "Any vehicle (OBD-II)"
+wmi = []
+notes = "Only the standard OBD-II modules. Add a make's file (or use --sweep) to reach ABS, airbags, body and the rest."

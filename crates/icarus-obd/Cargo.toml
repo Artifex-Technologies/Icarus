@@ -9,3 +9,6 @@ repository.workspace = true
 [dependencies]
 # serial ports, Bluetooth RFCOMM sockets and poll (MIT/Apache-2.0)
 libc = "0.2"
+# vehicle profiles are TOML files (MIT/Apache-2.0)
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"

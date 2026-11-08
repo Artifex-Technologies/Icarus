@@ -1,14 +1,14 @@
 //! A simulated vehicle behind a simulated ELM327 adapter (`--adapter sim`): for trying Icarus without a vehicle, and for the
 //! tests. It speaks like a real adapter (echo, headers, spaces, the `>` prompt, ISO-TP frames on CAN 11-bit at 500 kbit/s)
-//! and has two modules: an engine (7E8) and a transmission (7E9). Its VIN, 1ICARUSSIM0000001, cannot be a real one (real VINs
-//! never use I, O or Q).
+//! and Toyota-like modules (engine, transmission, ABS, airbags, cluster). Its VIN, 5TFICARUSSIM00001, starts like a US-built
+//! Toyota truck's but cannot be a real one (real VINs never use I, O or Q).
 
 use crate::port::Port;
 use std::collections::VecDeque;
 use std::io;
 use std::time::Duration;
 
-pub const VIN: &str = "1ICARUSSIM0000001";
+pub const VIN: &str = "5TFICARUSSIM00001";
 
 pub struct SimCar {
     input: Vec<u8>,

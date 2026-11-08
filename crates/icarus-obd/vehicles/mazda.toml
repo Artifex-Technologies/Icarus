@@ -1,0 +1,23 @@
+name = "Mazda"
+wmi = ["JM", "3MZ", "3MV", "4F"]
+notes = "Mazda shares much of Ford's module layout (FORScan covers both); addresses still to be checked."
+
+[[module]]
+tx = 0x7E0
+name = "PCM (engine)"
+
+[[module]]
+tx = 0x7E1
+name = "TCM (transmission)"
+
+[[module]]
+tx = 0x760
+name = "ABS"
+
+[[module]]
+tx = 0x737
+name = "RCM (airbags)"
+
+[[module]]
+tx = 0x720
+name = "instrument cluster"

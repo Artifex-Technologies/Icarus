@@ -1,0 +1,27 @@
+name = "Hyundai / Kia / Genesis"
+wmi = ["KM", "KN", "5NP", "5NM", "5XY", "5XX"]
+notes = "Addresses from public sources, still to be checked."
+
+[[module]]
+tx = 0x7E0
+name = "engine (ECM)"
+
+[[module]]
+tx = 0x7E1
+name = "transmission (TCM)"
+
+[[module]]
+tx = 0x7D1
+name = "ABS / ESC"
+
+[[module]]
+tx = 0x7D2
+name = "airbags (SRS)"
+
+[[module]]
+tx = 0x7A0
+name = "body (BCM)"
+
+[[module]]
+tx = 0x7C6
+name = "instrument cluster"

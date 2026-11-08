@@ -1,0 +1,12 @@
+name = "GM (Chevrolet, GMC, Buick, Cadillac)"
+wmi = ["1G", "2G", "3G", "KL"]
+notes = """GM's transmission answers at 7EA (request 7E2). Its body modules use request IDs in the 240s answering 400 higher
+(640s), outside the range --sweep covers so far."""
+
+[[module]]
+tx = 0x7E0
+name = "ECM (engine)"
+
+[[module]]
+tx = 0x7E2
+name = "TCM (transmission)"
