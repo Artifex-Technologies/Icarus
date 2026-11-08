@@ -7,7 +7,7 @@ use icarus_core::xdf;
 use icarus_obd::elm::Elm;
 use icarus_obd::j1979::{self, DtcKind};
 use icarus_obd::port::Target;
-use icarus_obd::{actuator, dtc, garage, lookup, report, uds, vehicles, vin};
+use icarus_obd::{actuator, clear, dtc, garage, lookup, report, uds, vehicles, vin};
 use std::io::Write;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
@@ -47,6 +47,8 @@ Trouble codes:
   icarus obd test NAME --adapter A [--value PERCENT] [--seconds N] [--yes]
                                              run one: asks first, checks its conditions, stops after N seconds or Ctrl+C
                                              and hands control back to the module (sim:off = the simulated engine off)
+  icarus obd clear --adapter A [--module ID] [--yes]
+                                             clear codes (every OBD-II module, or one): saves a report first, engine off
   icarus obd report --adapter A [--scan] [--out FILE]
                                              everything in one Markdown report (~/Documents/Icarus/reports); --scan adds
                                              every module
@@ -394,7 +396,7 @@ fn cmd_obd(a: &[String]) -> Result<(), String> {
     let args = parse_args(
         a.get(1..).unwrap_or(&[]),
         &[
-            "adapter", "every", "count", "csv", "make", "out", "value", "seconds",
+            "adapter", "every", "count", "csv", "make", "out", "value", "seconds", "module",
         ],
     )?;
     match a.first().map(String::as_str) {
@@ -406,6 +408,7 @@ fn cmd_obd(a: &[String]) -> Result<(), String> {
         Some("module") => obd_module(&mut connect(&args)?, &args),
         Some("report") => obd_report(&mut connect(&args)?, &args),
         Some("tests") => obd_tests(&mut connect(&args)?),
+        Some("clear") => obd_clear(&mut connect(&args)?, &args),
         Some("test") => obd_test(&mut connect(&args)?, &args),
         _ => Err(
             "usage: icarus obd info|codes|pids|live|scan|module --adapter A (see icarus --help)"
@@ -910,6 +913,59 @@ fn obd_test(elm: &mut Elm, args: &Args) -> Result<(), String> {
     };
     actuator::stop(elm, &mut run, &why)?;
     println!("Stopped ({why}); control is back with the module.");
+    Ok(())
+}
+
+fn obd_clear(elm: &mut Elm, args: &Args) -> Result<(), String> {
+    // one module (its dialect is learned by reading its codes first) or every OBD-II module
+    let target = match args.opt("module") {
+        None => None,
+        Some(id) => {
+            let (t, r) = id.split_once('/').map_or((id, None), |(a, b)| (a, Some(b)));
+            let hex = |s: &str| {
+                u16::from_str_radix(s.trim_start_matches("0x"), 16)
+                    .map_err(|_| format!("{s} is not a module ID in hex"))
+            };
+            let tx = hex(t)?;
+            let rx = r.map(hex).transpose()?.unwrap_or(tx + 8);
+            let Some((d, codes)) = uds::module_dtcs(elm, tx, rx).map_err(e)? else {
+                return Err(format!("{tx:03X} did not give its codes"));
+            };
+            println!(
+                "{tx:03X} has {} code(s): {}",
+                codes.len(),
+                codes
+                    .iter()
+                    .map(|c| c.code.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            Some((tx, rx, d))
+        }
+    };
+    println!("{}", clear::WARNING);
+    if args.opt("yes").is_none() {
+        print!("Type yes to save a report and clear: ");
+        std::io::stdout().flush().ok();
+        let mut line = String::new();
+        std::io::stdin()
+            .read_line(&mut line)
+            .map_err(|x| x.to_string())?;
+        if line.trim() != "yes" {
+            return Err("not cleared".into());
+        }
+    }
+    let d = report::collect(elm, &profiles(), target.is_some()).map_err(e)?;
+    let saved = report::save(&d, None)
+        .map_err(|x| format!("not cleared: the report could not be saved ({x})"))?;
+    println!("Report saved first: {}", saved.display());
+    match target {
+        None => println!("Cleared: {}", clear::clear_obd(elm)?.join(", ")),
+        Some((tx, rx, d)) => {
+            clear::clear_module(elm, tx, rx, d)?;
+            println!("Cleared module {tx:03X}.");
+        }
+    }
     Ok(())
 }
 

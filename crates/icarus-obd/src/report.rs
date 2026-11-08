@@ -322,9 +322,26 @@ pub fn default_path(d: &Diagnosis) -> PathBuf {
         .join(format!("icarus-report-{stamp}.md"))
 }
 
-/// Writes the report and returns where.
+/// The default path, or the same with -2, -3... when a report of the same minute exists: a report never replaces another.
+pub fn free_path(d: &Diagnosis) -> PathBuf {
+    let first = default_path(d);
+    if !first.exists() {
+        return first;
+    }
+    let stem = first
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("icarus-report")
+        .to_string();
+    (2..)
+        .map(|n| first.with_file_name(format!("{stem}-{n}.md")))
+        .find(|p| !p.exists())
+        .unwrap()
+}
+
+/// Writes the report and returns where (never over another report unless `path` names it).
 pub fn save(d: &Diagnosis, path: Option<PathBuf>) -> std::io::Result<PathBuf> {
-    let p = path.unwrap_or_else(|| default_path(d));
+    let p = path.unwrap_or_else(|| free_path(d));
     if let Some(dir) = p.parent() {
         std::fs::create_dir_all(dir)?;
     }

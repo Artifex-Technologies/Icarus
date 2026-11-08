@@ -8,7 +8,7 @@ use icarus_obd::port::Target;
 use icarus_obd::uds::{self, Dialect, ModuleDtc};
 use icarus_obd::vehicles::{self, ModuleAddr, Profile};
 use icarus_obd::vin::{self, VinInfo};
-use icarus_obd::{actuator, report};
+use icarus_obd::{actuator, clear, report};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
@@ -29,6 +29,8 @@ pub enum Cmd {
         def: actuator::TestDef,
         value: f64,
     },
+    /// Clear codes: every OBD-II module (None) or one module (request ID, answer ID, its dialect). A report is saved first.
+    Clear(Option<(u16, u16, Dialect)>),
     TestHold,
     TestStop,
 }
@@ -72,6 +74,8 @@ pub enum Event {
         unreachable: Vec<String>,
     },
     ReportSaved(String),
+    /// Codes cleared (what was said), and the Vehicle page's information read again.
+    Cleared(String, Box<Info>),
     TestStarted(String),
     /// A test ended: its name and why.
     TestStopped {
@@ -183,6 +187,38 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
                     Err(m) => send(Event::Failed(m)),
                 }
             }
+            Some(Cmd::Clear(target)) => {
+                let Some(e) = elm.as_mut() else { continue };
+                live.clear();
+                send(Event::Status("Saving a report before clearing...".into()));
+                let saved = report::collect(e, &profiles, target.is_some())
+                    .map_err(|x| x.to_string())
+                    .and_then(|d| report::save(&d, None).map_err(|x| x.to_string()));
+                let saved = match saved {
+                    Ok(p) => p,
+                    Err(m) => {
+                        send(Event::Failed(format!(
+                            "not cleared: the report before clearing could not be saved ({m})"
+                        )));
+                        continue;
+                    }
+                };
+                let result = match target {
+                    None => clear::clear_obd(e).map(|ok| format!("Cleared: {}", ok.join(", "))),
+                    Some((tx, rx, d)) => clear::clear_module(e, tx, rx, d)
+                        .map(|_| format!("Cleared module {tx:03X}")),
+                };
+                match result.and_then(|msg| gather(e, &profiles).map(|i| (msg, i))) {
+                    Ok((msg, info)) => send(Event::Cleared(
+                        format!("{msg}. The report from before is {}.", saved.display()),
+                        Box::new(info),
+                    )),
+                    Err(m) => send(Event::Failed(format!(
+                        "{m} (the report from before is {})",
+                        saved.display()
+                    ))),
+                }
+            }
             Some(Cmd::TestHold) | Some(Cmd::TestStop) => {}
             None if test.is_some() => {
                 if last_hold.elapsed() > Duration::from_millis(500) {
@@ -259,6 +295,13 @@ fn connect(spec: &str, profiles: &[Profile]) -> Result<(Elm, Info), String> {
     let target = Target::parse(spec)?;
     let port = target.open().map_err(|e| format!("{spec}: {e}"))?;
     let mut elm = Elm::connect(port).map_err(|e| e.to_string())?;
+    let info = gather(&mut elm, profiles)?;
+    Ok((elm, info))
+}
+
+/// Everything the Vehicle page shows, read again.
+fn gather(elm: &mut Elm, profiles: &[Profile]) -> Result<Info, String> {
+    let mut elm = elm;
     let e = |x: ObdError| x.to_string();
     let vin = j1979::vin(&mut elm).map_err(e)?;
     let vin_info = vin.as_deref().and_then(|v| vin::decode(v).ok());
@@ -330,7 +373,7 @@ fn connect(spec: &str, profiles: &[Profile]) -> Result<(Elm, Info), String> {
         tests,
         vehicle,
     };
-    Ok((elm, info))
+    Ok(info)
 }
 
 fn scan(

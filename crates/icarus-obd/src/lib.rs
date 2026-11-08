@@ -3,6 +3,8 @@
 //! vehicle's identity, and never clears codes or writes to a module.
 
 pub mod actuator;
+pub mod audit;
+pub mod clear;
 pub mod dtc;
 pub mod elm;
 pub mod garage;

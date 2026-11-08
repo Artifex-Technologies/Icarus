@@ -125,6 +125,8 @@ struct App {
     release_needed: bool,
     test_note: String,
     test_reading: Option<f64>,
+    /// A clear waiting for the person's yes: None = every OBD-II module, Some = one module (tx, rx, dialect).
+    confirm_clear: Option<(Option<(u16, u16, Dialect)>, String)>,
     page: Page,
     tx: Sender<Cmd>,
     rx: Receiver<Event>,
@@ -160,6 +162,7 @@ impl App {
             release_needed: false,
             test_note: String::new(),
             test_reading: None,
+            confirm_clear: None,
             page: start.page.unwrap_or(Page::Vehicle),
             tx,
             rx,
@@ -284,6 +287,14 @@ impl App {
                     self.release_needed = true;
                 }
                 Event::TestReading(v) => self.test_reading = Some(v),
+                Event::Cleared(msg, info) => {
+                    self.status = msg;
+                    self.error = None;
+                    self.info = Some(*info);
+                    self.modules.clear();
+                    self.scan_note =
+                        "Codes were cleared: scan again to see the modules now.".into();
+                }
                 Event::ReportSaved(p) => {
                     self.status = format!("Report saved: {p}");
                     self.last_report = Some(p);
@@ -370,6 +381,7 @@ impl App {
                 });
         });
         let mut links: Vec<String> = Vec::new();
+        let mut ask_clear = false;
         let mut save_name = false;
         let mut report = false;
         card(ui, pal, "This vehicle's name", |ui| {
@@ -423,6 +435,9 @@ impl App {
                 )
                 .weak(),
             );
+            if !info.codes.is_empty() && ui.button("Clear codes...").clicked() {
+                ask_clear = true;
+            }
         });
         for f in &info.freeze {
             let title = format!("Freeze frame: {} ({})", f.module, f.from);
@@ -524,6 +539,10 @@ impl App {
             self.live_on = false;
             let _ = self.tx.send(Cmd::Report(self.report_all));
         }
+        if ask_clear {
+            self.confirm_clear =
+                Some((None, "every engine and transmission module (OBD-II)".into()));
+        }
     }
 
     fn open_links(&mut self, links: Vec<String>) {
@@ -595,6 +614,7 @@ impl App {
             .filter(|_| !self.profile_choice.is_empty());
         let profile = chosen.or(self.info.as_ref().and_then(|i| i.profile.as_ref()));
         let vehicle = self.info.as_ref().and_then(|i| i.vehicle.as_ref());
+        let mut ask_clear: Option<(u16, u16, Dialect, String)> = None;
         for m in &self.modules {
             let title = format!("{:03X}  {}", m.addr.tx, m.addr.name);
             card(ui, pal, &title, |ui| {
@@ -645,9 +665,21 @@ impl App {
                                 &mut links,
                             );
                         }
+                        if !codes.is_empty() && ui.button("Clear this module's codes...").clicked()
+                        {
+                            ask_clear = Some((
+                                m.addr.tx,
+                                m.addr.rx(),
+                                *d,
+                                format!("{:03X} {}", m.addr.tx, m.addr.name),
+                            ));
+                        }
                     }
                 }
             });
+        }
+        if let Some((tx, rx, d, label)) = ask_clear {
+            self.confirm_clear = Some((Some((tx, rx, d)), label));
         }
         if !self.unreachable.is_empty() {
             card(ui, pal, "Not reachable yet", |ui| {
@@ -755,7 +787,7 @@ impl App {
         let tests = info.tests.clone();
         card(ui, pal, "Before you test", |ui| {
             ui.label("Actuator tests make the vehicle move parts: fans, throttle, pumps, valves. Park it: in Park (or neutral with the parking brake on), wheels chocked for brake and ABS tests, people and hands clear.");
-            ui.label("Hold the button to run a test. Letting go stops it at once and hands control back to the module; so does a time limit, a broken condition or a lost connection. Every test is logged in ~/.local/state/icarus/tests.log.");
+            ui.label("Hold the button to run a test. Letting go stops it at once and hands control back to the module; so does a time limit, a broken condition or a lost connection. Every test is logged in ~/.local/state/icarus/actions.log.");
         });
         if !self.test_note.is_empty() {
             ui.label(
@@ -1414,6 +1446,46 @@ impl eframe::App for App {
                     }
                 }
             });
+        if let Some((target, label)) = self.confirm_clear.clone() {
+            let mut go = false;
+            let mut cancel = false;
+            let resp = egui::Modal::new(egui::Id::new("confirm-clear")).show(&ctx, |ui| {
+                ui.set_max_width(460.0);
+                ui.label(
+                    RichText::new(format!("Clear the codes of {label}?"))
+                        .size(17.0)
+                        .strong(),
+                );
+                ui.add_space(6.0);
+                ui.label(icarus_obd::clear::WARNING);
+                ui.label(RichText::new("The engine must be off, ignition on.").weak());
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new("Save a report and clear").color(pal.on_accent()),
+                            )
+                            .fill(pal.red),
+                        )
+                        .clicked()
+                    {
+                        go = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+            if go {
+                self.live_on = false;
+                let _ = self.tx.send(Cmd::Clear(target));
+                self.status = "Saving a report, then clearing...".into();
+                self.confirm_clear = None;
+            } else if cancel || resp.should_close() {
+                self.confirm_clear = None;
+            }
+        }
         chrome::outline(&ctx, &pal);
     }
 }

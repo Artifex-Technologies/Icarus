@@ -28,6 +28,11 @@ icarus obd report --adapter A --scan                             # everything in
 
 The freeze frame (service 02) is what the engine was doing when the code set: speed, load, temperatures, fuel trims.
 
+Clearing (`icarus obd clear [--module ID]`, or Clear codes in the window) asks first, needs the engine off, and saves a
+report before it erases anything: the freeze frame goes with the codes, and every readiness monitor starts over. Only the
+clearing requests go out (OBD-II `04`, UDS `14 FF FF FF`, KWP2000 `14 FF 00`); permanent codes stay until their monitor
+passes. Every clear is in `~/.local/state/icarus/actions.log`.
+
 ## Actuator tests (bidirectional controls)
 
 Like the bidirectional controls of shop scan tools: Icarus asks a module to drive one output for a short while (throttle
@@ -43,7 +48,7 @@ actuator.rs`): only output control goes out (UDS `2F`, KWP2000 `30`, the session
 security access, routines, coding, clearing or programming; never airbag or occupant-detection modules; conditions (engine
 off or running, vehicle stopped) checked before and every second during a test; at least 11.5 V; a time limit of at most
 30 s; control handed back on every way out (release, time, condition, error, Ctrl+C, closed window), and by the module
-itself if Icarus dies (its diagnostic session times out); every start and stop in `~/.local/state/icarus/tests.log`.
+itself if Icarus dies (its diagnostic session times out); every start and stop in `~/.local/state/icarus/actions.log`.
 
 The tests are data: `[[test]]` entries in a vehicle profile (module, protocol, output ID, on/off or percent, conditions,
 time limit, warning, a live value to watch). Their IDs are each maker's own, so a profile carries only IDs from a source,

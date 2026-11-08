@@ -10,7 +10,7 @@
 //!   runs, needs at least 11.5 V at the port, and stops by itself after its time limit (at most 30 s).
 //! - Every stop path hands control back to the module (`stop`). If Icarus dies mid-test, the module's own diagnostic-session
 //!   timer (about 5 s without tester present) does the same.
-//! - Every start and stop is written to `~/.local/state/icarus/tests.log`.
+//! - Every start and stop is written to `~/.local/state/icarus/actions.log` (see `audit`).
 //!
 //! The tests themselves are data: `[[test]]` entries in a vehicle profile. Their IDs are each maker's own; a profile carries
 //! only IDs from a source, `checked = false` until seen working on a vehicle.
@@ -269,26 +269,7 @@ pub fn conditions_hold(elm: &mut Elm, conds: &[Condition]) -> Result<(), String>
 }
 
 fn log(line: &str) {
-    if cfg!(test) {
-        return; // tests never write into the person's own log
-    }
-    let dir = std::env::var_os("XDG_STATE_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/state"))
-        })
-        .map(|d| d.join("icarus"));
-    if let Some(d) = dir {
-        let _ = std::fs::create_dir_all(&d);
-        use std::io::Write;
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(d.join("tests.log"))
-        {
-            let _ = writeln!(f, "{} {line}", crate::report::now());
-        }
-    }
+    crate::audit::log(&format!("test {line}"));
 }
 
 static INTERRUPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);

@@ -29,6 +29,8 @@ pub struct SimCar {
     extended: std::collections::HashSet<u16>,
     /// Outputs driven by a test: (module, identifier) -> control state.
     driven: std::collections::HashMap<(u16, u16), Vec<u8>>,
+    /// Modules whose codes were cleared (OBD-II 04 clears the engine and transmission; UDS/KWP 14 one module).
+    cleared: std::collections::HashSet<u16>,
 }
 
 impl Default for SimCar {
@@ -58,6 +60,7 @@ impl SimCar {
             engine_on: true,
             extended: Default::default(),
             driven: Default::default(),
+            cleared: Default::default(),
         }
     }
 
@@ -177,7 +180,9 @@ impl SimCar {
         }
         Some(match pid {
             0x00 | 0x20 | 0x40 => Self::bitmap(ENGINE_PIDS, pid).to_vec(),
-            0x01 => vec![0x81, 0x07, 0x65, 0x04], // MIL on, 1 code; evaporative test not yet run
+            // MIL on, 1 code, evaporative test not yet run; after a clear: light off, no codes, every test to run again
+            0x01 if self.cleared.contains(&0x7E0) => vec![0x00, 0x07, 0x65, 0x65],
+            0x01 => vec![0x81, 0x07, 0x65, 0x04],
             0x03 => vec![0x02, 0x00],
             0x04 => vec![52],
             0x05 => vec![(88 + 40) as u8],
@@ -245,7 +250,19 @@ impl SimCar {
             0x7C0 => (b"83800-ICARUS", true, &[]),
             _ => return None,
         };
+        let codes: &[u8] = if self.cleared.contains(&tx) {
+            &[]
+        } else {
+            codes
+        };
         match (req, uds) {
+            ([0x14, 0xFF, 0xFF, 0xFF], true) | ([0x14, 0xFF, 0x00], false) => {
+                if self.engine_on {
+                    return refuse(0x22);
+                }
+                self.cleared.insert(tx);
+                Some(vec![0x54])
+            }
             ([0x10, s @ (0x01 | 0x03)], true) => {
                 if *s == 0x03 {
                     self.extended.insert(tx);
@@ -330,10 +347,27 @@ impl SimCar {
                 }
             }
             [0x03] => {
-                msgs.push(("7E8", vec![0x43, 0x01, 0x01, 0x71]));
+                msgs.push((
+                    "7E8",
+                    if self.cleared.contains(&0x7E0) {
+                        vec![0x43, 0x00]
+                    } else {
+                        vec![0x43, 0x01, 0x01, 0x71]
+                    },
+                ));
                 msgs.push(("7E9", vec![0x43, 0x00]));
             }
-            [0x02, pid, 0x00] => {
+            [0x04] => {
+                for (id, module) in [("7E8", 0x7E0), ("7E9", 0x7E1)] {
+                    if self.engine_on {
+                        msgs.push((id, vec![0x7F, 0x04, 0x22]));
+                    } else {
+                        self.cleared.insert(module);
+                        msgs.push((id, vec![0x44]));
+                    }
+                }
+            }
+            [0x02, pid, 0x00] if !self.cleared.contains(&0x7E0) => {
                 if let Some(d) = Self::frozen(*pid) {
                     msgs.push(("7E8", [&[0x42, *pid, 0x00][..], &d].concat()));
                 }
