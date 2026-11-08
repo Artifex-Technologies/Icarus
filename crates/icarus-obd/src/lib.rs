@@ -8,6 +8,7 @@ pub mod audit;
 pub mod bus;
 pub mod charging;
 pub mod clear;
+pub mod devices;
 pub mod dtc;
 pub mod elm;
 pub mod garage;

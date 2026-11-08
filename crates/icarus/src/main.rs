@@ -47,6 +47,10 @@ Bus (watching only: nothing is sent onto the bus):
                                              every ID with its rate and changing bytes, diagnostic messages in words, and
                                              actuator tests another tool runs, as entries for the vehicle's file
 
+Interfaces:
+  icarus devices                             the tuners and interfaces plugged in (SCT, COBB, HP Tuners, CP210x/FTDI
+                                             cables...), what each is and whether Icarus can open it; nothing is sent
+
 Tools:
   icarus tires STOCK NEW [--gear 3.909] [--speed 65]
                                              what new tires do to the speedometer and gearing, and which regear restores it
@@ -104,6 +108,7 @@ fn main() -> ExitCode {
         Some("tires") => cmd_tires(&args[1..]),
         Some("recalls") => cmd_recalls(&args[1..]),
         Some("mcp") => mcp::serve(),
+        Some("devices") => cmd_devices(),
         Some("-h" | "--help" | "help") | None => {
             println!("{HELP}");
             Ok(())
@@ -1531,3 +1536,21 @@ fn obd_live(elm: &mut Elm, args: &Args) -> Result<(), String> {
         }
     }
 }
+
+/// `icarus devices`: the recognised tuners and interfaces plugged in now (read from /sys; nothing is sent to them).
+fn cmd_devices() -> Result<(), String> {
+    use icarus_obd::devices;
+    let found = devices::scan(std::path::Path::new("/sys/bus/usb/devices"));
+    if found.is_empty() {
+        println!("No tuner or vehicle interface Icarus knows is plugged in.");
+        println!("Known: {}.", devices::KNOWN.iter().filter(|k| k.product.is_some()).map(|k| format!("{} {}", k.maker, k.name)).collect::<Vec<_>>().join(", "));
+        return Ok(());
+    }
+    for f in &found {
+        println!("{} {}  ({:04x}:{:04x}{})", f.known.maker, f.known.name, f.vendor, f.product, if f.label.is_empty() { String::new() } else { format!(", says \"{}\"", f.label) });
+        println!("    {}", f.status(devices::can_open));
+        println!("    {}", f.known.note);
+    }
+    Ok(())
+}
+

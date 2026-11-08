@@ -8,3 +8,13 @@ SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="5059", TAG+="uacc
 # Silicon Labs CP210x USB-serial (10c4:ea60 and family): VF Tuner's WiFlash (an ESP32 J2534 interface) and many OBD cables.
 # Linux's cp210x driver makes it /dev/ttyUSB*; this gives the person at the seat the port without joining the uucp group.
 SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60|ea63|ea70", TAG+="uaccess"
+
+# COBB (vendor 1a84): AccessPORT 2.0/2.0B and the AccessPORT's USB-OBD cables, on raw USB (COBB's own macOS program uses libusb)
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="1a84", TAG+="uaccess"
+
+# HP Tuners MPVI (0403:d018, an FT2232 with channels A and B) and CDV (0403:d019): FTDI chips under HP Tuners' own IDs, on
+# raw USB (as FTDI's D2XX library reaches them on Windows); Linux's serial driver does not know these IDs and is left out
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="0403", ATTR{idProduct}=="d018|d019", TAG+="uaccess"
+
+# Tactrix OpenPort 2.0 (0403:cc4c, a J2534 cable), on raw USB
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="0403", ATTR{idProduct}=="cc4c", TAG+="uaccess"
