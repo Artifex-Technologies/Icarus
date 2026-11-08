@@ -22,6 +22,9 @@ pub struct Profile {
     /// The maker's own trouble codes: code = meaning (`[codes]` table).
     #[serde(default)]
     pub codes: BTreeMap<String, String>,
+    /// Actuator tests (`[[test]]` entries; see `actuator`).
+    #[serde(default, rename = "test")]
+    pub tests: Vec<crate::actuator::TestDef>,
     /// The file's name without `.toml` (how `--make` picks it).
     #[serde(skip)]
     pub id: String,
@@ -98,6 +101,11 @@ pub fn parse(id: &str, source: &str, text: &str) -> Result<Profile, String> {
                 m.tx,
                 m.rx()
             ));
+        }
+    }
+    for t in &p.tests {
+        if let Some(why) = t.refused() {
+            return Err(format!("{source}: test \"{}\" refused: {why}", t.name));
         }
     }
     for w in &p.wmi {
@@ -208,6 +216,15 @@ pub fn find<'a>(profiles: &'a [Profile], text: &str) -> Result<&'a Profile, Stri
     }
 }
 
+/// The actuator tests for a vehicle: its profile's, and the simulated vehicle's own when it is the simulation.
+pub fn tests_for(profile: Option<&Profile>, vin: Option<&str>) -> Vec<crate::actuator::TestDef> {
+    let mut v: Vec<_> = profile.map(|p| p.tests.clone()).unwrap_or_default();
+    if vin == Some(crate::sim::VIN) {
+        v.extend(crate::sim::tests());
+    }
+    v
+}
+
 /// Where to look: the OBD-II range, then the profile's own modules (a profile entry for an OBD ID renames it).
 pub fn candidates(p: &Profile) -> Vec<ModuleAddr> {
     let mut v: Vec<ModuleAddr> = (0..8u16)
@@ -304,10 +321,20 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.join("typo.toml"), "name = \"y\"\nmodul = 1\n").unwrap();
+        std::fs::write(dir.join("sneaky.toml"), "name = \"z\"\n[[test]]\nname = \"Seat belt pretensioner\"\nmodule = 0x7E0\nprotocol = \"uds\"\nid = 0x1234\n").unwrap();
+        std::fs::write(dir.join("ok-test.toml"), "name = \"w\"\n[[test]]\nname = \"Radiator fan\"\nmodule = 0x7E0\nprotocol = \"uds\"\nid = 0x1234\nconditions = [\"stationary\"]\n").unwrap();
         let (all, problems) = load(Some(&dir));
         assert_eq!(find(&all, "toyota").unwrap().name, "My Toyota notes");
         assert!(find(&all, "kart").is_ok());
-        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert_eq!(problems.len(), 3, "{problems:?}");
+        assert!(
+            problems.iter().any(|p| p.contains("never tested")),
+            "an airbag-type test in a user file is refused"
+        );
+        assert_eq!(
+            find(&all, "ok-test").unwrap().tests[0].conditions,
+            vec![crate::actuator::Condition::Stationary]
+        );
         assert!(problems.iter().any(|p| p.contains("not 11-bit")));
         let _ = std::fs::remove_dir_all(&dir);
     }

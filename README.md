@@ -28,18 +28,41 @@ icarus obd report --adapter A --scan                             # everything in
 
 The freeze frame (service 02) is what the engine was doing when the code set: speed, load, temperatures, fuel trims.
 
+## Actuator tests (bidirectional controls)
+
+Like the bidirectional controls of shop scan tools: Icarus asks a module to drive one output for a short while (throttle
+to a set opening, cooling fan, fuel pump, a valve, the ABS pump) so the part can be checked.
+
+```sh
+icarus obd tests --adapter A                                   # the tests known for this vehicle
+icarus obd test throttle --adapter A --value 30 --seconds 3    # asks "yes", runs, hands control back
+```
+
+In the window (Tests page) a test runs only while its button is held. The fence is in code (`crates/icarus-obd/src/
+actuator.rs`): only output control goes out (UDS `2F`, KWP2000 `30`, the session and tester present they need); never
+security access, routines, coding, clearing or programming; never airbag or occupant-detection modules; conditions (engine
+off or running, vehicle stopped) checked before and every second during a test; at least 11.5 V; a time limit of at most
+30 s; control handed back on every way out (release, time, condition, error, Ctrl+C, closed window), and by the module
+itself if Icarus dies (its diagnostic session times out); every start and stop in `~/.local/state/icarus/tests.log`.
+
+The tests are data: `[[test]]` entries in a vehicle profile (module, protocol, output ID, on/off or percent, conditions,
+time limit, warning, a live value to watch). Their IDs are each maker's own, so a profile carries only IDs from a source,
+marked `checked = false` until seen working; none are in the built-in profiles yet. `sim:off` (the simulated vehicle,
+ignition on and engine off) has five to try: fan, throttle, fuel pump, EVAP vent valve, ABS pump.
+
 ## The window
 
 `icarus-app` (Icarus in the app menu): the **Vehicle** page connects to the adapter and shows the VIN, the make's profile,
 the codes explained with Look up and parts buttons, the freeze frame, the check-engine light and readiness monitors, the
 vehicle's name, and Save report; **Modules** scans every module for its identity and codes;
-**Live data** picks values and draws them as they change, each with what it means; **Maps** opens a definition and an image
+**Live data** picks values and draws them as they change, each with what it means; **Tests** runs actuator tests while a
+button is held; **Maps** opens a definition and an image
 (and a second image to compare: it starts on the first map the second one changed, changed cells outlined). Start options:
 `--connect [--adapter A] --page modules --scan`, `--live`, `--maps DEF.xdf IMAGE.bin [SECOND.bin]`.
 
 ## What it does today
 
-Everything below only reads: nothing is sent to a module that changes it.
+Everything below only reads, except the actuator tests (next section), which drive a part for as long as you hold the button.
 
 **Files** (no vehicle needed):
 
@@ -118,7 +141,7 @@ transmission modules, a CAN bus view, and a desktop app.
 - Ship one-click emissions "delete" features. Thresholds and calibration values (what sets what off) are ordinary maps, and
   emissions readings (oxygen sensors, lambda, fuel trims, catalyst temperature, monitors) are part of the live data.
 - Bypass immobilizers or change odometer readings.
-- Write to a module without a verified full backup first.
+- Flash or recode a module without a verified full backup first (actuator tests are the only writes so far).
 
 ## Licence
 

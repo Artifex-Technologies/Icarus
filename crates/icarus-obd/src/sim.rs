@@ -23,6 +23,12 @@ pub struct SimCar {
     filter: Option<u16>,
     /// The instrument cluster answers its first trouble-code request with "response pending" (7F 19 78).
     meter_busy: bool,
+    /// The engine runs (`sim`), or the ignition is on with the engine off (`sim:off`).
+    engine_on: bool,
+    /// Modules in the extended diagnostic session (10 03), which UDS output control needs.
+    extended: std::collections::HashSet<u16>,
+    /// Outputs driven by a test: (module, identifier) -> control state.
+    driven: std::collections::HashMap<(u16, u16), Vec<u8>>,
 }
 
 impl Default for SimCar {
@@ -49,6 +55,17 @@ impl SimCar {
             header: 0x7DF,
             filter: None,
             meter_busy: true,
+            engine_on: true,
+            extended: Default::default(),
+            driven: Default::default(),
+        }
+    }
+
+    /// Ignition on, engine off: what most actuator tests need.
+    pub fn engine_off() -> SimCar {
+        SimCar {
+            engine_on: false,
+            ..SimCar::new()
         }
     }
 
@@ -135,8 +152,29 @@ impl SimCar {
 
     fn engine_pid(&self, pid: u8) -> Option<Vec<u8>> {
         let t = self.tick as f64;
-        let rpm = 790.0 + 40.0 * (t * 0.7).sin();
+        let rpm = if self.engine_on {
+            790.0 + 40.0 * (t * 0.7).sin()
+        } else {
+            0.0
+        };
         let r = (rpm * 4.0) as u16;
+        if !self.engine_on {
+            // key on, engine off: nothing turns; the throttle rests at ~15 % unless a test drives it
+            match pid {
+                0x04 | 0x0D => return Some(vec![0]),
+                0x0C => return Some(vec![0, 0]),
+                0x10 => return Some(vec![0, 0]),
+                0x0B => return Some(vec![98]),
+                0x11 => {
+                    return Some(vec![self
+                        .driven
+                        .get(&(0x7E0, 0xF002))
+                        .and_then(|s| s.first().copied())
+                        .unwrap_or(38)])
+                }
+                _ => {}
+            }
+        }
         Some(match pid {
             0x00 | 0x20 | 0x40 => Self::bitmap(ENGINE_PIDS, pid).to_vec(),
             0x01 => vec![0x81, 0x07, 0x65, 0x04], // MIL on, 1 code; evaporative test not yet run
@@ -208,6 +246,46 @@ impl SimCar {
             _ => return None,
         };
         match (req, uds) {
+            ([0x10, s @ (0x01 | 0x03)], true) => {
+                if *s == 0x03 {
+                    self.extended.insert(tx);
+                } else {
+                    self.extended.remove(&tx);
+                    self.driven.retain(|k, _| k.0 != tx); // leaving the session ends every output test
+                }
+                Some(vec![0x50, *s])
+            }
+            ([0x2F, hi, lo, param, state @ ..], true) if tx == 0x7E0 => {
+                let id = u16::from_be_bytes([*hi, *lo]);
+                if !(0xF001..=0xF004).contains(&id) {
+                    return refuse(0x31);
+                }
+                if !self.extended.contains(&tx) {
+                    return refuse(0x22);
+                }
+                match param {
+                    0x00 => {
+                        self.driven.remove(&(tx, id));
+                    }
+                    0x03 if !state.is_empty() => {
+                        self.driven.insert((tx, id), state.to_vec());
+                    }
+                    _ => return refuse(0x31),
+                }
+                Some([&[0x6F, *hi, *lo, *param][..], state].concat())
+            }
+            ([0x30, 0x10, param, state @ ..], false) if tx == 0x7B0 => {
+                match param {
+                    0x00 => {
+                        self.driven.remove(&(tx, 0x10));
+                    }
+                    0x07 if !state.is_empty() => {
+                        self.driven.insert((tx, 0x10), state.to_vec());
+                    }
+                    _ => return refuse(0x12),
+                }
+                Some(vec![0x70, 0x10, *param])
+            }
             ([0x3E, 0x00], true) => Some(vec![0x7E, 0x00]),
             ([0x3E, 0x00], false) => refuse(0x12),
             ([0x3E, 0x01], false) => Some(vec![0x7E]),
@@ -445,4 +523,84 @@ mod tests {
         let ltft = j1979::read(&mut elm, 0x07).unwrap();
         assert!((ltft[0].value - 11.71875).abs() < 1e-9);
     }
+}
+
+/// The simulated vehicle's actuator tests. Their identifiers (F001-F004 on the engine computer, 10 on the ABS module) exist only
+/// in this simulation: they are never in a real vehicle's profile.
+pub fn tests() -> Vec<crate::actuator::TestDef> {
+    use crate::actuator::{Condition::*, Control, Protocol, TestDef};
+    let t = |name: &str,
+             module: u16,
+             protocol: Protocol,
+             id: u16,
+             control: Control,
+             conditions: Vec<crate::actuator::Condition>,
+             max_seconds: u32,
+             warning: &str| TestDef {
+        name: name.into(),
+        module,
+        rx: None,
+        protocol,
+        id,
+        control,
+        on: vec![0x01],
+        scale: 2.55,
+        conditions,
+        max_seconds,
+        warning: warning.into(),
+        watch: if id == 0xF002 { Some(0x11) } else { None },
+        checked: true,
+    };
+    vec![
+        t(
+            "Cooling fan: run",
+            0x7E0,
+            Protocol::Uds,
+            0xF001,
+            Control::Onoff,
+            vec![Stationary],
+            15,
+            "Keep hands, hair and clothes away from the fan.",
+        ),
+        t(
+            "Throttle body: open to a set position",
+            0x7E0,
+            Protocol::Uds,
+            0xF002,
+            Control::Percent,
+            vec![EngineOff, Stationary],
+            10,
+            "Keep fingers and tools out of the throttle body: the plate moves with force.",
+        ),
+        t(
+            "Fuel pump: run",
+            0x7E0,
+            Protocol::Uds,
+            0xF003,
+            Control::Onoff,
+            vec![EngineOff, Stationary],
+            5,
+            "Only with the fuel system closed: no open lines, fuel is under pressure.",
+        ),
+        t(
+            "EVAP vent valve: close",
+            0x7E0,
+            Protocol::Uds,
+            0xF004,
+            Control::Onoff,
+            vec![EngineOff],
+            20,
+            "",
+        ),
+        t(
+            "ABS pump motor: run",
+            0x7B0,
+            Protocol::Kwp,
+            0x10,
+            Control::Onoff,
+            vec![EngineOff, Stationary],
+            3,
+            "The ABS pump is loud, and the brake pedal may move.",
+        ),
+    ]
 }

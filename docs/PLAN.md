@@ -51,7 +51,8 @@ What those tools do, and where Icarus is:
 | Code descriptions, where to start, parts usually involved, look-up and parts links, freeze frame, saved reports | done 2026-11-07 (standard codes in Icarus's words; maker codes per profile `[codes]`) |
 | Mode 06 (on-board test results), a VIN decoder from NHTSA's public vPIC data (model, engine) | next |
 | Clear codes | after: a write (small, but it erases the evidence of a fault; asks first, shows what is cleared) |
-| Actuator tests (run the fan, cycle the ABS pump, click a relay) | after: writes; each test with its conditions (engine off, vehicle still) |
+| Actuator tests (run the fan, open the throttle, cycle the ABS pump, click a relay) | done 2026-11-07: the engine (actuator.rs: allow-list, airbag ban, conditions, 30 s cap, hold-to-run, control returned on every path, log), `[[test]]` profile entries, five on the simulated vehicle. No real IDs yet: each maker's own |
+| Learn a test from another tool: watch the bus (adapter monitor mode, a Y-cable) while a shop tool runs it, decode its 2F/30 requests into a `[[test]]` entry | next: the way to fill real vehicles' tests |
 | Customizations / as-built configuration (FORScan's paddle shifters and tire size; Toyota's customizations) | after: writes; a backup of the whole configuration before any change, and the way back |
 | Service functions (relearns, resets, bleeding, injector coding, TPMS IDs) | after: per vehicle |
 

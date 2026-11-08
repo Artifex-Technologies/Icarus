@@ -7,7 +7,7 @@ use icarus_core::xdf;
 use icarus_obd::elm::Elm;
 use icarus_obd::j1979::{self, DtcKind};
 use icarus_obd::port::Target;
-use icarus_obd::{dtc, garage, lookup, report, uds, vehicles, vin};
+use icarus_obd::{actuator, dtc, garage, lookup, report, uds, vehicles, vin};
 use std::io::Write;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
@@ -43,6 +43,10 @@ Trouble codes:
                                              what a code means, where to start, the parts usually involved, links to look
                                              it up and to find parts (no vehicle needed)
   icarus obd codes --adapter A               the vehicle's codes, each explained, and the freeze frame
+  icarus obd tests --adapter A               actuator tests known for this vehicle (fan, throttle, pumps...)
+  icarus obd test NAME --adapter A [--value PERCENT] [--seconds N] [--yes]
+                                             run one: asks first, checks its conditions, stops after N seconds or Ctrl+C
+                                             and hands control back to the module (sim:off = the simulated engine off)
   icarus obd report --adapter A [--scan] [--out FILE]
                                              everything in one Markdown report (~/Documents/Icarus/reports); --scan adds
                                              every module
@@ -89,7 +93,7 @@ fn parse_args(a: &[String], with_value: &[&str]) -> Result<Args, String> {
     };
     let mut i = 0;
     while i < a.len() {
-        if a[i] == "--sweep" || a[i] == "--scan" {
+        if a[i] == "--sweep" || a[i] == "--scan" || a[i] == "--yes" {
             out.opts.push((a[i][2..].to_string(), "yes".into()));
             i += 1;
             continue;
@@ -389,7 +393,9 @@ fn connect(args: &Args) -> Result<Elm, String> {
 fn cmd_obd(a: &[String]) -> Result<(), String> {
     let args = parse_args(
         a.get(1..).unwrap_or(&[]),
-        &["adapter", "every", "count", "csv", "make", "out"],
+        &[
+            "adapter", "every", "count", "csv", "make", "out", "value", "seconds",
+        ],
     )?;
     match a.first().map(String::as_str) {
         Some("info") => obd_info(&mut connect(&args)?),
@@ -399,6 +405,8 @@ fn cmd_obd(a: &[String]) -> Result<(), String> {
         Some("scan") => obd_scan(&mut connect(&args)?, &args),
         Some("module") => obd_module(&mut connect(&args)?, &args),
         Some("report") => obd_report(&mut connect(&args)?, &args),
+        Some("tests") => obd_tests(&mut connect(&args)?),
+        Some("test") => obd_test(&mut connect(&args)?, &args),
         _ => Err(
             "usage: icarus obd info|codes|pids|live|scan|module --adapter A (see icarus --help)"
                 .into(),
@@ -778,6 +786,130 @@ fn obd_codes(elm: &mut Elm) -> Result<(), String> {
         }
     }
     println!("\nicarus obd scan reads every module's own codes (ABS, airbags, body...); icarus obd report saves all of it.");
+    Ok(())
+}
+
+fn vehicle_tests(elm: &mut Elm) -> Result<Vec<actuator::TestDef>, String> {
+    let all = profiles();
+    let vin = j1979::vin(elm).map_err(e)?;
+    let profile = vin.as_deref().and_then(|v| vehicles::for_vin(&all, v));
+    Ok(vehicles::tests_for(profile, vin.as_deref()))
+}
+
+fn obd_tests(elm: &mut Elm) -> Result<(), String> {
+    let tests = vehicle_tests(elm)?;
+    if tests.is_empty() {
+        println!("No actuator tests are known for this vehicle yet: their IDs are the maker's own. They go in the vehicle's profile as [[test]] entries (docs/PLAN.md).");
+    }
+    for t in &tests {
+        let conds: Vec<&str> = t.conditions.iter().map(|c| c.describe()).collect();
+        println!(
+            "{}  ({:03X}, {:?}, up to {} s{})",
+            t.name,
+            t.module,
+            t.protocol,
+            t.max_seconds,
+            if t.checked {
+                ""
+            } else {
+                ", IDs not yet checked on a vehicle"
+            }
+        );
+        if !conds.is_empty() {
+            println!("    needs: {}", conds.join(", "));
+        }
+        if !t.warning.is_empty() {
+            println!("    {}", t.warning);
+        }
+    }
+    Ok(())
+}
+
+fn obd_test(elm: &mut Elm, args: &Args) -> Result<(), String> {
+    let [name] = args.pos.as_slice() else {
+        return Err(
+            "usage: icarus obd test \"NAME\" --adapter A [--value PERCENT] [--seconds N] [--yes]"
+                .into(),
+        );
+    };
+    let tests = vehicle_tests(elm)?;
+    let n = name.to_lowercase();
+    let hits: Vec<&actuator::TestDef> = tests
+        .iter()
+        .filter(|t| t.name.to_lowercase().contains(&n))
+        .collect();
+    let t = match hits.as_slice() {
+        [t] => *t,
+        [] => {
+            return Err(format!(
+                "no test matches {name:?} (icarus obd tests lists them)"
+            ))
+        }
+        _ => {
+            return Err(format!(
+                "{name:?} matches {} tests; be more exact",
+                hits.len()
+            ))
+        }
+    };
+    let value: f64 = match (t.control, args.opt("value")) {
+        (actuator::Control::Percent, Some(v)) => {
+            v.parse().map_err(|_| "--value needs a percentage")?
+        }
+        (actuator::Control::Percent, None) => {
+            return Err("this test needs --value (0-100 %)".into())
+        }
+        _ => 0.0,
+    };
+    let secs: u32 = args
+        .opt("seconds")
+        .map(|v| v.parse().map_err(|_| "--seconds needs a number"))
+        .transpose()?
+        .unwrap_or(3)
+        .clamp(1, t.max_seconds);
+    println!(
+        "{} on module {:03X} for {secs} s{}",
+        t.name,
+        t.module,
+        if t.control == actuator::Control::Percent {
+            format!(", set to {value} %")
+        } else {
+            String::new()
+        }
+    );
+    if !t.warning.is_empty() {
+        println!("WARNING: {}", t.warning);
+    }
+    println!("Vehicle parked, in Park or neutral with the parking brake on. Ctrl+C stops the test at once.");
+    if args.opt("yes").is_none() {
+        print!("Type yes to start: ");
+        std::io::stdout().flush().ok();
+        let mut line = String::new();
+        std::io::stdin()
+            .read_line(&mut line)
+            .map_err(|x| x.to_string())?;
+        if line.trim() != "yes" {
+            return Err("not started".into());
+        }
+    }
+    actuator::catch_interrupt();
+    let mut run = actuator::start(elm, t, value)?;
+    println!("running...");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs as u64);
+    let why = loop {
+        if actuator::interrupted() {
+            break "stopped with Ctrl+C".to_string();
+        }
+        if std::time::Instant::now() >= deadline {
+            break "done".to_string();
+        }
+        if let Err(x) = actuator::keep(elm, &mut run) {
+            break x;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    actuator::stop(elm, &mut run, &why)?;
+    println!("Stopped ({why}); control is back with the module.");
     Ok(())
 }
 

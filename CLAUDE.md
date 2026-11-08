@@ -13,6 +13,9 @@ repository; `.gitignore` keeps `*.bin` and `/private` out).
   committed; tests use small files written for them.
 - Limits: no one-click emissions "delete" features, no immobilizer bypass, no odometer changes. Thresholds and calibration
   values are ordinary maps; emissions readings are ordinary live data.
-- Nothing writes to a vehicle module until docs/PLAN.md section 4's conditions are built and tested on a bench ECU.
+- The only writes to a vehicle are actuator tests, and only through `crates/icarus-obd/src/actuator.rs` (its allow-list, the
+  airbag ban, conditions, time limit, return of control on every path). Do not widen that list without the owner's say; no
+  guessed test IDs in a real vehicle's profile (unverified IDs could drive something else). Flashing and coding wait for
+  docs/PLAN.md section 4's conditions, built and tested on a bench ECU.
   Disassembling ECU firmware happens in Limbo, as for any binary.
 - The plan and its order: [docs/PLAN.md](docs/PLAN.md).

@@ -13,22 +13,33 @@ pub trait Port {
 }
 
 /// Where to reach the adapter, as written on the command line:
-///   `sim`                          Icarus's simulated car (no hardware)
+///   `sim` or `sim:off`             Icarus's simulated car, engine running or ignition on with the engine off
 ///   `/dev/ttyUSB0` or `/dev/ttyUSB0@115200`   a USB adapter (38400 baud unless given)
 ///   `bt:AA:BB:CC:DD:EE:FF` or `...#2`         a paired Bluetooth adapter, RFCOMM channel 1 unless given
 ///   `tcp:192.168.0.10:35000`       a Wi-Fi adapter
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
-    Sim,
-    Serial { path: String, baud: u32 },
-    Bluetooth { addr: [u8; 6], channel: u8 },
+    /// The simulated vehicle: engine running (`sim`) or ignition on, engine off (`sim:off`).
+    Sim {
+        engine_on: bool,
+    },
+    Serial {
+        path: String,
+        baud: u32,
+    },
+    Bluetooth {
+        addr: [u8; 6],
+        channel: u8,
+    },
     Tcp(String),
 }
 
 impl Target {
     pub fn parse(s: &str) -> Result<Target, String> {
-        if s == "sim" {
-            return Ok(Target::Sim);
+        if s == "sim" || s == "sim:off" {
+            return Ok(Target::Sim {
+                engine_on: s == "sim",
+            });
         }
         if let Some(rest) = s.strip_prefix("tcp:") {
             if !rest.contains(':') {
@@ -71,7 +82,8 @@ impl Target {
 
     pub fn open(&self) -> io::Result<Box<dyn Port>> {
         Ok(match self {
-            Target::Sim => Box::new(crate::sim::SimCar::new()),
+            Target::Sim { engine_on: true } => Box::new(crate::sim::SimCar::new()),
+            Target::Sim { engine_on: false } => Box::new(crate::sim::SimCar::engine_off()),
             Target::Serial { path, baud } => Box::new(open_serial(path, *baud)?),
             Target::Bluetooth { addr, channel } => Box::new(open_rfcomm(*addr, *channel)?),
             Target::Tcp(hostport) => {
@@ -262,7 +274,14 @@ mod tests {
 
     #[test]
     fn targets_from_the_command_line() {
-        assert_eq!(Target::parse("sim").unwrap(), Target::Sim);
+        assert_eq!(
+            Target::parse("sim").unwrap(),
+            Target::Sim { engine_on: true }
+        );
+        assert_eq!(
+            Target::parse("sim:off").unwrap(),
+            Target::Sim { engine_on: false }
+        );
         assert_eq!(
             Target::parse("/dev/ttyUSB0").unwrap(),
             Target::Serial {

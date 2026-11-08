@@ -23,13 +23,15 @@ enum Page {
     Vehicle,
     Modules,
     Live,
+    Tests,
     Maps,
 }
 
-const PAGES: [(Page, &str); 4] = [
+const PAGES: [(Page, &str); 5] = [
     (Page::Vehicle, "Vehicle"),
     (Page::Modules, "Modules"),
     (Page::Live, "Live data"),
+    (Page::Tests, "Tests"),
     (Page::Maps, "Maps"),
 ];
 
@@ -116,6 +118,13 @@ struct App {
     /// A report with every module's codes too.
     report_all: bool,
     last_report: Option<String>,
+    /// Actuator tests: the percent chosen per test, the one held now, the last thing said, the watched value.
+    test_values: HashMap<String, f64>,
+    holding: Option<String>,
+    /// After a test stopped by itself while the button was still held: the button must be let go before any test starts.
+    release_needed: bool,
+    test_note: String,
+    test_reading: Option<f64>,
     page: Page,
     tx: Sender<Cmd>,
     rx: Receiver<Event>,
@@ -146,6 +155,11 @@ impl App {
             name_edit: String::new(),
             report_all: true,
             last_report: None,
+            test_values: HashMap::new(),
+            holding: None,
+            release_needed: false,
+            test_note: String::new(),
+            test_reading: None,
             page: start.page.unwrap_or(Page::Vehicle),
             tx,
             rx,
@@ -260,6 +274,16 @@ impl App {
                     self.unreachable = unreachable;
                     self.status = format!("Scan done: {found} module(s) answered.");
                 }
+                Event::TestStarted(name) => {
+                    self.test_note = format!("Running: {name}. Let go to stop.");
+                    self.test_reading = None;
+                }
+                Event::TestStopped { name, why } => {
+                    self.test_note = format!("{name}: stopped ({why}).");
+                    self.holding = None;
+                    self.release_needed = true;
+                }
+                Event::TestReading(v) => self.test_reading = Some(v),
                 Event::ReportSaved(p) => {
                     self.status = format!("Report saved: {p}");
                     self.last_report = Some(p);
@@ -721,6 +745,134 @@ impl App {
                     }
                 });
         });
+    }
+
+    fn page_tests(&mut self, ui: &mut egui::Ui, pal: &theme::Palette) {
+        let Some(info) = &self.info else {
+            ui.label("Connect on the Vehicle page first. (The simulated vehicle with its engine off is sim:off.)");
+            return;
+        };
+        let tests = info.tests.clone();
+        card(ui, pal, "Before you test", |ui| {
+            ui.label("Actuator tests make the vehicle move parts: fans, throttle, pumps, valves. Park it: in Park (or neutral with the parking brake on), wheels chocked for brake and ABS tests, people and hands clear.");
+            ui.label("Hold the button to run a test. Letting go stops it at once and hands control back to the module; so does a time limit, a broken condition or a lost connection. Every test is logged in ~/.local/state/icarus/tests.log.");
+        });
+        if !self.test_note.is_empty() {
+            ui.label(
+                RichText::new(&self.test_note)
+                    .strong()
+                    .color(if self.holding.is_some() {
+                        pal.amber
+                    } else {
+                        pal.text
+                    }),
+            );
+            ui.add_space(4.0);
+        }
+        if tests.is_empty() {
+            card(ui, pal, "No tests for this vehicle yet", |ui| {
+                ui.label("The IDs behind each test (which output, which module) are each maker's own and often per model. A vehicle's tests go in its profile as [[test]] entries once they are known: from the maker's service information, or by watching what another scan tool sends while it runs the test.");
+            });
+            return;
+        }
+        let mut press: Option<(icarus_obd::actuator::TestDef, f64)> = None;
+        let mut held_now: Option<String> = None;
+        for t in &tests {
+            card(ui, pal, &t.name, |ui| {
+                ui.label(
+                    RichText::new(format!(
+                        "module {:03X}, {}, up to {} s{}",
+                        t.module,
+                        t.protocol.label(),
+                        t.max_seconds,
+                        if t.checked {
+                            ""
+                        } else {
+                            " · IDs not yet checked on a vehicle"
+                        }
+                    ))
+                    .small()
+                    .weak(),
+                );
+                if !t.conditions.is_empty() {
+                    ui.label(format!(
+                        "Needs: {}",
+                        t.conditions
+                            .iter()
+                            .map(|c| c.describe())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
+                if !t.warning.is_empty() {
+                    ui.label(RichText::new(&t.warning).color(pal.amber));
+                }
+                let value = self.test_values.entry(t.name.clone()).or_insert(25.0);
+                ui.horizontal(|ui| {
+                    ui.visuals_mut().widgets.inactive.bg_fill = pal.bg;
+                    ui.visuals_mut().widgets.inactive.weak_bg_fill = pal.bg;
+                    if t.control == icarus_obd::actuator::Control::Percent {
+                        ui.add_enabled(
+                            self.holding.is_none(),
+                            egui::Slider::new(value, 0.0..=100.0).suffix(" %").integer(),
+                        );
+                    }
+                    let mine = self.holding.as_deref() == Some(t.name.as_str());
+                    let label = if mine {
+                        "Running: let go to stop"
+                    } else {
+                        "Hold to run"
+                    };
+                    let b = ui.add_enabled(
+                        self.holding.is_none() || mine,
+                        egui::Button::new(RichText::new(label).strong().color(pal.on_accent()))
+                            .fill(if mine { pal.amber } else { pal.accent })
+                            .min_size(vec2(190.0, 34.0))
+                            .sense(Sense::click_and_drag()),
+                    );
+                    if b.is_pointer_button_down_on() {
+                        held_now = Some(t.name.clone());
+                        if self.holding.is_none() {
+                            press = Some((t.clone(), *value));
+                        }
+                    }
+                    if mine {
+                        if let (Some(w), Some(v)) =
+                            (t.watch.and_then(j1979::pid), self.test_reading)
+                        {
+                            ui.label(
+                                RichText::new(format!("{}: {v:.1} {}", w.name, w.unit)).strong(),
+                            );
+                        }
+                    }
+                });
+            });
+        }
+        // start on press, keep alive while held, stop on release; never restart without a release in between
+        if held_now.is_none() {
+            self.release_needed = false;
+        }
+        match (&self.holding, held_now) {
+            (None, Some(_)) if self.release_needed => {}
+            (None, Some(_)) => {
+                if let Some((def, value)) = press {
+                    self.holding = Some(def.name.clone());
+                    self.live_on = false;
+                    self.test_note = format!("Starting: {}...", def.name);
+                    let _ = self.tx.send(Cmd::TestStart { def, value });
+                }
+            }
+            (Some(_), Some(_)) => {
+                let _ = self.tx.send(Cmd::TestHold);
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(60));
+            }
+            (Some(_), None) => {
+                let _ = self.tx.send(Cmd::TestStop);
+                self.holding = None;
+            }
+            (None, None) => {}
+        }
     }
 
     fn load_maps(&mut self) {
@@ -1192,7 +1344,7 @@ impl eframe::App for App {
             )
             .show(ui, |ui| {
                 ui.label(RichText::new("Icarus").size(20.0).strong());
-                ui.label(RichText::new("read-only").small().weak());
+                ui.label(RichText::new("vehicle electronics").small().weak());
                 ui.add_space(14.0);
                 for (p, name) in PAGES {
                     let sel = self.page == p;
@@ -1256,6 +1408,7 @@ impl eframe::App for App {
                             .show(ui, |ui| match page {
                                 Page::Vehicle => self.page_vehicle(ui, &pal),
                                 Page::Modules => self.page_modules(ui, &pal),
+                                Page::Tests => self.page_tests(ui, &pal),
                                 _ => self.page_live(ui, &pal),
                             });
                     }

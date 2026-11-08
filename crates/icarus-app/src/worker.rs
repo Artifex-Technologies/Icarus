@@ -5,10 +5,10 @@ use icarus_obd::elm::{Elm, ObdError};
 use icarus_obd::garage::{self, Described};
 use icarus_obd::j1979::{self, DtcKind, FreezeFrame, Monitors};
 use icarus_obd::port::Target;
-use icarus_obd::report;
 use icarus_obd::uds::{self, Dialect, ModuleDtc};
 use icarus_obd::vehicles::{self, ModuleAddr, Profile};
 use icarus_obd::vin::{self, VinInfo};
+use icarus_obd::{actuator, report};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
@@ -24,6 +24,13 @@ pub enum Cmd {
     Live(Vec<u8>),
     /// Read everything again and save a report (with every module when true).
     Report(bool),
+    /// Start an actuator test (value for percent tests); it runs while TestHold keeps coming (at least every 0.5 s).
+    TestStart {
+        def: actuator::TestDef,
+        value: f64,
+    },
+    TestHold,
+    TestStop,
 }
 
 pub struct Info {
@@ -43,6 +50,8 @@ pub struct Info {
     pub freeze: Vec<FreezeFrame>,
     /// The name given to this vehicle (garage), for searches and parts links.
     pub vehicle: Option<Described>,
+    /// Actuator tests known for this vehicle.
+    pub tests: Vec<actuator::TestDef>,
 }
 
 pub struct ModuleView {
@@ -63,6 +72,14 @@ pub enum Event {
         unreachable: Vec<String>,
     },
     ReportSaved(String),
+    TestStarted(String),
+    /// A test ended: its name and why.
+    TestStopped {
+        name: String,
+        why: String,
+    },
+    /// The watched value while a test runs.
+    TestReading(f64),
     Reading {
         pid: u8,
         value: f64,
@@ -77,22 +94,58 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
     };
     let mut elm: Option<Elm> = None;
     let mut live: Vec<u8> = Vec::new();
+    let mut test: Option<actuator::Running> = None;
+    let mut last_hold = Instant::now();
+    let mut last_watch = Instant::now();
     let start = Instant::now();
     let profiles = vehicles::load(vehicles::user_dir().as_deref()).0;
     loop {
-        let cmd = if live.is_empty() || elm.is_none() {
+        let busy = test.is_some() || (!live.is_empty() && elm.is_some());
+        let cmd = if !busy {
             match rx.recv() {
                 Ok(c) => Some(c),
                 Err(_) => return,
             }
         } else {
-            match rx.recv_timeout(Duration::from_millis(20)) {
+            match rx.recv_timeout(Duration::from_millis(if test.is_some() { 50 } else { 20 })) {
                 Ok(c) => Some(c),
                 Err(RecvTimeoutError::Timeout) => None,
-                Err(RecvTimeoutError::Disconnected) => return,
+                Err(RecvTimeoutError::Disconnected) => {
+                    // the window is gone: hand control back before the thread ends
+                    end_test(&mut elm, &mut test, "the window closed", &send);
+                    return;
+                }
             }
         };
         match cmd {
+            Some(Cmd::TestHold) => {
+                last_hold = Instant::now();
+                continue;
+            }
+            Some(Cmd::TestStop) => {
+                end_test(&mut elm, &mut test, "released", &send);
+                continue;
+            }
+            // anything else ends a running test first
+            Some(_) => end_test(&mut elm, &mut test, "another action", &send),
+            None => {}
+        }
+        match cmd {
+            Some(Cmd::TestStart { def, value }) => {
+                let Some(e) = elm.as_mut() else { continue };
+                live.clear();
+                match actuator::start(e, &def, value) {
+                    Ok(r) => {
+                        last_hold = Instant::now();
+                        send(Event::TestStarted(def.name.clone()));
+                        test = Some(r);
+                    }
+                    Err(why) => send(Event::TestStopped {
+                        name: def.name.clone(),
+                        why: format!("not started: {why}"),
+                    }),
+                }
+            }
             Some(Cmd::Connect(spec)) => {
                 elm = None;
                 live.clear();
@@ -130,6 +183,32 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
                     Err(m) => send(Event::Failed(m)),
                 }
             }
+            Some(Cmd::TestHold) | Some(Cmd::TestStop) => {}
+            None if test.is_some() => {
+                if last_hold.elapsed() > Duration::from_millis(500) {
+                    end_test(&mut elm, &mut test, "the button was let go", &send);
+                    continue;
+                }
+                let (Some(e), Some(r)) = (elm.as_mut(), test.as_mut()) else {
+                    continue;
+                };
+                if let Err(why) = actuator::keep(e, r) {
+                    end_test(&mut elm, &mut test, &why, &send);
+                    continue;
+                }
+                if let Some(pid) = r
+                    .def
+                    .watch
+                    .filter(|_| last_watch.elapsed() >= Duration::from_millis(250))
+                {
+                    last_watch = Instant::now();
+                    if let Ok(v) = j1979::read(e, pid) {
+                        if let Some(x) = v.iter().find(|x| x.from == "7E8").or(v.first()) {
+                            send(Event::TestReading(x.value));
+                        }
+                    }
+                }
+            }
             None => {
                 let Some(e) = elm.as_mut() else { continue };
                 for &pid in &live {
@@ -154,6 +233,26 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
             }
         }
     }
+}
+
+/// Ends a running test: control handed back, the session left; says so either way.
+fn end_test(
+    elm: &mut Option<Elm>,
+    test: &mut Option<actuator::Running>,
+    why: &str,
+    send: &impl Fn(Event),
+) {
+    let Some(mut r) = test.take() else { return };
+    let name = r.def.name.clone();
+    let res = match elm.as_mut() {
+        Some(e) => actuator::stop(e, &mut r, why),
+        None => Err("the adapter is gone".into()),
+    };
+    let why = match res {
+        Ok(()) => format!("{why}; control is back with the module"),
+        Err(m) => format!("{why}; handing control back failed ({m}): the module takes it back by itself within seconds"),
+    };
+    send(Event::TestStopped { name, why });
 }
 
 fn connect(spec: &str, profiles: &[Profile]) -> Result<(Elm, Info), String> {
@@ -208,6 +307,7 @@ fn connect(spec: &str, profiles: &[Profile]) -> Result<(Elm, Info), String> {
     }
     let freeze = j1979::freeze_frame(&mut elm).map_err(e)?;
     let vehicle = vin.as_deref().and_then(garage::get);
+    let tests = vehicles::tests_for(profile.as_ref(), vin.as_deref());
     let info = Info {
         adapter: format!(
             "{}{}",
@@ -227,6 +327,7 @@ fn connect(spec: &str, profiles: &[Profile]) -> Result<(Elm, Info), String> {
         live,
         codes,
         freeze,
+        tests,
         vehicle,
     };
     Ok((elm, info))

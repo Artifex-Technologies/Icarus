@@ -2,6 +2,7 @@
 //! adapter's language, and `j1979` the standard OBD-II services. This crate only reads: it asks for values, codes and the
 //! vehicle's identity, and never clears codes or writes to a module.
 
+pub mod actuator;
 pub mod dtc;
 pub mod elm;
 pub mod garage;
