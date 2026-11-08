@@ -335,6 +335,23 @@ impl SimCar {
         msgs.iter().flat_map(|(h, p)| self.frames(h, p)).collect()
     }
 
+    /// The answers to an OBD-II request to every module (7DF), for a simulated J2534 device: (answer ID, message).
+    pub fn broadcast_answers(&mut self, req: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
+        self.tick += 1;
+        self.broadcast(req)
+    }
+
+    /// One module's answers to a request sent to it alone, for a simulated J2534 device: a "response pending" (7F xx 78) is
+    /// followed by the real answer, as a module does (the simulated ELM327 leaves asking again to its caller).
+    pub fn module_answers(&mut self, tx: u16, req: &[u8]) -> Vec<Vec<u8>> {
+        self.tick += 1;
+        let Some(first) = self.module(tx, req) else { return vec![] };
+        if first.len() >= 3 && first[0] == 0x7F && first[2] == 0x78 {
+            return [vec![first], self.module(tx, req).into_iter().collect()].concat();
+        }
+        vec![first]
+    }
+
     /// One module's answer to a request sent to it alone: the engine and transmission speak UDS, the ABS only KWP2000 (as
     /// many Toyota modules do), the airbag and instrument cluster UDS. Anything else is "not supported" (7F) or silence.
     fn module(&mut self, tx: u16, req: &[u8]) -> Option<Vec<u8>> {

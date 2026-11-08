@@ -4,7 +4,8 @@
 //!
 //! Each value carries a short "about" so the numbers teach something while you watch them.
 
-use crate::elm::{Answer, Elm, ObdError};
+use crate::link::Link;
+use crate::elm::{Answer, ObdError};
 
 /// One entry per answering module: its header, what it most likely is, and what it said.
 pub type PerModule<T> = Vec<(String, &'static str, T)>;
@@ -126,7 +127,7 @@ pub struct Reading {
 }
 
 /// Every module's answer to a live value.
-pub fn read(elm: &mut Elm, n: u8) -> Result<Vec<Reading>, ObdError> {
+pub fn read(elm: &mut dyn Link, n: u8) -> Result<Vec<Reading>, ObdError> {
     let p =
         pid(n).ok_or_else(|| ObdError::Garbled(format!("Icarus does not know PID {n:02X} yet")))?;
     let answers = elm.request(&[0x01, n])?;
@@ -144,7 +145,7 @@ pub fn read(elm: &mut Elm, n: u8) -> Result<Vec<Reading>, ObdError> {
 }
 
 /// The service 01 PIDs each module offers (from the PID 00/20/40... bit maps).
-pub fn supported(elm: &mut Elm) -> Result<PerModule<Vec<u8>>, ObdError> {
+pub fn supported(elm: &mut dyn Link) -> Result<PerModule<Vec<u8>>, ObdError> {
     let mut out: PerModule<Vec<u8>> = Vec::new();
     let mut base = 0u8;
     loop {
@@ -214,14 +215,14 @@ impl DtcKind {
 }
 
 /// Trouble codes per module.
-pub fn dtcs(elm: &mut Elm, kind: DtcKind) -> Result<PerModule<Vec<String>>, ObdError> {
+pub fn dtcs(elm: &mut dyn Link, kind: DtcKind) -> Result<PerModule<Vec<String>>, ObdError> {
     let sid = kind.service();
     let answers = match elm.request(&[sid]) {
         Ok(a) => a,
         Err(ObdError::NoData) => return Ok(vec![]),
         Err(e) => return Err(e),
     };
-    Ok(parse_dtcs(&answers, sid, elm.protocol.is_can()))
+    Ok(parse_dtcs(&answers, sid, elm.protocol().is_can()))
 }
 
 pub fn parse_dtcs(answers: &[Answer], sid: u8, can: bool) -> PerModule<Vec<String>> {
@@ -261,7 +262,7 @@ pub struct FreezeFrame {
 }
 
 /// The freeze frame (frame 0) of each module that has one.
-pub fn freeze_frame(elm: &mut Elm) -> Result<Vec<FreezeFrame>, ObdError> {
+pub fn freeze_frame(elm: &mut dyn Link) -> Result<Vec<FreezeFrame>, ObdError> {
     let mut out: Vec<FreezeFrame> = Vec::new();
     // which values each module froze (the PID 00/20/40... bit maps, asked of frame 0)
     let mut base = 0u8;
@@ -437,7 +438,7 @@ fn text_items(answers: &[Answer], pid: u8, item_len: usize) -> PerModule<Vec<Str
 }
 
 /// The vehicle identification number (service 09 PID 02).
-pub fn vin(elm: &mut Elm) -> Result<Option<String>, ObdError> {
+pub fn vin(elm: &mut dyn Link) -> Result<Option<String>, ObdError> {
     let answers = match elm.request(&[0x09, 0x02]) {
         Ok(a) => a,
         Err(ObdError::NoData) => return Ok(None),
@@ -453,7 +454,7 @@ pub fn vin(elm: &mut Elm) -> Result<Option<String>, ObdError> {
 
 /// Each module's calibration IDs (service 09 PID 04): the name of the software calibration it runs, which is how a tune or
 /// a definition file is matched to an ECU.
-pub fn calibration_ids(elm: &mut Elm) -> Result<PerModule<Vec<String>>, ObdError> {
+pub fn calibration_ids(elm: &mut dyn Link) -> Result<PerModule<Vec<String>>, ObdError> {
     match elm.request(&[0x09, 0x04]) {
         Ok(a) => Ok(text_items(&a, 0x04, 16)),
         Err(ObdError::NoData) => Ok(vec![]),
@@ -462,7 +463,7 @@ pub fn calibration_ids(elm: &mut Elm) -> Result<PerModule<Vec<String>>, ObdError
 }
 
 /// Each module's name (service 09 PID 0A), e.g. "ECM-EngineControl".
-pub fn ecu_names(elm: &mut Elm) -> Result<PerModule<Vec<String>>, ObdError> {
+pub fn ecu_names(elm: &mut dyn Link) -> Result<PerModule<Vec<String>>, ObdError> {
     match elm.request(&[0x09, 0x0A]) {
         Ok(a) => Ok(text_items(&a, 0x0A, 20)),
         Err(ObdError::NoData) => Ok(vec![]),
@@ -471,7 +472,7 @@ pub fn ecu_names(elm: &mut Elm) -> Result<PerModule<Vec<String>>, ObdError> {
 }
 
 /// Calibration verification numbers (service 09 PID 06): a checksum of each calibration, which changes with any edit.
-pub fn cvns(elm: &mut Elm) -> Result<Vec<(String, Vec<String>)>, ObdError> {
+pub fn cvns(elm: &mut dyn Link) -> Result<Vec<(String, Vec<String>)>, ObdError> {
     let answers = match elm.request(&[0x09, 0x06]) {
         Ok(a) => a,
         Err(ObdError::NoData) => return Ok(vec![]),

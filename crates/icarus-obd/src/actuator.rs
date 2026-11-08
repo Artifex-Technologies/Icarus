@@ -15,7 +15,8 @@
 //! The tests themselves are data: `[[test]]` entries in a vehicle profile. Their IDs are each maker's own; a profile carries
 //! only IDs from a source, `checked = false` until seen working on a vehicle.
 
-use crate::elm::{Answer, Elm, ObdError};
+use crate::link::Link;
+use crate::elm::{Answer, ObdError};
 use crate::j1979;
 use serde::Deserialize;
 use std::time::{Duration, Instant};
@@ -201,7 +202,7 @@ pub fn check(data: &[u8]) -> Result<(), String> {
     }
 }
 
-fn send(elm: &mut Elm, t: &TestDef, data: &[u8]) -> Result<Answer, String> {
+fn send(elm: &mut dyn Link, t: &TestDef, data: &[u8]) -> Result<Answer, String> {
     check(data)?;
     for _ in 0..4 {
         let a = elm
@@ -222,7 +223,7 @@ fn send(elm: &mut Elm, t: &TestDef, data: &[u8]) -> Result<Answer, String> {
 }
 
 /// Whether the conditions hold now: engine speed and road speed from the standard OBD-II values.
-pub fn conditions_hold(elm: &mut Elm, conds: &[Condition]) -> Result<(), String> {
+pub fn conditions_hold(elm: &mut dyn Link, conds: &[Condition]) -> Result<(), String> {
     let engine = |r: Vec<j1979::Reading>| {
         r.iter()
             .find(|x| x.from == "7E8")
@@ -316,18 +317,11 @@ impl Running {
 
 /// Starts a test: checks the definition, the battery and the conditions, opens the session the protocol needs, and sends the
 /// control. On any failure after the session opened, control is handed back before the error returns.
-pub fn start(elm: &mut Elm, def: &TestDef, value: f64) -> Result<Running, String> {
+pub fn start(elm: &mut dyn Link, def: &TestDef, value: f64) -> Result<Running, String> {
     if let Some(why) = def.refused() {
         return Err(why);
     }
-    if let Some(v) = elm
-        .command("ATRV", Duration::from_secs(2))
-        .ok()
-        .and_then(|r| {
-            r.first()
-                .and_then(|v| v.trim_end_matches('V').parse::<f64>().ok())
-        })
-    {
+    if let Some(v) = elm.voltage() {
         if v < MIN_VOLTS {
             return Err(format!(
                 "the battery is at {v:.1} V; tests need at least {MIN_VOLTS} V (connect a charger)"
@@ -362,7 +356,7 @@ pub fn start(elm: &mut Elm, def: &TestDef, value: f64) -> Result<Running, String
 
 /// Keeps a running test alive (tester present every 2 s, conditions every second). An error means the test must stop
 /// (call `stop`): the time is up, or a condition no longer holds.
-pub fn keep(elm: &mut Elm, run: &mut Running) -> Result<(), String> {
+pub fn keep(elm: &mut dyn Link, run: &mut Running) -> Result<(), String> {
     if run.left().is_zero() {
         return Err(format!("time limit ({} s) reached", run.def.max_seconds));
     }
@@ -378,7 +372,7 @@ pub fn keep(elm: &mut Elm, run: &mut Running) -> Result<(), String> {
 }
 
 /// Hands control back to the module and leaves the diagnostic session. Tries every step even if one fails.
-pub fn stop(elm: &mut Elm, run: &mut Running, why: &str) -> Result<(), String> {
+pub fn stop(elm: &mut dyn Link, run: &mut Running, why: &str) -> Result<(), String> {
     let r1 = send(elm, &run.def, &run.def.return_request());
     let r2 = if run.session {
         send(elm, &run.def, &[0x10, 0x01]).map(|_| ())
@@ -403,6 +397,7 @@ pub fn stop(elm: &mut Elm, run: &mut Running, why: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::elm::Elm;
     use crate::sim::SimCar;
 
     #[test]

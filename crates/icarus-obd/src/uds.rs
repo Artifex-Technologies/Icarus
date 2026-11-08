@@ -6,7 +6,8 @@
 //! trouble codes, tester present). Clearing codes, writing data, routines, security access and programming are refused here
 //! until Icarus has the safety steps of docs/PLAN.md section 4.
 
-use crate::elm::{Answer, Elm, ObdError};
+use crate::link::Link;
+use crate::elm::{Answer, ObdError};
 use crate::j1979::dtc;
 use std::thread::sleep;
 use std::time::Duration;
@@ -75,7 +76,7 @@ pub fn nrc(code: u8) -> &'static str {
 }
 
 /// One module's answer to a request, pending responses (7F xx 78) waited out.
-fn ask(elm: &mut Elm, tx: u16, rx: u16, data: &[u8]) -> Result<Option<Answer>, ObdError> {
+fn ask(elm: &mut dyn Link, tx: u16, rx: u16, data: &[u8]) -> Result<Option<Answer>, ObdError> {
     check_read_only(data)?;
     for attempt in 0..4 {
         let answers = match elm.request_to(tx, rx, data) {
@@ -182,7 +183,7 @@ pub enum Dialect {
 
 /// A module's trouble codes: UDS first, KWP2000 when the module does not know UDS's service.
 pub fn module_dtcs(
-    elm: &mut Elm,
+    elm: &mut dyn Link,
     tx: u16,
     rx: u16,
 ) -> Result<Option<(Dialect, Vec<ModuleDtc>)>, ObdError> {
@@ -229,7 +230,7 @@ fn shown(b: &[u8]) -> String {
 
 /// The identification values a module gives (each asked separately: many modules refuse several at once).
 pub fn module_identity(
-    elm: &mut Elm,
+    elm: &mut dyn Link,
     tx: u16,
     rx: u16,
 ) -> Result<Vec<(&'static str, String)>, ObdError> {
@@ -248,7 +249,7 @@ pub fn module_identity(
 }
 
 /// Whether a module answers at request ID `tx`: any answer counts, a refusal too.
-pub fn present(elm: &mut Elm, tx: u16, rx: u16) -> Result<bool, ObdError> {
+pub fn present(elm: &mut dyn Link, tx: u16, rx: u16) -> Result<bool, ObdError> {
     for req in [&[0x3E, 0x00][..], &[0x3E, 0x01][..]] {
         if ask(elm, tx, rx, req)?.is_some() {
             return Ok(true);
@@ -275,6 +276,7 @@ pub fn sweep() -> Vec<crate::vehicles::ModuleAddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::elm::Elm;
     use crate::sim::SimCar;
 
     #[test]

@@ -8,8 +8,8 @@
 //! - permanent codes are not cleared by any of these: they go when the monitor that set them passes again;
 //! - every clear is written to the action log.
 
+use crate::link::Link;
 use crate::actuator::{conditions_hold, Condition};
-use crate::elm::Elm;
 use crate::uds::Dialect;
 
 pub fn check(data: &[u8]) -> Result<(), String> {
@@ -27,7 +27,7 @@ and resets every readiness monitor: the vehicle will not pass an emissions inspe
 run them again. Permanent codes stay until their monitor passes. If the fault is still there, the code comes back.";
 
 /// OBD-II service 04 to every module: returns the modules that confirmed.
-pub fn clear_obd(elm: &mut Elm) -> Result<Vec<String>, String> {
+pub fn clear_obd(elm: &mut dyn Link) -> Result<Vec<String>, String> {
     conditions_hold(elm, &[Condition::EngineOff])?;
     let _awake = crate::power_guard::Inhibit::take("Clearing trouble codes").ok();
     check(&[0x04])?;
@@ -52,7 +52,7 @@ pub fn clear_obd(elm: &mut Elm) -> Result<Vec<String>, String> {
 }
 
 /// All of one module's codes (UDS or KWP2000, as the module spoke when its codes were read).
-pub fn clear_module(elm: &mut Elm, tx: u16, rx: u16, dialect: Dialect) -> Result<(), String> {
+pub fn clear_module(elm: &mut dyn Link, tx: u16, rx: u16, dialect: Dialect) -> Result<(), String> {
     conditions_hold(elm, &[Condition::EngineOff])?;
     let _awake = crate::power_guard::Inhibit::take("Clearing trouble codes").ok();
     let req: &[u8] = match dialect {
@@ -89,6 +89,7 @@ pub fn clear_module(elm: &mut Elm, tx: u16, rx: u16, dialect: Dialect) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::elm::Elm;
     use crate::j1979::{self, DtcKind};
     use crate::sim::SimCar;
     use crate::uds;

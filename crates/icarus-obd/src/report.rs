@@ -3,8 +3,9 @@
 //! search and parts links), the freeze frame, the modules and a snapshot of live values. Reports hold the VIN: they are
 //! saved on this computer (`~/Documents/Icarus/reports` by default) and never sent anywhere.
 
+use crate::link::Link;
 use crate::dtc;
-use crate::elm::{Elm, ObdError};
+use crate::elm::ObdError;
 use crate::garage::{self, Described};
 use crate::j1979::{self, DtcKind, FreezeFrame, Monitors};
 use crate::lookup;
@@ -60,19 +61,12 @@ pub fn now() -> String {
 }
 
 /// Everything the standard services give (and, with `scan`, every module of the profile), read-only.
-pub fn collect(elm: &mut Elm, profiles: &[Profile], scan: bool) -> Result<Diagnosis, ObdError> {
+pub fn collect(elm: &mut dyn Link, profiles: &[Profile], scan: bool) -> Result<Diagnosis, ObdError> {
     let mut d = Diagnosis {
         when: now(),
-        adapter: format!(
-            "{}{}",
-            elm.id,
-            elm.stn
-                .as_ref()
-                .map(|s| format!(" ({s})"))
-                .unwrap_or_default()
-        ),
-        protocol: elm.protocol.describe().to_string(),
-        voltage: elm.voltage,
+        adapter: elm.adapter(),
+        protocol: elm.protocol().describe().to_string(),
+        voltage: elm.voltage(),
         ..Default::default()
     };
     d.vin = j1979::vin(elm)?;
@@ -414,6 +408,7 @@ pub fn save(d: &Diagnosis, path: Option<PathBuf>) -> std::io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::elm::Elm;
     use crate::sim::SimCar;
 
     #[test]

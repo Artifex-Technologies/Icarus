@@ -6,7 +6,8 @@
 //! test ID (TID), unit and scaling ID (UASID), value, minimum, maximum. Pass or fail compares the raw numbers, which needs no
 //! scaling; a value in real units is shown only for the scalings Icarus knows for certain.
 
-use crate::elm::{Elm, ObdError};
+use crate::link::Link;
+use crate::elm::ObdError;
 use crate::j1979::bitmap;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -151,8 +152,8 @@ pub fn parse(data: &[u8]) -> Vec<TestResult> {
 }
 
 /// Every result the engine module (7E8, else the first module) gives.
-pub fn read(elm: &mut Elm) -> Result<Vec<TestResult>, ObdError> {
-    if !elm.protocol.is_can() {
+pub fn read(elm: &mut dyn Link) -> Result<Vec<TestResult>, ObdError> {
+    if !elm.protocol().is_can() {
         return Err(ObdError::Adapter(
             "on-board test results are read on CAN vehicles only so far".into(),
         ));
@@ -199,6 +200,7 @@ pub fn read(elm: &mut Elm) -> Result<Vec<TestResult>, ObdError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::elm::Elm;
     use crate::sim::SimCar;
 
     #[test]

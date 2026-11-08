@@ -7,7 +7,8 @@
 //! reading is a little below the battery's terminals (wiring), and many newer vehicles lower the alternator voltage on
 //! purpose once the battery is full ("smart charging"), so one low reading is not a fault: watch a whole drive.
 
-use crate::elm::{Elm, ObdError};
+use crate::link::Link;
+use crate::elm::ObdError;
 use crate::j1979;
 use std::time::{Duration, Instant};
 
@@ -114,7 +115,7 @@ pub fn judge(volts: &[f64], running: bool, battery: Battery) -> Option<Check> {
 }
 
 /// Samples for `seconds` (every half second) and judges.
-pub fn check(elm: &mut Elm, seconds: u64, battery: Battery) -> Result<Check, String> {
+pub fn check(elm: &mut dyn Link, seconds: u64, battery: Battery) -> Result<Check, String> {
     let e = |x: ObdError| x.to_string();
     let first = |r: Vec<j1979::Reading>| {
         r.iter()
@@ -134,10 +135,7 @@ pub fn check(elm: &mut Elm, seconds: u64, battery: Battery) -> Result<Check, Str
         };
         let v = match v {
             Some(v) => Some(v),
-            None => elm
-                .command("ATRV", Duration::from_secs(2))
-                .ok()
-                .and_then(|r| r.first().and_then(|s| s.trim_end_matches('V').parse().ok())),
+            None => elm.voltage(),
         };
         if let Some(v) = v {
             volts.push(v);
@@ -153,6 +151,7 @@ pub fn check(elm: &mut Elm, seconds: u64, battery: Battery) -> Result<Check, Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::elm::Elm;
 
     #[test]
     fn verdicts() {
