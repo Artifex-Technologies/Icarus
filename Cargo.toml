@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/icarus-core", "crates/icarus-obd", "crates/icarus"]
+members = ["crates/icarus-core", "crates/icarus-obd", "crates/icarus", "crates/icarus-app"]
 
 [workspace.package]
 version = "0.1.0"

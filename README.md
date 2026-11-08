@@ -6,6 +6,20 @@ Linux tunes factory ECUs.
 
 Part of the Artifex ecosystem (Labyrinth OS, Yggdrasil, Heimdall, Sarina, Daedalus...). This repository is private.
 
+## Install (on my machines)
+
+```sh
+bash scripts/install-local.sh        # builds, puts icarus and icarus-app in ~/.local/bin, Icarus in the app menu
+```
+
+## The window
+
+`icarus-app` (Icarus in the app menu): the **Vehicle** page connects to the adapter and shows the VIN, the make's profile, the
+check-engine light, the readiness monitors and the OBD-II codes; **Modules** scans every module for its identity and codes;
+**Live data** picks values and draws them as they change, each with what it means; **Maps** opens a definition and an image
+(and a second image to compare: it starts on the first map the second one changed, changed cells outlined). Start options:
+`--connect [--adapter A] --page modules --scan`, `--live`, `--maps DEF.xdf IMAGE.bin [SECOND.bin]`.
+
 ## What it does today
 
 Everything below only reads: nothing is sent to a module that changes it.
@@ -75,6 +89,7 @@ Rust (stable), Linux. Dependencies: `roxmltree` (XML) and `libc`.
 | `crates/icarus-core` | ROM images (original + edited, diff), definitions (tables, values, switches), formulas, the TunerPro `.xdf` reader |
 | `crates/icarus-obd` | adapters (USB, Bluetooth, Wi-Fi, simulated), the ELM327/STN language, the standard OBD-II services |
 | `crates/icarus` | the `icarus` command |
+| `crates/icarus-app` | the window (egui, Yggdrasil's look from yggdrasil-ui); a worker thread owns the adapter |
 
 ## Where it is going
 

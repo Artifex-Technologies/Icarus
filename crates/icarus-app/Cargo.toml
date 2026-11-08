@@ -1,0 +1,18 @@
+[package]
+name = "icarus-app"
+description = "Icarus's window: vehicle, modules, live data and maps, in Yggdrasil's look"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "icarus-app"
+path = "src/main.rs"
+
+[dependencies]
+icarus-core = { path = "../icarus-core" }
+icarus-obd = { path = "../icarus-obd" }
+eframe = "0.36.2"
+# Yggdrasil's shared look (palette, title bar), from its public repository at a fixed commit
+yggdrasil-ui = { git = "https://github.com/Artifex-Technologies/Yggdrasil", rev = "e6c95a58f1345c6b7f228a7a483b4ddf33c2c99d" }

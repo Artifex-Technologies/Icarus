@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Icarus
+GenericName=Vehicle diagnostics and tuning
+Comment=A vehicle's modules, trouble codes and live data through an OBD adapter; ECU maps, and what a tune changed
+Exec=icarus-app
+Icon=applications-engineering
+Terminal=false
+Categories=Utility;Engineering;
+Keywords=car;truck;obd;ecu;tune;diagnostics;
+StartupWMClass=icarus
