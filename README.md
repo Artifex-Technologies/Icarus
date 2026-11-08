@@ -6,6 +6,20 @@ Linux tunes factory ECUs.
 
 Part of the Artifex ecosystem (Labyrinth OS, Yggdrasil, Heimdall, Sarina, Daedalus...). This repository is private.
 
+## Screenshots
+
+On the simulated truck (`sim`) and a made-up demo engine; nothing from a real vehicle.
+
+| | |
+|:--|:--|
+| ![Vehicle](docs/screenshots/vehicle.png) **Vehicle**: identity, codes explained with look-up and parts links, freeze frame, readiness | ![Modules](docs/screenshots/modules.png) **Modules**: every module's identity and codes, dealer-tool style |
+| ![Live data](docs/screenshots/live.png) **Live data**: values with what they mean, drawn as they change | ![Tests](docs/screenshots/tests.png) **Tests**: actuator tests, hold to run |
+| ![Bus](docs/screenshots/bus.png) **Bus**: every ID and changing byte; another tool's tests learned | ![Maps](docs/screenshots/maps.png) **Maps**: a fuel table, cells another image changed outlined |
+| ![Tools](docs/screenshots/tools.png) **Tools**: tires and gears, speedometer check | |
+
+Maps shows and compares tables today; changing them (fuel, spark, limits) with the image's checksums kept right is the next
+step (docs/PLAN.md section 3), and writing to an ECU comes only after that, on a bench ECU first (section 4).
+
 ## Install (on my machines)
 
 ```sh
