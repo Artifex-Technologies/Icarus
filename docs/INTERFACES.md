@@ -78,3 +78,17 @@ product IDs (`0403:d018` with channels A and B, `0403:d019`), reached through FT
 MPVI2 ("MPVI2 PL A"), MPVI Pro, MPVI3 and MPVI4, whose IDs are not in these installers: `icarus devices` will show their IDs
 when one is plugged in (as an unknown device of a known maker only if the maker's vendor ID is known).
 
+## FORScan (Ford, Mazda, Lincoln)
+
+FORScan 2.3.71 (an Inno Setup 5.5.7 installer; the program is packed): no hardware or drivers of its own. It works through
+ELM327 adapters, the OBDLink family (it carries their firmware updates: SX/EX on STN2230/2231, MX+ on STN2255/2256) and the
+vLinker FS, and through J2534 cables. Icarus already speaks the ELM327/STN language (the OBDLink MX+ included) and now has a
+J2534 layer, so the adapters FORScan uses are Icarus's adapters too; a vLinker FS will show its USB ID in `icarus devices`.
+
+## Techstream (Toyota)
+
+Toyota supplies Techstream through a TIS subscription, for any SAE J2534 cable. A "TechStream 12.20.024-v2" `.ova` (a 2018
+Windows XP virtual machine packaged by a third party, "Getco") is a repack of it, not Toyota's: it was not opened or run (an
+unlicensed, unpatched Windows with modified software of unknown origin). Nothing in it is needed: Techstream reaches the
+vehicle through a J2534 cable, which Icarus's J2534 layer is for, and Toyota's modules speak UDS and KWP2000, which Icarus has.
+
