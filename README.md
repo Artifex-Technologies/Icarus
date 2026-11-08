@@ -37,6 +37,23 @@ report before it erases anything: the freeze frame goes with the codes, and ever
 clearing requests go out (OBD-II `04`, UDS `14 FF FF FF`, KWP2000 `14 FF 00`); permanent codes stay until their monitor
 passes. Every clear is in `~/.local/state/icarus/actions.log`.
 
+## Vehicle folders
+
+Every vehicle connected (with a VIN) gets a folder in `~/Documents/Icarus/Vehicles/`, named after the name it was given
+(else its VIN; renaming the vehicle renames the folder): **OEM tunes**, **Custom tunes**, **Definitions**, **Reports**
+(the vehicle's reports go here) and **Logs**. A stock image imported as OEM is copied in read-only and never replaced: it is
+the way back.
+
+## Tires and gears
+
+```sh
+icarus tires P265/65R17 LT285/70R17 --gear 3.91 --installed 4.88
+```
+
+Taller tires: how far off the speedometer and odometer are (both cases: speed measured at the wheels, or at the
+transmission output, where a regear counts too), what the stock and installed axle ratios act like, and which ratios bring
+the stock feel back.
+
 ## The bus
 
 `icarus bus watch --adapter A` (the OBDLink's monitor mode) or `--can can0` (a Linux CAN interface such as a CANable),

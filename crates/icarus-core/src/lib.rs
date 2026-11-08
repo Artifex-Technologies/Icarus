@@ -4,4 +4,5 @@
 pub mod def;
 pub mod expr;
 pub mod rom;
+pub mod tires;
 pub mod xdf;

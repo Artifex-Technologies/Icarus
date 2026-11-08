@@ -440,7 +440,6 @@ fn connect(spec: &str, profiles: &[Profile]) -> Result<(Elm, Info), String> {
 
 /// Everything the Vehicle page shows, read again.
 fn gather(elm: &mut Elm, profiles: &[Profile]) -> Result<Info, String> {
-    let mut elm = elm;
     let e = |x: ObdError| x.to_string();
     let vin = j1979::vin(elm).map_err(e)?;
     let vin_info = vin.as_deref().and_then(|v| vin::decode(v).ok());

@@ -39,6 +39,10 @@ Bus (watching only: nothing is sent onto the bus):
                                              every ID with its rate and changing bytes, diagnostic messages in words, and
                                              actuator tests another tool runs, as entries for the vehicle's file
 
+Tools:
+  icarus tires STOCK NEW [--gear 3.909] [--speed 65]
+                                             what new tires do to the speedometer and gearing, and which regear restores it
+
 Vehicles:
   icarus vin VIN                             what a VIN says: where it was built, maker, model year, check digit
   icarus vehicles                            the makes Icarus knows (one editable file each)
@@ -77,6 +81,7 @@ fn main() -> ExitCode {
         Some("dtc") => cmd_dtc(&args[1..]),
         Some("garage") => cmd_garage(&args[1..]),
         Some("bus") => cmd_bus(&args[1..]),
+        Some("tires") => cmd_tires(&args[1..]),
         Some("-h" | "--help" | "help") | None => {
             println!("{HELP}");
             Ok(())
@@ -1139,6 +1144,77 @@ fn cmd_bus(a: &[String]) -> Result<(), String> {
         println!("\nTests seen run by another tool (add them to the vehicle's file, ~/.config/icarus/vehicles/MAKE.toml, after checking what each drives):\n");
         for t in &an.learned {
             println!("{}", bus::to_toml(t));
+        }
+    }
+    Ok(())
+}
+
+fn cmd_tires(a: &[String]) -> Result<(), String> {
+    let args = parse_args(a, &["gear", "speed", "installed"])?;
+    let [stock, new] = args.pos.as_slice() else {
+        return Err("usage: icarus tires STOCK NEW [--gear STOCK_RATIO] [--installed NEW_RATIO] [--speed 65]   (sizes like 265/70R16 or 33x12.50R15)".into());
+    };
+    let (stock, new) = (
+        icarus_core::tires::Tire::parse(stock)?,
+        icarus_core::tires::Tire::parse(new)?,
+    );
+    let gear = args
+        .opt("gear")
+        .map(|g| {
+            g.parse::<f64>()
+                .map_err(|_| "--gear needs a ratio like 3.909")
+        })
+        .transpose()?;
+    let installed = args
+        .opt("installed")
+        .map(|g| {
+            g.parse::<f64>()
+                .map_err(|_| "--installed needs a ratio like 4.88")
+        })
+        .transpose()?;
+    if installed.is_some() && gear.is_none() {
+        return Err("--installed needs the stock ratio too (--gear)".into());
+    }
+    let speed: f64 = args
+        .opt("speed")
+        .map(|v| v.parse().map_err(|_| "--speed needs a number"))
+        .transpose()?
+        .unwrap_or(65.0);
+    let c = icarus_core::tires::change(stock, new, speed, gear, installed);
+    println!(
+        "stock  {:5.2} in tall, {:4.1} in wide, {:4.0} revs/mile",
+        stock.diameter,
+        stock.width,
+        stock.revs_per_mile()
+    );
+    println!("new    {:5.2} in tall, {:4.1} in wide, {:4.0} revs/mile  ({:+.1} % taller, {:+.2} in more ground clearance)", new.diameter, new.width, new.revs_per_mile(), (c.ratio - 1.0) * 100.0, (new.diameter - stock.diameter) / 2.0);
+    println!("\nSpeedometer, until the vehicle's settings are changed:");
+    let shaft = c
+        .shaft_reading_factor
+        .filter(|f| (f - 1.0 / c.ratio).abs() > 1e-9);
+    if shaft.is_some() {
+        println!("  if it measures speed at the wheels (ABS sensors), only the tires count:");
+    }
+    println!("  at a real {speed:.0}, it shows {:.1}; when it shows {speed:.0}, you are doing {:.1} (reads {:.1} % low, the odometer too)", c.shown_at_actual, c.actual_at_shown, (1.0 - 1.0 / c.ratio) * 100.0);
+    if let Some(f) = shaft {
+        println!("  if it measures at the transmission output, the regear counts too:");
+        println!("  at a real {speed:.0}, it shows {:.1}; when it shows {speed:.0}, you are doing {:.1} (reads {:.1} % {})", speed * f, speed / f, (f - 1.0).abs() * 100.0, if f > 1.0 { "high" } else { "low" });
+        println!("  which one your vehicle does: at a steady speed, compare Icarus's vehicle speed (Live data) with a phone's GPS.");
+    }
+    if let (Some(g), Some(eff), Some(eq)) = (gear, c.effective_gear, c.equivalent_gear) {
+        println!("\nGearing:");
+        println!("  the stock {g} would act like a {eff:.2} on these tires (taller: less pull, the transmission shifts later or hunts)");
+        println!(
+            "  the stock feel comes back with about {eq:.2}: common ratios near it are {}",
+            c.suggested
+                .iter()
+                .map(|r| format!("{r:.2}"))
+                .collect::<Vec<_>>()
+                .join(" and ")
+        );
+        if let (Some(i), Some(acts), Some(rpm)) = (installed, c.installed_acts_like, c.rpm_vs_stock)
+        {
+            println!("  your installed {i} acts like a {acts:.2} on these tires: the engine turns {:.1} % {} than stock at the same road speed", (rpm - 1.0).abs() * 100.0, if rpm > 1.0 { "faster (more pull, more highway rpm)" } else { "slower" });
         }
     }
     Ok(())

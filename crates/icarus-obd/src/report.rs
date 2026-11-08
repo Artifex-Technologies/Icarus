@@ -360,7 +360,8 @@ pub fn selftest_values(t: &crate::mode06::TestResult) -> String {
     }
 }
 
-/// `~/Documents/Icarus/reports/icarus-report-2026-11-07-1940.md`.
+/// In the vehicle's own folder (`~/Documents/Icarus/Vehicles/<vehicle>/Reports/report-2026-11-07-19-40.md`), or
+/// `~/Documents/Icarus/reports` when the vehicle gave no VIN (or is the simulation).
 pub fn default_path(d: &Diagnosis) -> PathBuf {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -370,6 +371,12 @@ pub fn default_path(d: &Diagnosis) -> PathBuf {
         .chars()
         .map(|c| if c == ' ' || c == ':' { '-' } else { c })
         .collect();
+    if let Some(v) = d.vin.as_deref().filter(|v| *v != crate::sim::VIN) {
+        let names = garage::load();
+        return garage::folder_in(&garage::library(), v, names.get(v).map(String::as_str))
+            .join("Reports")
+            .join(format!("report-{stamp}.md"));
+    }
     home.join("Documents/Icarus/reports")
         .join(format!("icarus-report-{stamp}.md"))
 }
@@ -393,6 +400,9 @@ pub fn free_path(d: &Diagnosis) -> PathBuf {
 
 /// Writes the report and returns where (never over another report unless `path` names it).
 pub fn save(d: &Diagnosis, path: Option<PathBuf>) -> std::io::Result<PathBuf> {
+    if let Some(v) = d.vin.as_deref() {
+        let _ = garage::ensure(v); // the vehicle's folder, with its Reports folder (not for the simulation)
+    }
     let p = path.unwrap_or_else(|| free_path(d));
     if let Some(dir) = p.parent() {
         std::fs::create_dir_all(dir)?;
