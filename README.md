@@ -37,6 +37,14 @@ report before it erases anything: the freeze frame goes with the codes, and ever
 clearing requests go out (OBD-II `04`, UDS `14 FF FF FF`, KWP2000 `14 FF 00`); permanent codes stay until their monitor
 passes. Every clear is in `~/.local/state/icarus/actions.log`.
 
+## Battery and charging
+
+`icarus obd charging --battery agm` (or the Battery and charging card): the voltage the engine computer sees for about 20
+seconds, judged for the battery fitted. Engine running: whether the alternator charges it well (an AGM wants about
+14.4-14.8 V to finish a charge; under 13 V is not charging, over about 14.8 V overcharges). Engine off after sitting: about
+how charged it is. A vehicle with battery management (BMW, VW/Audi, Mercedes, many newer Fords and Rams) also stores the
+battery type, set by "battery registration": a per-make configuration change for later.
+
 ## Vehicle folders
 
 Every vehicle connected (with a VIN) gets a folder in `~/Documents/Icarus/Vehicles/`, named after the name it was given

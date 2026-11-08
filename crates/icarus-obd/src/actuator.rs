@@ -300,6 +300,8 @@ pub struct Running {
     last_present: Instant,
     last_check: Instant,
     session: bool,
+    /// The computer stays awake while the test runs (dropped with the test).
+    _awake: Option<crate::power_guard::Inhibit>,
 }
 
 impl Running {
@@ -337,6 +339,7 @@ pub fn start(elm: &mut Elm, def: &TestDef, value: f64) -> Result<Running, String
     if session {
         send(elm, def, &[0x10, 0x03])?;
     }
+    let awake = crate::power_guard::Inhibit::take(&format!("Actuator test: {}", def.name)).ok();
     let mut run = Running {
         def: def.clone(),
         value,
@@ -344,6 +347,7 @@ pub fn start(elm: &mut Elm, def: &TestDef, value: f64) -> Result<Running, String
         last_present: Instant::now(),
         last_check: Instant::now(),
         session,
+        _awake: awake,
     };
     if let Err(e) = send(elm, def, &def.control_request(value)) {
         let _ = stop(elm, &mut run, "the start failed");

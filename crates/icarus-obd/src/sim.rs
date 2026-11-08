@@ -264,6 +264,7 @@ impl SimCar {
                 0x0C => return Some(vec![0, 0]),
                 0x10 => return Some(vec![0, 0]),
                 0x0B => return Some(vec![98]),
+                0x42 => return Some(12_650u16.to_be_bytes().to_vec()),
                 0x11 => {
                     return Some(vec![self
                         .driven

@@ -136,6 +136,8 @@ struct App {
     /// A clear waiting for the person's yes: None = every OBD-II module, Some = one module (tx, rx, dialect).
     confirm_clear: Option<(Option<(u16, u16, Dialect)>, String)>,
     selftests: Option<Vec<icarus_obd::mode06::TestResult>>,
+    battery_agm: bool,
+    charging: Option<icarus_obd::charging::Check>,
     /// The bus monitor: the source (adapter or a Linux CAN interface), its last view.
     bus_can: bool,
     bus_ifname: String,
@@ -190,6 +192,8 @@ impl App {
             test_reading: None,
             confirm_clear: None,
             selftests: None,
+            battery_agm: true,
+            charging: None,
             bus_can: false,
             bus_ifname: "can0".into(),
             bus: None,
@@ -343,6 +347,10 @@ impl App {
                     }
                     self.bus = Some(*v);
                 }
+                Event::Charging(c) => {
+                    self.status = "Battery and charging measured.".into();
+                    self.charging = Some(c);
+                }
                 Event::SelfTests(r) => {
                     self.status = format!("{} on-board test results read.", r.len());
                     self.selftests = Some(r);
@@ -443,6 +451,7 @@ impl App {
         let mut links: Vec<String> = Vec::new();
         let mut ask_clear = false;
         let mut read_selftests = false;
+        let mut measure = false;
         let mut save_name = false;
         let mut report = false;
         card(ui, pal, "This vehicle's name", |ui| {
@@ -559,6 +568,31 @@ impl App {
                 },
             );
         }
+        card(ui, pal, "Battery and charging", |ui| {
+            ui.label(RichText::new("About 20 seconds of the voltage the engine computer sees. Engine running: is it charging this battery well. Engine off, after the vehicle has sat an hour: how charged it is.").weak());
+            ui.horizontal(|ui| {
+                ui.radio_value(&mut self.battery_agm, true, "AGM");
+                ui.radio_value(&mut self.battery_agm, false, "flooded");
+                if ui.button("Measure").clicked() {
+                    measure = true;
+                }
+            });
+            if let Some(c) = &self.charging {
+                ui.label(RichText::new(&c.verdict).color(if c.ok { pal.text } else { pal.amber }));
+                ui.label(
+                    RichText::new(format!(
+                        "{} samples, {:.2} V average ({:.2} to {:.2}), engine {}",
+                        c.samples,
+                        c.avg,
+                        c.min,
+                        c.max,
+                        if c.running { "running" } else { "off" }
+                    ))
+                    .small()
+                    .weak(),
+                );
+            }
+        });
         card(ui, pal, "On-board test results (Mode 06)", |ui| {
             ui.label(RichText::new("Each emissions monitor's last measurement against its limits: a value near a limit shows a part on its way out before a code sets; misfire counts per cylinder.").weak());
             if ui
@@ -634,6 +668,15 @@ impl App {
         if report {
             self.live_on = false;
             let _ = self.tx.send(Cmd::Report(self.report_all));
+        }
+        if measure {
+            self.live_on = false;
+            let b = if self.battery_agm {
+                icarus_obd::charging::Battery::Agm
+            } else {
+                icarus_obd::charging::Battery::Flooded
+            };
+            let _ = self.tx.send(Cmd::Charging(20, b));
         }
         if read_selftests {
             self.live_on = false;

@@ -5,6 +5,7 @@
 pub mod actuator;
 pub mod audit;
 pub mod bus;
+pub mod charging;
 pub mod clear;
 pub mod dtc;
 pub mod elm;
@@ -13,6 +14,7 @@ pub mod j1979;
 pub mod lookup;
 pub mod mode06;
 pub mod port;
+pub mod power_guard;
 pub mod report;
 pub mod sim;
 pub mod socketcan;

@@ -31,6 +31,8 @@ pub enum Cmd {
     },
     /// Read the on-board test results (service 06).
     SelfTests,
+    /// Measure battery and charging voltage for some seconds.
+    Charging(u64, icarus_obd::charging::Battery),
     /// Watch the bus: through the connected adapter (None) or a Linux CAN interface (its name). Ends with BusStop or any
     /// other command.
     BusStart(Option<String>),
@@ -122,6 +124,7 @@ pub enum Event {
     },
     ReportSaved(String),
     SelfTests(Vec<icarus_obd::mode06::TestResult>),
+    Charging(icarus_obd::charging::Check),
     Bus(Box<BusView>),
     /// Codes cleared (what was said), and the Vehicle page's information read again.
     Cleared(String, Box<Info>),
@@ -270,6 +273,17 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
                         "{m} (the report from before is {})",
                         saved.display()
                     ))),
+                }
+            }
+            Some(Cmd::Charging(secs, battery)) => {
+                let Some(e) = elm.as_mut() else { continue };
+                live.clear();
+                send(Event::Status(format!(
+                    "Measuring the battery and charging for {secs} s..."
+                )));
+                match icarus_obd::charging::check(e, secs, battery) {
+                    Ok(c) => send(Event::Charging(c)),
+                    Err(m) => send(Event::Failed(m)),
                 }
             }
             Some(Cmd::SelfTests) => {

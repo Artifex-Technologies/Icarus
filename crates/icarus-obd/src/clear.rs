@@ -29,6 +29,7 @@ run them again. Permanent codes stay until their monitor passes. If the fault is
 /// OBD-II service 04 to every module: returns the modules that confirmed.
 pub fn clear_obd(elm: &mut Elm) -> Result<Vec<String>, String> {
     conditions_hold(elm, &[Condition::EngineOff])?;
+    let _awake = crate::power_guard::Inhibit::take("Clearing trouble codes").ok();
     check(&[0x04])?;
     let answers = elm.request(&[0x04]).map_err(|e| e.to_string())?;
     if let Some((_, code)) = answers.iter().find_map(|a| a.refusal()) {
@@ -53,6 +54,7 @@ pub fn clear_obd(elm: &mut Elm) -> Result<Vec<String>, String> {
 /// All of one module's codes (UDS or KWP2000, as the module spoke when its codes were read).
 pub fn clear_module(elm: &mut Elm, tx: u16, rx: u16, dialect: Dialect) -> Result<(), String> {
     conditions_hold(elm, &[Condition::EngineOff])?;
+    let _awake = crate::power_guard::Inhibit::take("Clearing trouble codes").ok();
     let req: &[u8] = match dialect {
         Dialect::Uds => &[0x14, 0xFF, 0xFF, 0xFF],
         Dialect::Kwp => &[0x14, 0xFF, 0x00],

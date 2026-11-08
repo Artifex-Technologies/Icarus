@@ -8,7 +8,8 @@ use icarus_obd::elm::Elm;
 use icarus_obd::j1979::{self, DtcKind};
 use icarus_obd::port::Target;
 use icarus_obd::{
-    actuator, bus, clear, dtc, garage, lookup, mode06, report, socketcan, uds, vehicles, vin,
+    actuator, bus, charging, clear, dtc, garage, lookup, mode06, report, socketcan, uds, vehicles,
+    vin,
 };
 use std::io::Write;
 use std::process::ExitCode;
@@ -60,6 +61,9 @@ Trouble codes:
                                              and hands control back to the module (sim:off = the simulated engine off)
   icarus obd selftests --adapter A           on-board test results (Mode 06): each monitor's last measurement and limits,
                                              misfire counts per cylinder
+  icarus obd charging --adapter A [--battery agm|flooded] [--seconds 20]
+                                             battery and charging voltage judged for the battery fitted (engine running:
+                                             charging; engine off after sitting: state of charge)
   icarus obd clear --adapter A [--module ID] [--yes]
                                              clear codes (every OBD-II module, or one): saves a report first, engine off
   icarus obd report --adapter A [--scan] [--out FILE]
@@ -412,6 +416,7 @@ fn cmd_obd(a: &[String]) -> Result<(), String> {
         a.get(1..).unwrap_or(&[]),
         &[
             "adapter", "every", "count", "csv", "make", "out", "value", "seconds", "module",
+            "battery",
         ],
     )?;
     match a.first().map(String::as_str) {
@@ -425,6 +430,7 @@ fn cmd_obd(a: &[String]) -> Result<(), String> {
         Some("tests") => obd_tests(&mut connect(&args)?),
         Some("clear") => obd_clear(&mut connect(&args)?, &args),
         Some("selftests") => obd_selftests(&mut connect(&args)?),
+        Some("charging") => obd_charging(&mut connect(&args)?, &args),
         Some("test") => obd_test(&mut connect(&args)?, &args),
         _ => Err(
             "usage: icarus obd info|codes|pids|live|scan|module --adapter A (see icarus --help)"
@@ -929,6 +935,30 @@ fn obd_test(elm: &mut Elm, args: &Args) -> Result<(), String> {
     };
     actuator::stop(elm, &mut run, &why)?;
     println!("Stopped ({why}); control is back with the module.");
+    Ok(())
+}
+
+fn obd_charging(elm: &mut Elm, args: &Args) -> Result<(), String> {
+    let battery = match args.opt("battery") {
+        Some(b) => charging::Battery::parse(b).ok_or("--battery is agm or flooded")?,
+        None => charging::Battery::Agm,
+    };
+    let secs: u64 = args
+        .opt("seconds")
+        .map(|v| v.parse().map_err(|_| "--seconds needs a number"))
+        .transpose()?
+        .unwrap_or(20);
+    eprintln!("measuring for {secs} s...");
+    let c = charging::check(elm, secs, battery)?;
+    println!(
+        "{} ({} samples: {:.2} V average, {:.2} to {:.2} V; engine {})",
+        c.verdict,
+        c.samples,
+        c.avg,
+        c.min,
+        c.max,
+        if c.running { "running" } else { "off" }
+    );
     Ok(())
 }
 
