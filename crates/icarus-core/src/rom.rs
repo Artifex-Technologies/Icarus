@@ -159,6 +159,14 @@ impl Rom {
         diff(&self.original, &self.data)
     }
 
+    /// Puts the bytes in `r` back as they were read (an element's span: undoing one map).
+    pub fn revert_range(&mut self, r: std::ops::Range<usize>) {
+        let end = r.end.min(self.data.len());
+        if r.start < end {
+            self.data[r.start..end].copy_from_slice(&self.original[r.start..end]);
+        }
+    }
+
     /// Puts every byte back as it was read.
     pub fn revert(&mut self) {
         self.data.copy_from_slice(&self.original);

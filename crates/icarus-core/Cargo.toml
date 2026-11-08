@@ -9,3 +9,6 @@ repository.workspace = true
 [dependencies]
 # XML for .xdf definitions (MIT/Apache-2.0, no dependencies of its own)
 roxmltree = "0.20"
+# checksum descriptions (MIT/Apache-2.0)
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"

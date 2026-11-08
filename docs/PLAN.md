@@ -90,8 +90,12 @@ stock file it saved.
 
 ## 3. Edit (files only)
 
-The desktop app (Yggdrasil's look, egui) with map editing in a table, 2D and 3D, versions ("stock" plus named versions,
-each a set of changes against the original), checksum correction per family, A2L definitions (ASAM MCD-2 MC) beside XDF.
+Done (2026-11-07): editing in a table (Maps page: click a cell, type or step; undo a map or all) and on the command line
+(`icarus set`), saved as new files only (`icarus-core` edit.rs), checksums corrected from a per-definition description
+that must match the stock image first (`checksum.rs`: sums, XOR, CRC-16/CCITT, CRC-32; `icarus checksums`).
+Next: each ECU family's checksum description (from a source, checked on a real image of that family; Toyota/Denso first),
+2D and 3D views, versions ("stock" plus named versions, each a set of changes against the original), A2L definitions
+(ASAM MCD-2 MC) beside XDF.
 
 ## Never brick a module (the rules every write follows)
 

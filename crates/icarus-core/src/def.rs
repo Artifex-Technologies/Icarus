@@ -297,6 +297,15 @@ impl Definition {
         Ok(raw & f.mask != 0)
     }
 
+    /// Switches a flag on or off (only its mask's bits change).
+    pub fn set_flag(&self, rom: &mut Rom, f: &Flag, on: bool) -> Result<(), DefError> {
+        let at = self.offset(f.address)?;
+        let raw = rom.read(at, f.cell)? as i64 as u64;
+        let new = if on { raw | f.mask } else { raw & !f.mask };
+        rom.write(at, f.cell, new as f64)?;
+        Ok(())
+    }
+
     /// Which elements cover the bytes in `range` (file offsets): what a tune changed, by name.
     pub fn covering(&self, range: std::ops::Range<usize>) -> Vec<&Element> {
         self.elements

@@ -22,6 +22,11 @@ const HELP: &str = "icarus: vehicle tuning, learning and diagnostics
 Files (nothing is sent to a vehicle):
   icarus def FILE.xdf [--find TEXT]          what a definition describes (with --find: the matching maps)
   icarus show IMAGE.bin FILE.xdf NAME        one map or value from an image, in real units
+  icarus set IMAGE.bin FILE.xdf NAME VALUE [--row R --col C] [--out NEW.bin] [--checksums FILE]
+                                             change one value, table cell (from 0) or switch (on/off) and save a NEW file
+                                             (never over one), its checksums corrected where they are known
+                                             (<definition>.checksums.toml beside the definition, or --checksums)
+  icarus checksums IMAGE.bin CHECKSUMS.toml  whether an image's checksums are right
   icarus diff ORIGINAL.bin TUNED.bin [--def FILE.xdf]
                                              what a tune changed: byte ranges, and with a definition each map, cell by cell
 
@@ -88,6 +93,8 @@ fn main() -> ExitCode {
         Some("def") => cmd_def(&args[1..]),
         Some("show") => cmd_show(&args[1..]),
         Some("diff") => cmd_diff(&args[1..]),
+        Some("set") => cmd_set(&args[1..]),
+        Some("checksums") => cmd_checksums(&args[1..]),
         Some("obd") => cmd_obd(&args[1..]),
         Some("vin") => cmd_vin(&args[1..]),
         Some("vehicles") => cmd_vehicles(),
@@ -307,6 +314,124 @@ fn cmd_show(a: &[String]) -> Result<(), String> {
     let rom = Rom::new(load_image(image, Some(&def))?);
     let e = def.element(name).map_err(|e| e.to_string())?;
     print_element(&def, &rom, e)
+}
+
+/// The checksum descriptions for a definition: --checksums FILE, else <definition>.checksums.toml beside it, else none.
+fn load_checksums(
+    defp: &str,
+    given: Option<&str>,
+    size: usize,
+) -> Result<Vec<icarus_core::checksum::Spec>, String> {
+    let path = match given {
+        Some(p) => std::path::PathBuf::from(p),
+        None => {
+            let p = icarus_core::checksum::file_for(std::path::Path::new(defp));
+            if !p.exists() {
+                return Ok(vec![]);
+            }
+            p
+        }
+    };
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    icarus_core::checksum::parse(&text, size).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+fn cmd_set(a: &[String]) -> Result<(), String> {
+    let args = parse_args(a, &["row", "col", "out", "checksums"])?;
+    let [image, defp, name, value] = args.pos.as_slice() else {
+        return Err("usage: icarus set IMAGE.bin FILE.xdf NAME VALUE [--row R --col C] [--out NEW.bin] [--checksums FILE]".into());
+    };
+    let def = load_def(defp)?;
+    let mut rom = Rom::new(load_image(image, Some(&def))?);
+    let specs = load_checksums(defp, args.opt("checksums"), rom.len())?;
+    let e = def.element(name).map_err(|e| e.to_string())?;
+    let num = |k: &str| {
+        args.opt(k)
+            .map(|v| {
+                v.parse::<usize>()
+                    .map_err(|_| format!("--{k} is a number (from 0)"))
+            })
+            .transpose()
+    };
+    match &e.kind {
+        Kind::Flag(f) => {
+            let on = match value.to_lowercase().as_str() {
+                "on" | "1" | "true" | "yes" => true,
+                "off" | "0" | "false" | "no" => false,
+                _ => return Err("a switch is on or off".into()),
+            };
+            def.set_flag(&mut rom, f, on).map_err(|e| e.to_string())?;
+            println!("{}: {}", e.title, if on { "on" } else { "off" });
+        }
+        Kind::Constant(d) | Kind::Table(icarus_core::def::Table { z: d, .. }) => {
+            let v: f64 = value
+                .parse()
+                .map_err(|_| format!("{value:?} is not a number"))?;
+            let (row, col) = (num("row")?.unwrap_or(0), num("col")?.unwrap_or(0));
+            if matches!(e.kind, Kind::Table(_))
+                && (args.opt("row").is_none() || args.opt("col").is_none())
+            {
+                return Err(format!("{} is a table: say which cell with --row and --col (from 0; {} rows, {} columns)", e.title, d.rows, d.cols));
+            }
+            let before = def.values(&rom, d).map_err(|e| e.to_string())?
+                [row.min(d.rows.saturating_sub(1))][col.min(d.cols.saturating_sub(1))];
+            let stored = def
+                .set(&mut rom, d, row, col, v)
+                .map_err(|e| e.to_string())?;
+            println!(
+                "{} [{row}, {col}]: {} -> {} {}",
+                e.title,
+                fmt_num(before, d.decimals),
+                fmt_num(stored, d.decimals),
+                d.units
+            );
+            if (stored - v).abs() > 1e-9 {
+                println!(
+                    "  (stored as {}: the nearest value the cell can hold)",
+                    fmt_num(stored, d.decimals)
+                );
+            }
+        }
+    }
+    let out = args
+        .opt("out")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| icarus_core::edit::default_path(std::path::Path::new(image)));
+    let saved = icarus_core::edit::save(&rom, &specs, &out)?;
+    println!("{}", saved.summary());
+    Ok(())
+}
+
+fn cmd_checksums(a: &[String]) -> Result<(), String> {
+    let args = parse_args(a, &[])?;
+    let [image, file] = args.pos.as_slice() else {
+        return Err("usage: icarus checksums IMAGE.bin CHECKSUMS.toml   (the descriptions: crates/icarus-core/src/checksum.rs)".into());
+    };
+    let bytes = std::fs::read(image).map_err(|e| format!("{image}: {e}"))?;
+    let text = std::fs::read_to_string(file).map_err(|e| format!("{file}: {e}"))?;
+    let specs = icarus_core::checksum::parse(&text, bytes.len())?;
+    if specs.is_empty() {
+        println!("No checksums described in {file}.");
+    }
+    for (s, st) in specs
+        .iter()
+        .zip(icarus_core::checksum::check(&specs, &bytes, &bytes))
+    {
+        let w = s.algorithm.width() * 2;
+        println!(
+            "{:<28} stored 0x{:0w$X}, computed 0x{:0w$X}: {}{}",
+            s.name,
+            st.stored,
+            st.computed,
+            if st.ok() { "right" } else { "WRONG" },
+            if s.checked {
+                ""
+            } else {
+                " (description not yet checked on a real image)"
+            }
+        );
+    }
+    Ok(())
 }
 
 fn cmd_diff(a: &[String]) -> Result<(), String> {

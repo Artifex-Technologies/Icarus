@@ -1453,6 +1453,8 @@ name = "icarus-core"
 version = "0.1.0"
 dependencies = [
  "roxmltree 0.20.0",
+ "serde",
+ "toml",
 ]
 
 [[package]]

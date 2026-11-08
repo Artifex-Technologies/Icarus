@@ -67,6 +67,23 @@ struct Maps {
     search: String,
     only_changed: bool,
     selected: Option<usize>,
+    /// The table cell (row, column) being edited.
+    cell: Option<(usize, usize)>,
+    value_text: String,
+    /// Checksum descriptions for this definition (<definition>.checksums.toml), and what loading them said.
+    specs: Vec<icarus_core::checksum::Spec>,
+    specs_note: String,
+    save_path: String,
+    save_note: String,
+}
+
+/// An edit asked for on the Maps page, applied after drawing.
+enum MapEdit {
+    Set(f64),
+    Step(i64),
+    Flag(bool),
+    UndoElement,
+    UndoAll,
 }
 
 /// What to do at start (command line): `--connect` (the adapter from ICARUS_ADAPTER, or `--adapter A`), `--page NAME`,
@@ -80,6 +97,9 @@ struct Start {
     live: bool,
     bus: bool,
     maps: Option<(String, String, String)>,
+    /// `--map NAME`: the map to show first (with `--cell R,C`, that cell chosen for editing).
+    map: Option<String>,
+    cell: Option<(usize, usize)>,
 }
 
 impl Start {
@@ -116,6 +136,19 @@ impl Start {
                     let c = a.get(i + 3).filter(|x| !x.starts_with("--")).cloned();
                     i += if c.is_some() { 3 } else { 2 };
                     s.maps = Some((d, b, c.unwrap_or_default()));
+                }
+                "--map" => {
+                    i += 1;
+                    s.map = Some(a.get(i).ok_or("--map needs a name")?.clone());
+                }
+                "--cell" => {
+                    i += 1;
+                    let v = a.get(i).ok_or("--cell needs ROW,COLUMN")?;
+                    let (r, c) = v.split_once(',').ok_or("--cell is ROW,COLUMN (from 0)")?;
+                    s.cell = Some((
+                        r.trim().parse().map_err(|_| "--cell is ROW,COLUMN")?,
+                        c.trim().parse().map_err(|_| "--cell is ROW,COLUMN")?,
+                    ));
                 }
                 other => return Err(format!("unknown option {other}")),
             }
@@ -259,12 +292,37 @@ impl App {
                 search: String::new(),
                 only_changed: false,
                 selected: None,
+                cell: None,
+                value_text: String::new(),
+                specs: Vec::new(),
+                specs_note: String::new(),
+                save_path: String::new(),
+                save_note: String::new(),
             },
             start,
         };
         if let Some((d, b, c)) = app.start.maps.take() {
             (app.maps.def_path, app.maps.bin_path, app.maps.cmp_path) = (d, b, c);
             app.load_maps();
+            if let (Some(name), Some(def)) = (app.start.map.take(), app.maps.def.as_ref()) {
+                let want = name.to_lowercase();
+                app.maps.selected = def
+                    .elements
+                    .iter()
+                    .position(|e| e.title.to_lowercase().contains(&want));
+                if let (Some(i), Some((r, c)), Some(rom)) =
+                    (app.maps.selected, app.start.cell, app.maps.rom.as_ref())
+                {
+                    if let Kind::Table(t) = &def.elements[i].kind {
+                        if let Ok(v) = def.values(rom, &t.z) {
+                            if let Some(n) = v.get(r).and_then(|row| row.get(c)) {
+                                app.maps.cell = Some((r, c));
+                                app.maps.value_text = fmt_num(*n, t.z.decimals);
+                            }
+                        }
+                    }
+                }
+            }
         }
         if app.start.connect {
             app.link = Link::Busy;
@@ -1620,6 +1678,28 @@ impl App {
                     ));
                 }
             }
+            let cpath = icarus_core::checksum::file_for(std::path::Path::new(m.def_path.trim()));
+            (m.specs, m.specs_note) = match std::fs::read_to_string(&cpath) {
+                Ok(t) => match icarus_core::checksum::parse(&t, bin.len()) {
+                    Ok(v) => {
+                        let st = icarus_core::checksum::check(&v, &bin, &bin);
+                        let bad: Vec<&str> = st.iter().filter(|s| !s.trusted).map(|s| s.name.as_str()).collect();
+                        let note = if bad.is_empty() {
+                            format!("{} checksum(s) known, right in this image: corrected when you save", v.len())
+                        } else {
+                            format!("checksums not matching this image (never corrected): {}", bad.join(", "))
+                        };
+                        (v, note)
+                    }
+                    Err(e) => (Vec::new(), format!("{}: {e}", cpath.display())),
+                },
+                Err(_) => (Vec::new(), "checksums unknown for this definition: a saved file is for study, not for a module".into()),
+            };
+            m.save_path = icarus_core::edit::default_path(std::path::Path::new(m.bin_path.trim()))
+                .display()
+                .to_string();
+            m.save_note.clear();
+            m.cell = None;
             m.def = Some(p.definition);
             m.rom = Some(Rom::new(bin));
             m.cmp = cmp.map(Rom::new);
@@ -1661,6 +1741,7 @@ impl App {
             ui.label(RichText::new(&self.maps.note).weak());
         });
         ui.add_space(6.0);
+        let mut edit: Option<MapEdit> = None;
         let Maps {
             def,
             rom,
@@ -1669,11 +1750,59 @@ impl App {
             search,
             only_changed,
             selected,
+            cell,
+            value_text,
+            specs,
+            specs_note,
+            save_path,
+            save_note,
             ..
         } = &mut self.maps;
-        let (Some(def), Some(rom)) = (def.as_ref(), rom.as_ref()) else {
+        let (Some(def), Some(rom_mut)) = (def.as_ref(), rom.as_mut()) else {
             return;
         };
+        let rom: &Rom = rom_mut;
+        // what has been edited, and saving it
+        let edits = rom.changes();
+        ui.horizontal(|ui| {
+            let bytes: usize = edits.iter().map(|r| r.len()).sum();
+            if edits.is_empty() {
+                ui.label(RichText::new("No edits yet: click a cell to change it.").weak());
+            } else {
+                ui.label(
+                    RichText::new(format!(
+                        "Edited: {bytes} byte(s) in {} place(s)",
+                        edits.len()
+                    ))
+                    .color(pal.amber),
+                );
+                if ui.button("Undo all").clicked() {
+                    edit = Some(MapEdit::UndoAll);
+                }
+            }
+        });
+        ui.label(RichText::new(specs_note.as_str()).small().weak());
+        ui.horizontal(|ui| {
+            ui.label("Save as");
+            ui.add(egui::TextEdit::singleline(save_path).desired_width(440.0));
+            if ui
+                .add_enabled(!edits.is_empty(), egui::Button::new("Save"))
+                .clicked()
+            {
+                *save_note = match icarus_core::edit::save(
+                    rom,
+                    specs,
+                    std::path::Path::new(save_path.trim()),
+                ) {
+                    Ok(saved) => saved.summary(),
+                    Err(e) => e,
+                };
+            }
+        });
+        if !save_note.is_empty() {
+            ui.label(RichText::new(save_note.as_str()).small());
+        }
+        ui.add_space(4.0);
         let q = search.to_lowercase();
         let shown: Vec<usize> = def
             .elements
@@ -1748,12 +1877,177 @@ impl App {
                     ui.label("Choose a map on the left.");
                     return;
                 };
-                element_view(ui, pal, def, rom, cmp.as_ref(), &def.elements[i]);
+                if *selected != Some(i) {
+                    *cell = None;
+                }
+                let e = &def.elements[i];
+                edit_bar(ui, pal, def, rom, e, cell, value_text, &mut edit);
+                element_view(ui, pal, def, rom, cmp.as_ref(), e, cell, value_text);
             });
         });
+        // apply what was asked for
+        let Some(ed) = edit else { return };
+        let (Some(i), Some(rom)) = (*selected, self.maps.rom.as_mut()) else {
+            return;
+        };
+        let Some(def) = self.maps.def.as_ref() else {
+            return;
+        };
+        let e = &def.elements[i];
+        let (row, col) = self.maps.cell.unwrap_or((0, 0));
+        let result: Result<(), String> = match (ed, &e.kind) {
+            (MapEdit::UndoAll, _) => {
+                rom.revert();
+                Ok(())
+            }
+            (MapEdit::UndoElement, Kind::Table(t)) => {
+                def.span(&t.z).map(|r| rom.revert_range(r));
+                Ok(())
+            }
+            (MapEdit::UndoElement, Kind::Constant(d)) => {
+                def.span(d).map(|r| rom.revert_range(r));
+                Ok(())
+            }
+            (MapEdit::Flag(on), Kind::Flag(f)) => {
+                def.set_flag(rom, f, on).map_err(|x| x.to_string())
+            }
+            (
+                MapEdit::Set(v),
+                Kind::Table(icarus_core::def::Table { z: d, .. }) | Kind::Constant(d),
+            ) => def
+                .set(rom, d, row, col, v)
+                .map(|_| ())
+                .map_err(|x| x.to_string()),
+            (
+                MapEdit::Step(n),
+                Kind::Table(icarus_core::def::Table { z: d, .. }) | Kind::Constant(d),
+            ) => (|| {
+                let at = def.cell_offset(d, row, col).map_err(|x| x.to_string())?;
+                let raw = rom.read(at, d.cell).map_err(|x| x.to_string())?;
+                // one step of the stored number, in the direction the real value goes
+                let up = d.math.eval(raw + 1.0) >= d.math.eval(raw);
+                let new = raw + if up { n as f64 } else { -n as f64 };
+                let real = d.math.eval(new);
+                if d.min.is_some_and(|m| real < m) || d.max.is_some_and(|m| real > m) {
+                    return Err(format!(
+                        "{} is outside the definition's limits",
+                        fmt_num(real, d.decimals)
+                    ));
+                }
+                rom.write(at, d.cell, new).map_err(|x| x.to_string())
+            })(),
+            _ => Ok(()),
+        };
+        match result {
+            Ok(()) => self.maps.save_note.clear(),
+            Err(e) => self.maps.save_note = e,
+        }
+        // the value shown in the box follows the cell
+        if let (Some(rom), Some((r, c))) = (self.maps.rom.as_ref(), self.maps.cell) {
+            if let Kind::Table(icarus_core::def::Table { z: d, .. }) | Kind::Constant(d) = &e.kind {
+                if let Ok(v) = def.values(rom, d) {
+                    self.maps.value_text = fmt_num(v[r][c], d.decimals);
+                }
+            }
+        }
     }
 }
 
+/// The row above a map: the chosen cell's value to type over or step, a switch, and undoing this map.
+#[allow(clippy::too_many_arguments)]
+fn edit_bar(
+    ui: &mut egui::Ui,
+    pal: &theme::Palette,
+    def: &Definition,
+    rom: &Rom,
+    e: &icarus_core::def::Element,
+    cell: &mut Option<(usize, usize)>,
+    value_text: &mut String,
+    edit: &mut Option<MapEdit>,
+) {
+    let span = match &e.kind {
+        Kind::Table(t) => def.span(&t.z),
+        Kind::Constant(d) => def.span(d),
+        Kind::Flag(_) => None,
+    };
+    let edited = span
+        .as_ref()
+        .is_some_and(|r| rom.bytes()[r.clone()] != rom.original()[r.clone()]);
+    ui.horizontal(|ui| {
+        match &e.kind {
+            Kind::Flag(f) => {
+                if let Ok(mut on) = def.flag(rom, f) {
+                    if ui.checkbox(&mut on, "on").changed() {
+                        *edit = Some(MapEdit::Flag(on));
+                    }
+                }
+            }
+            Kind::Constant(d) | Kind::Table(icarus_core::def::Table { z: d, .. }) => {
+                if matches!(e.kind, Kind::Constant(_)) && cell.is_none() {
+                    *cell = Some((0, 0));
+                    if let Ok(v) = def.values(rom, d) {
+                        *value_text = fmt_num(v[0][0], d.decimals);
+                    }
+                }
+                match *cell {
+                    None => {
+                        ui.label(RichText::new("Click a cell to change it.").weak());
+                    }
+                    Some((r, c)) => {
+                        if let Kind::Table(t) = &e.kind {
+                            // the cell by its axes' values (load / speed, say), as the table's edges show them
+                            let at = def
+                                .table(rom, t)
+                                .ok()
+                                .and_then(|v| {
+                                    Some(format!("Cell at {} / {}:", v.y.get(r)?, v.x.get(c)?))
+                                })
+                                .unwrap_or_else(|| format!("Row {}, column {}:", r + 1, c + 1));
+                            ui.label(at);
+                        }
+                        let resp =
+                            ui.add(egui::TextEdit::singleline(value_text).desired_width(90.0));
+                        ui.label(RichText::new(&d.units).weak());
+                        let enter =
+                            resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        if ui.button("Set").clicked() || enter {
+                            match value_text.trim().parse::<f64>() {
+                                Ok(v) => *edit = Some(MapEdit::Set(v)),
+                                Err(_) => *value_text = String::new(),
+                            }
+                        }
+                        if ui.button("-").on_hover_text("one step down").clicked() {
+                            *edit = Some(MapEdit::Step(-1));
+                        }
+                        if ui.button("+").on_hover_text("one step up").clicked() {
+                            *edit = Some(MapEdit::Step(1));
+                        }
+                        if let Ok(at) = def.cell_offset(d, r, c) {
+                            if let (Ok(now), Ok(was)) =
+                                (rom.read(at, d.cell), rom.read_original(at, d.cell))
+                            {
+                                if now != was {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "was {}",
+                                            fmt_num(d.math.eval(was), d.decimals)
+                                        ))
+                                        .color(pal.amber),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if edited && ui.button("Undo this map").clicked() {
+            *edit = Some(MapEdit::UndoElement);
+        }
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
 fn element_view(
     ui: &mut egui::Ui,
     pal: &theme::Palette,
@@ -1761,6 +2055,8 @@ fn element_view(
     rom: &Rom,
     cmp: Option<&Rom>,
     e: &icarus_core::def::Element,
+    cell: &mut Option<(usize, usize)>,
+    value_text: &mut String,
 ) {
     ui.label(RichText::new(&e.title).size(18.0).strong());
     if !e.description.is_empty() {
@@ -1857,10 +2153,20 @@ fn element_view(
                                         .copied()
                                         .filter(|o| o != n);
                                     let shown = other.unwrap_or(*n);
+                                    let edited =
+                                        def.cell_offset(&t.z, r, c).ok().is_some_and(|at| {
+                                            rom.read(at, t.z.cell).ok()
+                                                != rom.read_original(at, t.z.cell).ok()
+                                        });
+                                    let chosen = *cell == Some((r, c));
                                     let frame = egui::Frame::new()
                                         .fill(heat(f))
                                         .inner_margin(Margin::symmetric(5, 2))
-                                        .stroke(if other.is_some() {
+                                        .stroke(if chosen {
+                                            Stroke::new(2.0, Color32::WHITE)
+                                        } else if edited {
+                                            Stroke::new(2.0, pal.accent)
+                                        } else if other.is_some() {
                                             Stroke::new(2.0, pal.amber)
                                         } else {
                                             Stroke::NONE
@@ -1873,7 +2179,12 @@ fn element_view(
                                                     .small(),
                                             )
                                         })
-                                        .response;
+                                        .response
+                                        .interact(Sense::click());
+                                    if resp.clicked() {
+                                        *cell = Some((r, c));
+                                        *value_text = fmt_num(*n, t.z.decimals);
+                                    }
                                     if let Some(o) = other {
                                         let _ = resp.on_hover_text(format!(
                                             "first image {} -> second {}",
@@ -2156,7 +2467,7 @@ fn main() -> eframe::Result {
     let start = match Start::parse(&std::env::args().skip(1).collect::<Vec<_>>()) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("icarus-app: {e}\nusage: icarus-app [--connect] [--adapter A] [--page vehicle|modules|live|maps] [--scan] [--live] [--maps DEF.xdf IMAGE.bin [SECOND.bin]]");
+            eprintln!("icarus-app: {e}\nusage: icarus-app [--connect] [--adapter A] [--page vehicle|modules|live|maps] [--scan] [--live] [--maps DEF.xdf IMAGE.bin [SECOND.bin]] [--map NAME [--cell R,C]]");
             std::process::exit(2);
         }
     };

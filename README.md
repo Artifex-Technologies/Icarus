@@ -17,8 +17,9 @@ On the simulated truck (`sim`) and a made-up demo engine; nothing from a real ve
 | ![Bus](docs/screenshots/bus.png) **Bus**: every ID and changing byte; another tool's tests learned | ![Maps](docs/screenshots/maps.png) **Maps**: a fuel table, cells another image changed outlined |
 | ![Tools](docs/screenshots/tools.png) **Tools**: tires and gears, speedometer check | |
 
-Maps shows and compares tables today; changing them (fuel, spark, limits) with the image's checksums kept right is the next
-step (docs/PLAN.md section 3), and writing to an ECU comes only after that, on a bench ECU first (section 4).
+Maps shows, compares and edits tables (fuel, spark, limits): click a cell, type a value or step it, and save the result as a
+new file (never over the original), its checksums corrected where they are known. Writing an image to an ECU comes only after
+the rules in docs/PLAN.md, on a bench ECU first.
 
 ## Install (on my machines)
 
@@ -112,6 +113,26 @@ The tests are data: `[[test]]` entries in a vehicle profile (module, protocol, o
 time limit, warning, a live value to watch). Their IDs are each maker's own, so a profile carries only IDs from a source,
 marked `checked = false` until seen working; none are in the built-in profiles yet. `sim:off` (the simulated vehicle,
 ignition on and engine off) has five to try: fan, throttle, fuel pump, EVAP vent valve, ABS pump.
+
+## Editing maps and checksums
+
+```sh
+icarus set IMAGE.bin FILE.xdf "Volumetric efficiency (fuel)" 88 --row 9 --col 10   # a table cell (rows and columns from 0)
+icarus set IMAGE.bin FILE.xdf "Rev limit" 7200                                     # a single value
+icarus set IMAGE.bin FILE.xdf "Cooling fan on at idle" off                         # a switch
+icarus checksums IMAGE.bin FILE.checksums.toml                                      # are the checksums right?
+```
+
+Every edit is saved as a new file (`IMAGE-edited.bin` beside it, or in the vehicle's Custom tunes folder when the image is in
+its OEM tunes folder; `--out` to choose), never over a file. In the window, the Maps page does the same: click a cell, type a
+value (or step it with - and +), Undo this map / Undo all, Save.
+
+Checksums: an ECU checks its calibration against numbers kept in the image, so an edited image needs them corrected. How each
+family computes them is its own; a definition's checksums are described in `<definition>.checksums.toml` beside it (sums of
+bytes, 16- or 32-bit words, XOR, CRC-16/CCITT, CRC-32; stored as the value or as the complement that makes the sum come out
+right; the format is at the top of `crates/icarus-core/src/checksum.rs`). A description is used only if it matches the image
+as it was read; one that does not is reported and never "fixes" anything. With no description the checksums are unknown and
+the saved file is for study only. No family's description ships yet: each needs a source and a check on a real image.
 
 ## Sarina (or another assistant)
 
