@@ -26,15 +26,19 @@ enum Page {
     Tests,
     Bus,
     Maps,
+    Garage,
+    Tools,
 }
 
-const PAGES: [(Page, &str); 6] = [
+const PAGES: [(Page, &str); 8] = [
     (Page::Vehicle, "Vehicle"),
     (Page::Modules, "Modules"),
     (Page::Live, "Live data"),
     (Page::Tests, "Tests"),
     (Page::Bus, "Bus"),
     (Page::Maps, "Maps"),
+    (Page::Garage, "Garage"),
+    (Page::Tools, "Tools"),
 ];
 
 #[derive(PartialEq, Eq)]
@@ -136,6 +140,19 @@ struct App {
     bus_can: bool,
     bus_ifname: String,
     bus: Option<worker::BusView>,
+    /// Vehicle folders: (VIN, name, folder), the one shown, a path to import.
+    garage: Vec<(String, Option<String>, std::path::PathBuf)>,
+    garage_sel: Option<usize>,
+    import_path: String,
+    /// Tools: tire sizes and gears, and a speedometer check.
+    t_stock: String,
+    t_new: String,
+    t_gear: String,
+    t_installed: String,
+    t_speed: String,
+    s_gauge: String,
+    s_gps: String,
+    s_obd: String,
     page: Page,
     tx: Sender<Cmd>,
     rx: Receiver<Event>,
@@ -176,6 +193,17 @@ impl App {
             bus_can: false,
             bus_ifname: "can0".into(),
             bus: None,
+            garage: icarus_obd::garage::vehicles(),
+            garage_sel: None,
+            import_path: String::new(),
+            t_stock: "P265/65R17".into(),
+            t_new: "LT285/70R17".into(),
+            t_gear: "3.91".into(),
+            t_installed: "4.88".into(),
+            t_speed: "65".into(),
+            s_gauge: String::new(),
+            s_gps: String::new(),
+            s_obd: String::new(),
             page: start.page.unwrap_or(Page::Vehicle),
             tx,
             rx,
@@ -247,6 +275,11 @@ impl App {
                             .unwrap_or_default();
                         format!("{year} {make} ").trim_start().to_string()
                     });
+                    if let Some(v) = info.vin.as_deref() {
+                        if icarus_obd::garage::ensure(v).is_ok() {
+                            self.garage = icarus_obd::garage::vehicles();
+                        }
+                    }
                     self.info = Some(*info);
                     self.modules.clear();
                     self.history.clear();
@@ -1116,6 +1149,238 @@ impl App {
         }
     }
 
+    fn page_garage(&mut self, ui: &mut egui::Ui, pal: &theme::Palette) {
+        use icarus_obd::garage;
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(format!(
+                    "Vehicle folders in {}",
+                    garage::library().display()
+                ))
+                .weak(),
+            );
+            if ui.button("Refresh").clicked() {
+                self.garage = garage::vehicles();
+            }
+        });
+        if self.garage.is_empty() {
+            ui.label("No vehicles yet: each vehicle connected gets a folder here (OEM tunes, Custom tunes, Definitions, Reports, Logs).");
+            return;
+        }
+        if self.garage_sel.is_none_or(|i| i >= self.garage.len()) {
+            self.garage_sel = Some(0);
+        }
+        let mut action: Option<(&'static str, std::path::PathBuf, std::path::PathBuf)> = None;
+        ui.columns(2, |cols| {
+            for (i, (vin, name, _)) in self.garage.iter().enumerate() {
+                if cols[0].selectable_label(self.garage_sel == Some(i), name.clone().unwrap_or_else(|| vin.clone())).clicked() {
+                    self.garage_sel = Some(i);
+                }
+            }
+            let ui = &mut cols[1];
+            let Some((vin, name, dir)) = self.garage_sel.and_then(|i| self.garage.get(i)).cloned() else {
+                ui.label("Choose a vehicle.");
+                return;
+            };
+            ui.label(RichText::new(name.unwrap_or_else(|| vin.clone())).size(17.0).strong());
+            ui.label(RichText::new(format!("VIN {vin}")).weak());
+            if ui.button("Open the folder").clicked() {
+                action = Some(("open", dir.clone(), dir.clone()));
+            }
+            let oem = garage::files(&dir, "OEM tunes").first().map(|f| dir.join("OEM tunes").join(&f.0));
+            for sub in garage::FOLDERS {
+                let files = garage::files(&dir, sub);
+                card(ui, pal, &format!("{sub} ({})", files.len()), |ui| {
+                    if sub == "OEM tunes" {
+                        ui.label(RichText::new("Stock images, read-only: the way back. Never replaced, never edited.").small().weak());
+                    }
+                    for (f, size) in &files {
+                        let path = dir.join(sub).join(f);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(f);
+                            ui.label(RichText::new(format!("{} KB", size / 1024)).small().weak());
+                            match sub {
+                                "OEM tunes" | "Custom tunes" => {
+                                    if ui.small_button("Open in Maps").clicked() {
+                                        action = Some(("maps", path.clone(), dir.clone()));
+                                    }
+                                    if sub == "Custom tunes" {
+                                        if let Some(o) = &oem {
+                                            if ui.small_button("Compare with OEM").clicked() {
+                                                action = Some(("compare", path.clone(), o.clone()));
+                                            }
+                                        }
+                                    }
+                                }
+                                "Definitions" => {
+                                    if ui.small_button("Use in Maps").clicked() {
+                                        action = Some(("definition", path.clone(), dir.clone()));
+                                    }
+                                }
+                                _ => {
+                                    if ui.small_button("Open").clicked() {
+                                        action = Some(("open", path.clone(), dir.clone()));
+                                    }
+                                }
+                            }
+                        });
+                    }
+                });
+            }
+            card(ui, pal, "Add a file", |ui| {
+                ui.add(egui::TextEdit::singleline(&mut self.import_path).hint_text("/path/to/file.bin or .xdf").desired_width(f32::INFINITY));
+                ui.horizontal(|ui| {
+                    if ui.button("As OEM tune (read-only)").clicked() {
+                        action = Some(("oem", std::path::PathBuf::from(self.import_path.trim()), dir.clone()));
+                    }
+                    if ui.button("As custom tune").clicked() {
+                        action = Some(("custom", std::path::PathBuf::from(self.import_path.trim()), dir.clone()));
+                    }
+                    if ui.button("As definition").clicked() {
+                        action = Some(("def", std::path::PathBuf::from(self.import_path.trim()), dir.clone()));
+                    }
+                });
+            });
+        });
+        let first_def = |dir: &std::path::Path| {
+            garage::files(dir, "Definitions")
+                .into_iter()
+                .find(|f| f.0.to_lowercase().ends_with(".xdf"))
+                .map(|f| dir.join("Definitions").join(f.0))
+        };
+        match action {
+            Some(("open", p, _)) => {
+                let _ = std::process::Command::new("xdg-open").arg(&p).spawn();
+            }
+            Some(("maps", p, dir)) => {
+                if let Some(d) = first_def(&dir) {
+                    self.maps.def_path = d.display().to_string();
+                }
+                self.maps.bin_path = p.display().to_string();
+                self.maps.cmp_path.clear();
+                self.page = Page::Maps;
+                if !self.maps.def_path.is_empty() {
+                    self.load_maps();
+                }
+            }
+            Some(("compare", custom, oem)) => {
+                if let Some(d) = oem.parent().and_then(|p| p.parent()).and_then(first_def) {
+                    self.maps.def_path = d.display().to_string();
+                }
+                self.maps.bin_path = oem.display().to_string();
+                self.maps.cmp_path = custom.display().to_string();
+                self.page = Page::Maps;
+                if !self.maps.def_path.is_empty() {
+                    self.load_maps();
+                }
+            }
+            Some(("definition", p, _)) => {
+                self.maps.def_path = p.display().to_string();
+                self.page = Page::Maps;
+            }
+            Some((kind @ ("oem" | "custom" | "def"), src, dir)) => {
+                let r = if kind == "def" {
+                    std::fs::create_dir_all(dir.join("Definitions")).and_then(|_| {
+                        let to = dir
+                            .join("Definitions")
+                            .join(src.file_name().unwrap_or_default());
+                        std::fs::copy(&src, &to).map(|_| to)
+                    })
+                } else {
+                    garage::import(&dir, &src, kind == "oem")
+                };
+                match r {
+                    Ok(p) => {
+                        self.status = format!("Added {}", p.display());
+                        self.import_path.clear();
+                    }
+                    Err(e) => self.error = Some(format!("{}: {e}", src.display())),
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn page_tools(&mut self, ui: &mut egui::Ui, pal: &theme::Palette) {
+        card(ui, pal, "Tires and gears", |ui| {
+            egui::Grid::new("tires")
+                .num_columns(2)
+                .spacing(vec2(12.0, 6.0))
+                .show(ui, |ui| {
+                    for (label, v, hint) in [
+                        ("Stock tire", &mut self.t_stock, "265/70R16"),
+                        ("New tire", &mut self.t_new, "285/75R16"),
+                        ("Stock axle ratio", &mut self.t_gear, "3.91 (optional)"),
+                        (
+                            "Installed axle ratio",
+                            &mut self.t_installed,
+                            "after a regear (optional)",
+                        ),
+                        ("Speed", &mut self.t_speed, "65"),
+                    ] {
+                        ui.label(label);
+                        ui.add(
+                            egui::TextEdit::singleline(v)
+                                .hint_text(hint)
+                                .desired_width(160.0),
+                        );
+                        ui.end_row();
+                    }
+                });
+            let num = |s: &str| s.trim().parse::<f64>().ok();
+            match (
+                icarus_core::tires::Tire::parse(&self.t_stock),
+                icarus_core::tires::Tire::parse(&self.t_new),
+            ) {
+                (Ok(a), Ok(b)) => {
+                    let (gear, installed, speed) = (
+                        num(&self.t_gear),
+                        num(&self.t_installed),
+                        num(&self.t_speed).unwrap_or(65.0),
+                    );
+                    let installed = installed.filter(|_| gear.is_some());
+                    let c = icarus_core::tires::change(a, b, speed, gear, installed);
+                    ui.add_space(6.0);
+                    for line in icarus_core::tires::explain(&c, speed, gear, installed) {
+                        ui.label(line);
+                    }
+                }
+                (Err(e), _) | (_, Err(e)) => {
+                    ui.colored_label(pal.amber, e);
+                }
+            }
+        });
+        card(ui, pal, "Speedometer check", |ui| {
+            ui.label(RichText::new("At a steady speed, note what the gauge shows, what the engine computer reports (Live data: vehicle speed) and a phone's GPS. Two different errors mean the gauge and the engine computer take speed from different places.").weak());
+            egui::Grid::new("speedcheck")
+                .num_columns(2)
+                .spacing(vec2(12.0, 6.0))
+                .show(ui, |ui| {
+                    for (label, v) in [
+                        ("GPS", &mut self.s_gps),
+                        ("Gauge", &mut self.s_gauge),
+                        ("Engine computer (OBD)", &mut self.s_obd),
+                    ] {
+                        ui.label(label);
+                        ui.add(egui::TextEdit::singleline(v).desired_width(100.0));
+                        ui.end_row();
+                    }
+                });
+            if let Some(gps) = self.s_gps.trim().parse::<f64>().ok().filter(|g| *g > 0.0) {
+                for (what, v) in [("Gauge", &self.s_gauge), ("Engine computer", &self.s_obd)] {
+                    if let Ok(x) = v.trim().parse::<f64>() {
+                        let e = (x - gps) / gps * 100.0;
+                        ui.label(format!(
+                            "{what}: reads {:.1} % {} (shows {x:.0} at a real {gps:.0})",
+                            e.abs(),
+                            if e < 0.0 { "low" } else { "high" }
+                        ));
+                    }
+                }
+            }
+        });
+    }
+
     fn load_maps(&mut self) {
         let m = &mut self.maps;
         m.note.clear();
@@ -1557,6 +1822,9 @@ fn card(ui: &mut egui::Ui, pal: &theme::Palette, title: &str, body: impl FnOnce(
         .inner_margin(Margin::symmetric(14, 10))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
+            // fields and buttons on a card get the page colour, so they stand out from the card
+            ui.visuals_mut().widgets.inactive.bg_fill = pal.bg;
+            ui.visuals_mut().widgets.inactive.weak_bg_fill = pal.bg;
             ui.label(RichText::new(title).strong());
             ui.add_space(4.0);
             body(ui);
@@ -1651,6 +1919,8 @@ impl eframe::App for App {
                                 Page::Modules => self.page_modules(ui, &pal),
                                 Page::Tests => self.page_tests(ui, &pal),
                                 Page::Bus => self.page_bus(ui, &pal),
+                                Page::Garage => self.page_garage(ui, &pal),
+                                Page::Tools => self.page_tools(ui, &pal),
                                 _ => self.page_live(ui, &pal),
                             });
                     }

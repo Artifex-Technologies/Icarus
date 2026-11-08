@@ -135,6 +135,49 @@ pub fn change(
     }
 }
 
+/// The change in words, one line each (the command line and the window show the same).
+pub fn explain(c: &Change, speed: f64, gear: Option<f64>, installed: Option<f64>) -> Vec<String> {
+    let mut v = vec![
+        format!("Stock {:.2} in tall, new {:.2} in ({:+.1} %, {:+.2} in more ground clearance); {:.0} and {:.0} revs/mile.", c.stock.diameter, c.new.diameter, (c.ratio - 1.0) * 100.0, (c.new.diameter - c.stock.diameter) / 2.0, c.stock.revs_per_mile(), c.new.revs_per_mile()),
+        String::new(),
+        "Speedometer, until the vehicle's settings are changed:".into(),
+    ];
+    let shaft = c
+        .shaft_reading_factor
+        .filter(|f| (f - 1.0 / c.ratio).abs() > 1e-9);
+    let pct = (1.0 - 1.0 / c.ratio) * 100.0;
+    v.push(format!(
+        "{}at a real {speed:.0} it shows {:.1}; when it shows {speed:.0} you are doing {:.1} (reads {:.1} % {}, the odometer too).",
+        if shaft.is_some() { "Measured at the wheels (ABS sensors): " } else { "" },
+        c.shown_at_actual,
+        c.actual_at_shown,
+        pct.abs(),
+        if pct >= 0.0 { "low" } else { "high" }
+    ));
+    if let Some(f) = shaft {
+        v.push(format!("Measured at the transmission output (a regear counts too): at a real {speed:.0} it shows {:.1}; when it shows {speed:.0} you are doing {:.1} (reads {:.1} % {}).", speed * f, speed / f, (f - 1.0).abs() * 100.0, if f > 1.0 { "high" } else { "low" }));
+        v.push("Which one a vehicle does: at a steady speed, compare its vehicle speed (Live data) with a phone's GPS.".into());
+    }
+    if let (Some(g), Some(eff), Some(eq)) = (gear, c.effective_gear, c.equivalent_gear) {
+        v.push(String::new());
+        v.push("Gearing:".into());
+        v.push(format!("The stock {g} would act like a {eff:.2} on these tires (taller: less pull, the transmission shifts later or hunts)."));
+        v.push(format!(
+            "The stock feel comes back with about {eq:.2}: common ratios near it are {}.",
+            c.suggested
+                .iter()
+                .map(|r| format!("{r:.2}"))
+                .collect::<Vec<_>>()
+                .join(" and ")
+        ));
+        if let (Some(i), Some(acts), Some(rpm)) = (installed, c.installed_acts_like, c.rpm_vs_stock)
+        {
+            v.push(format!("The installed {i} acts like a {acts:.2}: the engine turns {:.1} % {} than stock at the same road speed.", (rpm - 1.0).abs() * 100.0, if rpm > 1.0 { "faster (more pull, more highway rpm)" } else { "slower" }));
+        }
+    }
+    v
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
