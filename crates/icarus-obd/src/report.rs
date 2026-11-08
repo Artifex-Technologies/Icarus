@@ -14,6 +14,13 @@ use crate::vin::{self, VinInfo};
 use std::fmt::Write;
 use std::path::PathBuf;
 
+/// A module that answered: where, its identity values, and its codes.
+pub type ModuleFound = (
+    ModuleAddr,
+    Vec<(&'static str, String)>,
+    Option<(Dialect, Vec<ModuleDtc>)>,
+);
+
 #[derive(Clone, Default)]
 pub struct Diagnosis {
     pub when: String,
@@ -29,11 +36,7 @@ pub struct Diagnosis {
     /// (kind, module, codes) from the standard OBD-II services.
     pub codes: Vec<(&'static str, String, Vec<String>)>,
     pub freeze: Vec<FreezeFrame>,
-    pub modules: Vec<(
-        ModuleAddr,
-        Vec<(&'static str, String)>,
-        Option<(Dialect, Vec<ModuleDtc>)>,
-    )>,
+    pub modules: Vec<ModuleFound>,
     pub snapshot: Vec<(u8, f64)>,
 }
 
