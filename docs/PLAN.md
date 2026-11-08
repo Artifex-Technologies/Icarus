@@ -48,7 +48,8 @@ What those tools do, and where Icarus is:
 | Toyota body modules behind the gateway (ID 750 with an extended address byte), BMW's gateway | next: extended addressing (`ATCEA`) |
 | Honda's and others' 29-bit module IDs (18DAxxF1); GM's body range (24x answering at 64x) | next |
 | Ford's medium-speed CAN (pins 3/11) | next: OBDLink's bus switching |
-| Freeze frames, readiness per module, code descriptions | next |
+| Code descriptions, where to start, parts usually involved, look-up and parts links, freeze frame, saved reports | done 2026-11-07 (standard codes in Icarus's words; maker codes per profile `[codes]`) |
+| Mode 06 (on-board test results), a VIN decoder from NHTSA's public vPIC data (model, engine) | next |
 | Clear codes | after: a write (small, but it erases the evidence of a fault; asks first, shows what is cleared) |
 | Actuator tests (run the fan, cycle the ABS pump, click a relay) | after: writes; each test with its conditions (engine off, vehicle still) |
 | Customizations / as-built configuration (FORScan's paddle shifters and tire size; Toyota's customizations) | after: writes; a backup of the whole configuration before any change, and the way back |

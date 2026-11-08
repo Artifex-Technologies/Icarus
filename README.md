@@ -12,10 +12,27 @@ Part of the Artifex ecosystem (Labyrinth OS, Yggdrasil, Heimdall, Sarina, Daedal
 bash scripts/install-local.sh        # builds, puts icarus and icarus-app in ~/.local/bin, Icarus in the app menu
 ```
 
+## Trouble codes
+
+Every code comes explained: what it means (standard codes in Icarus's own words, the maker's own codes from the vehicle
+profile's `[codes]` table), what the letter and digits say, where to start for the common ones, the parts usually involved,
+and links: a web search for the code on this vehicle, and searches for each part plus RockAuto's catalog for the vehicle.
+Name a vehicle once (`icarus garage VIN "2017 Toyota Tacoma 3.5L V6"`, or the field on the Vehicle page) so the links name
+the model. Searches go to DuckDuckGo unless `ICARUS_SEARCH` is a URL with `{q}`.
+
+```sh
+icarus dtc P0304 C1241 --vehicle "2017 Toyota Tacoma 3.5L V6"   # no vehicle needed
+icarus obd codes --adapter A                                     # the vehicle's codes, explained, and the freeze frame
+icarus obd report --adapter A --scan                             # everything in ~/Documents/Icarus/reports/*.md
+```
+
+The freeze frame (service 02) is what the engine was doing when the code set: speed, load, temperatures, fuel trims.
+
 ## The window
 
-`icarus-app` (Icarus in the app menu): the **Vehicle** page connects to the adapter and shows the VIN, the make's profile, the
-check-engine light, the readiness monitors and the OBD-II codes; **Modules** scans every module for its identity and codes;
+`icarus-app` (Icarus in the app menu): the **Vehicle** page connects to the adapter and shows the VIN, the make's profile,
+the codes explained with Look up and parts buttons, the freeze frame, the check-engine light and readiness monitors, the
+vehicle's name, and Save report; **Modules** scans every module for its identity and codes;
 **Live data** picks values and draws them as they change, each with what it means; **Maps** opens a definition and an image
 (and a second image to compare: it starts on the first map the second one changed, changed cells outlined). Start options:
 `--connect [--adapter A] --page modules --scan`, `--live`, `--maps DEF.xdf IMAGE.bin [SECOND.bin]`.

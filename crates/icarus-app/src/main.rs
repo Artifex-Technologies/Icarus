@@ -8,8 +8,11 @@ use eframe::egui::{self, vec2, Color32, CornerRadius, Margin, RichText, Sense, S
 use icarus_core::def::{fmt_num, Definition, Kind};
 use icarus_core::rom::{self, Rom};
 use icarus_core::xdf;
+use icarus_obd::garage::{self, Described};
 use icarus_obd::j1979;
 use icarus_obd::uds::Dialect;
+use icarus_obd::vehicles::Profile;
+use icarus_obd::{dtc, lookup};
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use worker::{Cmd, Event, Info, ModuleView};
@@ -108,6 +111,11 @@ impl Start {
 
 struct App {
     start: Start,
+    /// The name being typed for this vehicle (garage), and whether to save it.
+    name_edit: String,
+    /// A report with every module's codes too.
+    report_all: bool,
+    last_report: Option<String>,
     page: Page,
     tx: Sender<Cmd>,
     rx: Receiver<Event>,
@@ -135,6 +143,9 @@ impl App {
         let c = ctx.clone();
         std::thread::spawn(move || worker::run(wrx, wtx, move || c.request_repaint()));
         let mut app = App {
+            name_edit: String::new(),
+            report_all: true,
+            last_report: None,
             page: start.page.unwrap_or(Page::Vehicle),
             tx,
             rx,
@@ -191,6 +202,21 @@ impl App {
                     self.error = None;
                     self.status = "Connected.".into();
                     self.chosen.retain(|p| info.live.contains(p));
+                    // a name to start from: the saved one, else the model year and the make from the VIN
+                    self.name_edit = info.vehicle.as_ref().map(|v| v.name()).unwrap_or_else(|| {
+                        let year = info
+                            .vin_info
+                            .as_ref()
+                            .and_then(|v| v.year)
+                            .map(|y| y.to_string())
+                            .unwrap_or_default();
+                        let make = info
+                            .profile
+                            .as_ref()
+                            .map(|p| p.name.split([' ', '/']).next().unwrap_or("").to_string())
+                            .unwrap_or_default();
+                        format!("{year} {make} ").trim_start().to_string()
+                    });
                     self.info = Some(*info);
                     self.modules.clear();
                     self.history.clear();
@@ -233,6 +259,10 @@ impl App {
                     self.scanning = false;
                     self.unreachable = unreachable;
                     self.status = format!("Scan done: {found} module(s) answered.");
+                }
+                Event::ReportSaved(p) => {
+                    self.status = format!("Report saved: {p}");
+                    self.last_report = Some(p);
                 }
                 Event::Reading { pid, value, at } => {
                     let h = self.history.entry(pid).or_default();
@@ -315,6 +345,83 @@ impl App {
                     }
                 });
         });
+        let mut links: Vec<String> = Vec::new();
+        let mut save_name = false;
+        let mut report = false;
+        card(ui, pal, "This vehicle's name", |ui| {
+            ui.label(RichText::new("A VIN gives the year and make, not the model: name it once, and code searches and parts links use it.").weak());
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.name_edit)
+                        .hint_text("2017 Toyota Tacoma 3.5L V6")
+                        .desired_width(320.0),
+                );
+                if ui
+                    .add_enabled(info.vin.is_some(), egui::Button::new("Save"))
+                    .clicked()
+                {
+                    save_name = true;
+                }
+                if let Some(url) = info.vehicle.as_ref().and_then(lookup::parts_catalog) {
+                    if ui.button("Parts catalog").on_hover_text(&url).clicked() {
+                        links.push(url);
+                    }
+                }
+            });
+        });
+        card(ui, pal, "Trouble codes (OBD-II)", |ui| {
+            if info.codes.is_empty() {
+                ui.label(RichText::new("None stored, pending or permanent.").color(pal.green));
+            }
+            for (kind, module, codes) in &info.codes {
+                ui.label(RichText::new(format!("{kind}: {module}")).weak());
+                for c in codes {
+                    let col = if *kind == "pending" {
+                        pal.amber
+                    } else {
+                        pal.red
+                    };
+                    code_row(
+                        ui,
+                        pal,
+                        c,
+                        kind,
+                        col,
+                        info.profile.as_ref(),
+                        info.vehicle.as_ref(),
+                        &mut links,
+                    );
+                }
+            }
+            ui.label(
+                RichText::new(
+                    "The Modules page reads every module's own codes (ABS, airbags, body...).",
+                )
+                .weak(),
+            );
+        });
+        for f in &info.freeze {
+            let title = format!("Freeze frame: {} ({})", f.module, f.from);
+            card(ui, pal, &title, |ui| {
+                ui.label(
+                    RichText::new(format!(
+                        "What the engine was doing when {} set the check-engine light:",
+                        f.code.as_deref().unwrap_or("the code")
+                    ))
+                    .weak(),
+                );
+                egui::Grid::new(("ff", f.from.as_str()))
+                    .num_columns(2)
+                    .spacing(vec2(16.0, 4.0))
+                    .show(ui, |ui| {
+                        for (p, v) in &f.values {
+                            if let Some(x) = j1979::pid(*p) {
+                                row(ui, x.name, &format!("{v:.1} {}", x.unit));
+                            }
+                        }
+                    });
+            });
+        }
         for (module, m) in &info.monitors {
             card(
                 ui,
@@ -352,25 +459,53 @@ impl App {
                 },
             );
         }
-        card(ui, pal, "Trouble codes (OBD-II)", |ui| {
-            if info.codes.is_empty() {
-                ui.label("None stored, pending or permanent.");
-            }
-            for (kind, module, codes) in &info.codes {
-                ui.label(format!("{kind}: {module}: {}", codes.join(", ")));
-            }
-            ui.label(
-                RichText::new(
-                    "The Modules page reads every module's own codes (ABS, airbags, body...).",
-                )
-                .weak(),
-            );
+        card(ui, pal, "Report", |ui| {
+            ui.label(RichText::new("Everything above (and, if chosen, every module's codes) in one file to keep or show a mechanic, with search and parts links. Saved in ~/Documents/Icarus/reports.").weak());
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.report_all, "with every module");
+                if ui.button("Save report").clicked() {
+                    report = true;
+                }
+                if let Some(p) = &self.last_report {
+                    if ui.button("Open the last one").on_hover_text(p).clicked() {
+                        let _ = std::process::Command::new("xdg-open").arg(p).spawn();
+                    }
+                }
+            });
         });
         if let Some(p) = &info.profile {
             if !p.notes.is_empty() {
                 card(ui, pal, "About this make", |ui| {
                     ui.label(p.notes.split_whitespace().collect::<Vec<_>>().join(" "));
                 });
+            }
+        }
+        let vin = info.vin.clone();
+        self.open_links(links);
+        if save_name {
+            if let Some(v) = vin {
+                match garage::set(&v, &self.name_edit) {
+                    Ok(()) => {
+                        if let Some(i) = self.info.as_mut() {
+                            i.vehicle = Some(Described::parse(&self.name_edit))
+                                .filter(|d| !d.name().is_empty());
+                        }
+                        self.status = "Name saved.".into();
+                    }
+                    Err(e) => self.error = Some(e),
+                }
+            }
+        }
+        if report {
+            self.live_on = false;
+            let _ = self.tx.send(Cmd::Report(self.report_all));
+        }
+    }
+
+    fn open_links(&mut self, links: Vec<String>) {
+        for url in links {
+            if let Err(e) = lookup::open(&url) {
+                self.error = Some(format!("could not open the browser: {e}"));
             }
         }
     }
@@ -429,6 +564,13 @@ impl App {
             ui.label(RichText::new(&self.scan_note).weak());
         }
         ui.add_space(8.0);
+        let mut links: Vec<String> = Vec::new();
+        let all = icarus_obd::vehicles::load(icarus_obd::vehicles::user_dir().as_deref()).0;
+        let chosen = icarus_obd::vehicles::find(&all, &self.profile_choice)
+            .ok()
+            .filter(|_| !self.profile_choice.is_empty());
+        let profile = chosen.or(self.info.as_ref().and_then(|i| i.profile.as_ref()));
+        let vehicle = self.info.as_ref().and_then(|i| i.vehicle.as_ref());
         for m in &self.modules {
             let title = format!("{:03X}  {}", m.addr.tx, m.addr.name);
             card(ui, pal, &title, |ui| {
@@ -465,17 +607,19 @@ impl App {
                             });
                             let ftb = c
                                 .failure_type
-                                .map(|f| format!("-{f:02X}"))
+                                .map(|f| format!(" -{f:02X}"))
                                 .unwrap_or_default();
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    RichText::new(format!("{}{ftb}", c.code))
-                                        .strong()
-                                        .color(if confirmed { pal.red } else { pal.amber }),
-                                );
-                                ui.label(c.states.join(", "));
-                                ui.label(RichText::new(lang).weak());
-                            });
+                            let extra = format!("{}{ftb}, {lang}", c.states.join(", "));
+                            code_row(
+                                ui,
+                                pal,
+                                &c.code,
+                                &extra,
+                                if confirmed { pal.red } else { pal.amber },
+                                profile,
+                                vehicle,
+                                &mut links,
+                            );
                         }
                     }
                 }
@@ -488,6 +632,7 @@ impl App {
                 }
             });
         }
+        self.open_links(links);
     }
 
     fn page_live(&mut self, ui: &mut egui::Ui, pal: &theme::Palette) {
@@ -937,6 +1082,62 @@ fn graph(ui: &mut egui::Ui, pal: &theme::Palette, h: &VecDeque<(f64, f64)>) {
         .collect();
     ui.painter()
         .add(egui::Shape::line(pts, Stroke::new(1.5, pal.accent)));
+}
+
+/// One trouble code: the code, what it means, where to start, and buttons to look it up and to find the parts usually
+/// involved (the links clicked are collected in `links` and opened by the page).
+#[allow(clippy::too_many_arguments)]
+fn code_row(
+    ui: &mut egui::Ui,
+    pal: &theme::Palette,
+    code: &str,
+    extra: &str,
+    col: Color32,
+    profile: Option<&Profile>,
+    vehicle: Option<&Described>,
+    links: &mut Vec<String>,
+) {
+    let info = dtc::explain(code, profile).ok();
+    let text = info.as_ref().and_then(|i| i.text.clone());
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new(code).strong().color(col));
+        ui.label(text.clone().unwrap_or_else(|| match &info {
+            Some(i) if !i.standard => "the maker's own code".into(),
+            _ => "(no description yet)".into(),
+        }));
+        if !extra.is_empty() {
+            ui.label(RichText::new(format!("({extra})")).weak());
+        }
+        if ui
+            .add(egui::Button::new(RichText::new("Look up").small().color(pal.accent)).small())
+            .on_hover_text("Search the web for this code on this vehicle")
+            .clicked()
+        {
+            links.push(lookup::code_search(code, text.as_deref(), vehicle));
+        }
+    });
+    if let Some(i) = &info {
+        ui.label(RichText::new(dtc::anatomy(i)).small().color(pal.dim));
+    }
+    if let Some(h) = info.as_ref().and_then(|i| i.hint) {
+        ui.label(RichText::new(format!("Where to start: {h}")).small());
+    }
+    let parts = dtc::parts(code);
+    if !parts.is_empty() {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Parts:").small().weak());
+            for p in parts {
+                if ui
+                    .add(egui::Button::new(RichText::new(*p).small().color(pal.accent)).small())
+                    .on_hover_text("Search for this part for this vehicle")
+                    .clicked()
+                {
+                    links.push(lookup::part_search(p, vehicle));
+                }
+            }
+        });
+    }
+    ui.add_space(6.0);
 }
 
 /// A small status dot (the fonts have no filled circle).

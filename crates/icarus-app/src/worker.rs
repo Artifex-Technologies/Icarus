@@ -2,8 +2,10 @@
 //! window and sends back what it found. The window never waits on the vehicle.
 
 use icarus_obd::elm::{Elm, ObdError};
-use icarus_obd::j1979::{self, DtcKind, Monitors};
+use icarus_obd::garage::{self, Described};
+use icarus_obd::j1979::{self, DtcKind, FreezeFrame, Monitors};
 use icarus_obd::port::Target;
+use icarus_obd::report;
 use icarus_obd::uds::{self, Dialect, ModuleDtc};
 use icarus_obd::vehicles::{self, ModuleAddr, Profile};
 use icarus_obd::vin::{self, VinInfo};
@@ -20,6 +22,8 @@ pub enum Cmd {
     },
     /// Poll these live values (empty stops).
     Live(Vec<u8>),
+    /// Read everything again and save a report (with every module when true).
+    Report(bool),
 }
 
 pub struct Info {
@@ -36,6 +40,9 @@ pub struct Info {
     pub live: Vec<u8>,
     /// (kind, module, codes).
     pub codes: Vec<(&'static str, String, Vec<String>)>,
+    pub freeze: Vec<FreezeFrame>,
+    /// The name given to this vehicle (garage), for searches and parts links.
+    pub vehicle: Option<Described>,
 }
 
 pub struct ModuleView {
@@ -55,6 +62,7 @@ pub enum Event {
         found: usize,
         unreachable: Vec<String>,
     },
+    ReportSaved(String),
     Reading {
         pid: u8,
         value: f64,
@@ -110,6 +118,18 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
                 }
             }
             Some(Cmd::Live(pids)) => live = pids,
+            Some(Cmd::Report(scan)) => {
+                let Some(e) = elm.as_mut() else { continue };
+                live.clear();
+                send(Event::Status("Reading everything for the report...".into()));
+                match report::collect(e, &profiles, scan)
+                    .map_err(|x| x.to_string())
+                    .and_then(|d| report::save(&d, None).map_err(|x| x.to_string()))
+                {
+                    Ok(p) => send(Event::ReportSaved(p.display().to_string())),
+                    Err(m) => send(Event::Failed(m)),
+                }
+            }
             None => {
                 let Some(e) = elm.as_mut() else { continue };
                 for &pid in &live {
@@ -186,6 +206,8 @@ fn connect(spec: &str, profiles: &[Profile]) -> Result<(Elm, Info), String> {
             }
         }
     }
+    let freeze = j1979::freeze_frame(&mut elm).map_err(e)?;
+    let vehicle = vin.as_deref().and_then(garage::get);
     let info = Info {
         adapter: format!(
             "{}{}",
@@ -204,6 +226,8 @@ fn connect(spec: &str, profiles: &[Profile]) -> Result<(Elm, Info), String> {
         fuel_system,
         live,
         codes,
+        freeze,
+        vehicle,
     };
     Ok((elm, info))
 }

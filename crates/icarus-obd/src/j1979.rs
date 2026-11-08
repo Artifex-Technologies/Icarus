@@ -249,6 +249,85 @@ pub fn parse_dtcs(answers: &[Answer], sid: u8, can: bool) -> PerModule<Vec<Strin
     out
 }
 
+/// A freeze frame (service 02): the values the engine module saved at the moment a code set the check-engine light, and
+/// the code that caused it. The best clue to an intermittent fault: speed, load, temperature and fuel trims at that moment.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FreezeFrame {
+    pub from: String,
+    pub module: &'static str,
+    pub code: Option<String>,
+    /// (PID, value) for the values Icarus can read.
+    pub values: Vec<(u8, f64)>,
+}
+
+/// The freeze frame (frame 0) of each module that has one.
+pub fn freeze_frame(elm: &mut Elm) -> Result<Vec<FreezeFrame>, ObdError> {
+    let mut out: Vec<FreezeFrame> = Vec::new();
+    // which values each module froze (the PID 00/20/40... bit maps, asked of frame 0)
+    let mut base = 0u8;
+    loop {
+        let answers = match elm.request(&[0x02, base, 0x00]) {
+            Ok(a) => a,
+            Err(ObdError::NoData) => break,
+            Err(e) => return Err(e),
+        };
+        let mut more = false;
+        for a in answers
+            .iter()
+            .filter(|a| a.data.len() >= 7 && a.data[0] == 0x42 && a.data[1] == base)
+        {
+            let pids = bitmap(base, &a.data[3..7]);
+            more |= pids.contains(&base.wrapping_add(0x20));
+            let f = match out.iter_mut().position(|f| f.from == a.from) {
+                Some(i) => &mut out[i],
+                None => {
+                    out.push(FreezeFrame {
+                        from: a.from.clone(),
+                        module: a.module(),
+                        code: None,
+                        values: Vec::new(),
+                    });
+                    out.last_mut().unwrap()
+                }
+            };
+            f.values.extend(
+                pids.into_iter()
+                    .filter(|p| pid(*p).is_some() || *p == 0x02)
+                    .map(|p| (p, f64::NAN)),
+            );
+        }
+        if !more || base >= 0xE0 {
+            break;
+        }
+        base += 0x20;
+    }
+    for f in out.iter_mut() {
+        let wanted: Vec<u8> = f.values.iter().map(|v| v.0).collect();
+        f.values.clear();
+        for p in wanted {
+            let answers = match elm.request(&[0x02, p, 0x00]) {
+                Ok(a) => a,
+                Err(ObdError::NoData) => continue,
+                Err(e) => return Err(e),
+            };
+            let Some(a) = answers.iter().find(|a| {
+                a.from == f.from && a.data.len() > 3 && a.data[0] == 0x42 && a.data[1] == p
+            }) else {
+                continue;
+            };
+            if p == 0x02 {
+                if a.data.len() >= 5 && a.data[3..5] != [0, 0] {
+                    f.code = Some(dtc(a.data[3], a.data[4]));
+                }
+            } else if let Some(v) = pid(p).and_then(|d| d.decode(&a.data[3..])) {
+                f.values.push((p, v));
+            }
+        }
+    }
+    out.retain(|f| f.code.is_some() || !f.values.is_empty());
+    Ok(out)
+}
+
 /// What service 01 PID 01 says: the check-engine light, the code count, and which emissions self-tests (monitors) have run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Monitors {

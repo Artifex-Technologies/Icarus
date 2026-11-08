@@ -7,7 +7,7 @@ use icarus_core::xdf;
 use icarus_obd::elm::Elm;
 use icarus_obd::j1979::{self, DtcKind};
 use icarus_obd::port::Target;
-use icarus_obd::{uds, vehicles, vin};
+use icarus_obd::{dtc, garage, lookup, report, uds, vehicles, vin};
 use std::io::Write;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
@@ -35,6 +35,17 @@ Vehicle, through an OBD adapter (read-only: nothing is cleared or written):
 Vehicles:
   icarus vin VIN                             what a VIN says: where it was built, maker, model year, check digit
   icarus vehicles                            the makes Icarus knows (one editable file each)
+  icarus garage [VIN \"2017 Toyota Tacoma 3.5L V6\"]
+                                             name a vehicle (searches and parts links use it), or list the named ones
+
+Trouble codes:
+  icarus dtc CODE... [--vehicle \"2017 Toyota Tacoma 3.5L V6\"] [--make toyota]
+                                             what a code means, where to start, the parts usually involved, links to look
+                                             it up and to find parts (no vehicle needed)
+  icarus obd codes --adapter A               the vehicle's codes, each explained, and the freeze frame
+  icarus obd report --adapter A [--scan] [--out FILE]
+                                             everything in one Markdown report (~/Documents/Icarus/reports); --scan adds
+                                             every module
 
   The adapter A: sim (a simulated vehicle), /dev/ttyUSB0[@baud], bt:AA:BB:CC:DD:EE:FF[#channel] (paired Bluetooth, such as
   an OBDLink MX+), tcp:host:port (Wi-Fi). ICARUS_ADAPTER sets a default.";
@@ -48,6 +59,8 @@ fn main() -> ExitCode {
         Some("obd") => cmd_obd(&args[1..]),
         Some("vin") => cmd_vin(&args[1..]),
         Some("vehicles") => cmd_vehicles(),
+        Some("dtc") => cmd_dtc(&args[1..]),
+        Some("garage") => cmd_garage(&args[1..]),
         Some("-h" | "--help" | "help") | None => {
             println!("{HELP}");
             Ok(())
@@ -76,8 +89,8 @@ fn parse_args(a: &[String], with_value: &[&str]) -> Result<Args, String> {
     };
     let mut i = 0;
     while i < a.len() {
-        if a[i] == "--sweep" {
-            out.opts.push(("sweep".into(), "yes".into()));
+        if a[i] == "--sweep" || a[i] == "--scan" {
+            out.opts.push((a[i][2..].to_string(), "yes".into()));
             i += 1;
             continue;
         }
@@ -376,7 +389,7 @@ fn connect(args: &Args) -> Result<Elm, String> {
 fn cmd_obd(a: &[String]) -> Result<(), String> {
     let args = parse_args(
         a.get(1..).unwrap_or(&[]),
-        &["adapter", "every", "count", "csv", "make"],
+        &["adapter", "every", "count", "csv", "make", "out"],
     )?;
     match a.first().map(String::as_str) {
         Some("info") => obd_info(&mut connect(&args)?),
@@ -385,6 +398,7 @@ fn cmd_obd(a: &[String]) -> Result<(), String> {
         Some("live") => obd_live(&mut connect(&args)?, &args),
         Some("scan") => obd_scan(&mut connect(&args)?, &args),
         Some("module") => obd_module(&mut connect(&args)?, &args),
+        Some("report") => obd_report(&mut connect(&args)?, &args),
         _ => Err(
             "usage: icarus obd info|codes|pids|live|scan|module --adapter A (see icarus --help)"
                 .into(),
@@ -675,7 +689,63 @@ fn obd_info(elm: &mut Elm) -> Result<(), String> {
     Ok(())
 }
 
+/// One code: its meaning, where to start, the parts usually involved, and links to look it up.
+fn print_code(
+    code: &str,
+    states: &str,
+    profile: Option<&vehicles::Profile>,
+    vehicle: Option<&garage::Described>,
+    indent: &str,
+) {
+    match dtc::explain(code, profile) {
+        Err(e) => println!("{indent}{code}: {e}"),
+        Ok(i) => {
+            let text = i.text.clone().unwrap_or_else(|| {
+                if i.standard {
+                    "(Icarus has no words for this code yet)".into()
+                } else {
+                    "the maker's own code: look it up for this make".into()
+                }
+            });
+            println!(
+                "{indent}{code}{}  {text}",
+                if states.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({states})")
+                }
+            );
+            if let Some(h) = i.hint {
+                println!("{indent}    where to start: {h}");
+            }
+            let parts = dtc::parts(code);
+            if !parts.is_empty() {
+                println!("{indent}    parts usually involved: {}", parts.join(", "));
+            }
+            println!(
+                "{indent}    look it up: {}",
+                lookup::code_search(code, i.text.as_deref(), vehicle)
+            );
+            if let Some(p) = parts.first() {
+                println!(
+                    "{indent}    find parts: {}",
+                    lookup::part_search(p, vehicle)
+                );
+            }
+        }
+    }
+}
+
 fn obd_codes(elm: &mut Elm) -> Result<(), String> {
+    let all = profiles();
+    let vin = j1979::vin(elm).map_err(e)?;
+    let profile = vin.as_deref().and_then(|v| vehicles::for_vin(&all, v));
+    let vehicle = vin.as_deref().and_then(garage::get);
+    if vehicle.is_none() {
+        if let Some(v) = &vin {
+            println!("(Name this vehicle once for better searches and parts links: icarus garage {v} \"2017 Toyota Tacoma 3.5L V6\")\n");
+        }
+    }
     for (kind, label) in [
         (DtcKind::Stored, "Stored (confirmed)"),
         (DtcKind::Pending, "Pending (seen once)"),
@@ -685,11 +755,94 @@ fn obd_codes(elm: &mut Elm) -> Result<(), String> {
         let any = list.iter().any(|l| !l.2.is_empty());
         println!("{label}: {}", if any { "" } else { "none" });
         for (from, module, codes) in list.iter().filter(|l| !l.2.is_empty()) {
-            println!("  {module} ({from}): {}", codes.join(", "));
+            println!("  {module} ({from}):");
+            for c in codes {
+                print_code(c, "", profile, vehicle.as_ref(), "    ");
+            }
         }
     }
-    println!("\nP0xxx codes mean the same on every vehicle; P1xxx and other x1xx codes are the maker's own (look up its list).");
+    for f in j1979::freeze_frame(elm).map_err(e)? {
+        println!(
+            "\nFreeze frame, {} ({}){}: what the engine was doing when the code set",
+            f.module,
+            f.from,
+            f.code
+                .as_ref()
+                .map(|c| format!(", stored by {c}"))
+                .unwrap_or_default()
+        );
+        for (p, v) in &f.values {
+            if let Some(x) = j1979::pid(*p) {
+                println!("  {:<36} {v:.1} {}", x.name, x.unit);
+            }
+        }
+    }
+    println!("\nicarus obd scan reads every module's own codes (ABS, airbags, body...); icarus obd report saves all of it.");
     Ok(())
+}
+
+fn obd_report(elm: &mut Elm, args: &Args) -> Result<(), String> {
+    let d = report::collect(elm, &profiles(), args.opt("scan").is_some()).map_err(e)?;
+    let p = report::save(&d, args.opt("out").map(std::path::PathBuf::from))
+        .map_err(|x| x.to_string())?;
+    println!("Report saved: {}", p.display());
+    Ok(())
+}
+
+fn cmd_dtc(a: &[String]) -> Result<(), String> {
+    let args = parse_args(a, &["vehicle", "make"])?;
+    if args.pos.is_empty() {
+        return Err(
+            "usage: icarus dtc CODE... [--vehicle \"2017 Toyota Tacoma 3.5L V6\"] [--make toyota]"
+                .into(),
+        );
+    }
+    let all = profiles();
+    let vehicle = args.opt("vehicle").map(garage::Described::parse);
+    let profile = match args.opt("make") {
+        Some(m) => Some(vehicles::find(&all, m)?),
+        None => vehicle
+            .as_ref()
+            .and_then(|v| vehicles::find(&all, &v.make).ok()),
+    };
+    for code in &args.pos {
+        let i = dtc::explain(code, profile).map_err(|x| x.to_string())?;
+        println!("{}", dtc::anatomy(&i));
+        print_code(code, "", profile, vehicle.as_ref(), "");
+        if let Some(url) = vehicle.as_ref().and_then(lookup::parts_catalog) {
+            println!("    parts catalog: {url}");
+        }
+        println!();
+    }
+    Ok(())
+}
+
+fn cmd_garage(a: &[String]) -> Result<(), String> {
+    match a {
+        [] => {
+            let all = garage::load();
+            if all.is_empty() {
+                println!("No vehicles named yet: icarus garage VIN \"2017 Toyota Tacoma 3.5L V6\"");
+            }
+            for (vin, name) in all {
+                println!("{vin}  {name}");
+            }
+            Ok(())
+        }
+        [v, name @ ..] => {
+            let i = vin::decode(v)?;
+            garage::set(&i.vin, &name.join(" "))?;
+            println!(
+                "{}",
+                if name.is_empty() {
+                    format!("{} forgotten.", i.vin)
+                } else {
+                    format!("{} is now \"{}\".", i.vin, name.join(" "))
+                }
+            );
+            Ok(())
+        }
+    }
 }
 
 fn obd_pids(elm: &mut Elm) -> Result<(), String> {

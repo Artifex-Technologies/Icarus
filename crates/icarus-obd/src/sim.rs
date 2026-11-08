@@ -114,6 +114,25 @@ impl SimCar {
         m
     }
 
+    /// The freeze frame stored with P0171: cruising at 72 km/h, warm, both trims adding fuel.
+    fn frozen(pid: u8) -> Option<Vec<u8>> {
+        const FROZEN: &[u8] = &[0x02, 0x04, 0x05, 0x06, 0x07, 0x0B, 0x0C, 0x0D, 0x0F, 0x11];
+        Some(match pid {
+            0x00 => Self::bitmap(FROZEN, 0).to_vec(),
+            0x02 => vec![0x01, 0x71],
+            0x04 => vec![77],
+            0x05 => vec![90 + 40],
+            0x06 => vec![128 + 10],
+            0x07 => vec![128 + 16],
+            0x0B => vec![48],
+            0x0C => (2150u16 * 4).to_be_bytes().to_vec(),
+            0x0D => vec![72],
+            0x0F => vec![24 + 40],
+            0x11 => vec![34],
+            _ => return None,
+        })
+    }
+
     fn engine_pid(&self, pid: u8) -> Option<Vec<u8>> {
         let t = self.tick as f64;
         let rpm = 790.0 + 40.0 * (t * 0.7).sin();
@@ -235,6 +254,11 @@ impl SimCar {
             [0x03] => {
                 msgs.push(("7E8", vec![0x43, 0x01, 0x01, 0x71]));
                 msgs.push(("7E9", vec![0x43, 0x00]));
+            }
+            [0x02, pid, 0x00] => {
+                if let Some(d) = Self::frozen(*pid) {
+                    msgs.push(("7E8", [&[0x42, *pid, 0x00][..], &d].concat()));
+                }
             }
             [0x07] => msgs.push(("7E8", vec![0x47, 0x00])),
             [0x0A] => msgs.push(("7E8", vec![0x4A, 0x00])),
@@ -410,6 +434,14 @@ mod tests {
         );
         let rpm = j1979::read(&mut elm, 0x0C).unwrap();
         assert!((700.0..900.0).contains(&rpm[0].value));
+        let ff = j1979::freeze_frame(&mut elm).unwrap();
+        assert_eq!(ff.len(), 1);
+        assert_eq!(ff[0].code.as_deref(), Some("P0171"));
+        assert!(
+            ff[0].values.contains(&(0x0D, 72.0)) && ff[0].values.contains(&(0x0C, 2150.0)),
+            "{:?}",
+            ff[0].values
+        );
         let ltft = j1979::read(&mut elm, 0x07).unwrap();
         assert!((ltft[0].value - 11.71875).abs() < 1e-9);
     }

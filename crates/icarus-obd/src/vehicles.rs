@@ -6,6 +6,7 @@
 //! OBD-II range (7E0-7E7) is in every profile.
 
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, Deserialize)]
@@ -18,6 +19,9 @@ pub struct Profile {
     pub notes: String,
     #[serde(default, rename = "module")]
     pub modules: Vec<ModuleAddr>,
+    /// The maker's own trouble codes: code = meaning (`[codes]` table).
+    #[serde(default)]
+    pub codes: BTreeMap<String, String>,
     /// The file's name without `.toml` (how `--make` picks it).
     #[serde(skip)]
     pub id: String,
@@ -104,6 +108,10 @@ pub fn parse(id: &str, source: &str, text: &str) -> Result<Profile, String> {
         }
     }
     p.wmi = p.wmi.iter().map(|w| w.to_uppercase()).collect();
+    p.codes = std::mem::take(&mut p.codes)
+        .into_iter()
+        .map(|(k, v)| (k.trim().to_uppercase(), v))
+        .collect();
     p.id = id.to_string();
     p.source = source.to_string();
     Ok(p)
