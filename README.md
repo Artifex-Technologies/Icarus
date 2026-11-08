@@ -28,7 +28,13 @@ icarus obd info  --adapter A    # adapter, protocol, VIN, modules, calibration I
 icarus obd codes --adapter A    # stored, pending and permanent trouble codes per module
 icarus obd pids  --adapter A    # the live values each module offers, and what each one means
 icarus obd live  --adapter A 0C 06 07 14 44 --csv run.csv   # watch values (PIDs in hex), optionally into a CSV log
+icarus obd scan  --adapter A --make toyota   # every module (ABS, airbags, cluster...): identity and trouble codes
+icarus obd module 7B0 --adapter A            # one module, by its request ID
 ```
+
+`scan` and `module` work like a dealer tool (Techstream, FORScan): they talk to each module directly in UDS (ISO 14229) or
+the older KWP2000 that many Toyota modules still use, not only to the engine's standard OBD-II side. A guard in the code lets
+only reading services out: clearing codes, writing, actuator tests and programming are refused until the safety steps exist.
 
 The adapter `A` is one of:
 

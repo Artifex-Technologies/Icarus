@@ -162,6 +162,8 @@ pub struct Elm {
     pub protocol: Protocol,
     /// The voltage at the OBD port (`ATRV`): the vehicle's battery.
     pub voltage: Option<f64>,
+    /// The one module requests go to (request ID, answer ID), or None: OBD's broadcast to every module (7DF).
+    target: Option<(u16, u16)>,
 }
 
 const LINE_ERRORS: [&str; 12] = [
@@ -188,6 +190,7 @@ impl Elm {
             stn: None,
             protocol: Protocol::Other(0),
             voltage: None,
+            target: None,
         };
         let reset = elm.command("ATZ", Duration::from_secs(4))?;
         elm.id = reset
@@ -268,8 +271,52 @@ impl Elm {
         self.command(hex, timeout)
     }
 
-    /// Sends an OBD request (e.g. `[0x01, 0x0C]`, engine speed) and returns every module's answer.
+    /// Sends an OBD request (e.g. `[0x01, 0x0C]`, engine speed) to every module and returns each one's answer.
     pub fn request(&mut self, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
+        if self.target.is_some() {
+            self.ok_commands(&["ATSH7DF", "ATCRA", "ATFCSM0"])?;
+            self.target = None;
+        }
+        self.send_request(data)
+    }
+
+    /// Sends a request to one module on 11-bit CAN: to request ID `tx`, listening only to answer ID `rx` (usually tx + 8).
+    /// Flow control for long answers goes to `tx` too, which modules outside OBD's own 7E0-7E7 need.
+    pub fn request_to(&mut self, tx: u16, rx: u16, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
+        if !matches!(self.protocol, Protocol::Can11At500 | Protocol::Can11At250) {
+            return Err(ObdError::Adapter(format!(
+                "talking to one module needs 11-bit CAN; this vehicle uses {}",
+                self.protocol.describe()
+            )));
+        }
+        if tx > 0x7FF || rx > 0x7FF {
+            return Err(ObdError::Adapter(format!(
+                "{tx:X}/{rx:X} are not 11-bit CAN IDs"
+            )));
+        }
+        if self.target != Some((tx, rx)) {
+            let (sh, cra, fc) = (
+                format!("ATSH{tx:03X}"),
+                format!("ATCRA{rx:03X}"),
+                format!("ATFCSH{tx:03X}"),
+            );
+            self.ok_commands(&[&sh, &cra, &fc, "ATFCSD300000", "ATFCSM1"])?;
+            self.target = Some((tx, rx));
+        }
+        self.send_request(data)
+    }
+
+    fn ok_commands(&mut self, cmds: &[&str]) -> Result<(), ObdError> {
+        for c in cmds {
+            let r = self.command(c, Duration::from_secs(2))?;
+            if !r.iter().any(|l| l == "OK") {
+                return Err(ObdError::Adapter(format!("{c} gave {r:?}")));
+            }
+        }
+        Ok(())
+    }
+
+    fn send_request(&mut self, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
         let hex: String = data.iter().map(|b| format!("{b:02X}")).collect();
         let lines = self.raw_request(&hex, Duration::from_secs(5))?;
         check_errors(&lines)?;

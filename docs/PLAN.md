@@ -36,6 +36,24 @@ Tacoma has no gauge for) and the CAN bus.
 5. Log viewer: graphs of the CSV logs, fuel trims against load and speed.
 6. Axis units in `show` and `diff`, formulas that use other values (the 20 MS43 elements left out).
 
+## 1b. Dealer-tool features (FORScan, Techstream)
+
+What those tools do, and where Icarus is:
+
+| Feature | Icarus |
+| --- | --- |
+| Find every module, read its identity and trouble codes (UDS and KWP2000) | done (`obd scan`, `obd module`), read-only, tested on the simulated vehicle |
+| Each module's own live data (Toyota: KWP2000 `21` local identifiers and UDS `22`; e.g. transmission fluid temperature) | next: needs the identifiers per module, from public sources, checked on the Tacoma |
+| Toyota body modules behind the gateway (ID 750 with an extended address byte) | next: `ATCEA` on the adapter |
+| Freeze frames, readiness per module, code descriptions | next |
+| Clear codes | after: a write (small, but it erases the evidence of a fault; asks first, shows what is cleared) |
+| Actuator tests (run the fan, cycle the ABS pump, click a relay) | after: writes; each test with its conditions (engine off, vehicle still) |
+| Customizations / as-built configuration (FORScan's paddle shifters and tire size; Toyota's customizations) | after: writes; a backup of the whole configuration before any change, and the way back |
+| Service functions (relearns, resets, bleeding, injector coding, TPMS IDs) | after: per vehicle |
+
+Writes of any kind open only when docs/PLAN.md section 4's conditions are built: a backup first, a clear statement of what
+changes, and the way back.
+
 ## 2. Read the ECU (needs: the ECU's family, a wired interface)
 
 Reading the whole calibration depends on the ECU: its bootloader or diagnostic service for memory reads (`23`

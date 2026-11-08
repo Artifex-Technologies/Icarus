@@ -214,10 +214,7 @@ impl DtcKind {
 }
 
 /// Trouble codes per module.
-pub fn dtcs(
-    elm: &mut Elm,
-    kind: DtcKind,
-) -> Result<PerModule<Vec<String>>, ObdError> {
+pub fn dtcs(elm: &mut Elm, kind: DtcKind) -> Result<PerModule<Vec<String>>, ObdError> {
     let sid = kind.service();
     let answers = match elm.request(&[sid]) {
         Ok(a) => a,
@@ -227,11 +224,7 @@ pub fn dtcs(
     Ok(parse_dtcs(&answers, sid, elm.protocol.is_can()))
 }
 
-pub fn parse_dtcs(
-    answers: &[Answer],
-    sid: u8,
-    can: bool,
-) -> PerModule<Vec<String>> {
+pub fn parse_dtcs(answers: &[Answer], sid: u8, can: bool) -> PerModule<Vec<String>> {
     let mut out: PerModule<Vec<String>> = Vec::new();
     for a in answers
         .iter()
@@ -332,11 +325,7 @@ pub fn fuel_system(a: u8) -> &'static str {
 
 /// Text from service 09 answers (VIN, calibration IDs, ECU name): the printable characters, padding removed; older buses send
 /// it four bytes per numbered message, which join up the same way.
-fn text_items(
-    answers: &[Answer],
-    pid: u8,
-    item_len: usize,
-) -> PerModule<Vec<String>> {
+fn text_items(answers: &[Answer], pid: u8, item_len: usize) -> PerModule<Vec<String>> {
     let mut out: PerModule<Vec<u8>> = Vec::new();
     for a in answers
         .iter()
@@ -385,9 +374,7 @@ pub fn vin(elm: &mut Elm) -> Result<Option<String>, ObdError> {
 
 /// Each module's calibration IDs (service 09 PID 04): the name of the software calibration it runs, which is how a tune or
 /// a definition file is matched to an ECU.
-pub fn calibration_ids(
-    elm: &mut Elm,
-) -> Result<PerModule<Vec<String>>, ObdError> {
+pub fn calibration_ids(elm: &mut Elm) -> Result<PerModule<Vec<String>>, ObdError> {
     match elm.request(&[0x09, 0x04]) {
         Ok(a) => Ok(text_items(&a, 0x04, 16)),
         Err(ObdError::NoData) => Ok(vec![]),

@@ -17,6 +17,12 @@ pub struct SimCar {
     headers: bool,
     spaces: bool,
     tick: u32,
+    /// Where requests go (ATSH): 7DF is OBD's broadcast to all modules, anything else one module.
+    header: u16,
+    /// Only answers from this ID are shown (ATCRA).
+    filter: Option<u16>,
+    /// The instrument cluster answers its first trouble-code request with "response pending" (7F 19 78).
+    meter_busy: bool,
 }
 
 impl Default for SimCar {
@@ -40,6 +46,9 @@ impl SimCar {
             headers: false,
             spaces: true,
             tick: 0,
+            header: 0x7DF,
+            filter: None,
+            meter_busy: true,
         }
     }
 
@@ -125,7 +134,11 @@ impl SimCar {
             0x10 => (380u16).to_be_bytes().to_vec(),
             0x11 => vec![37],
             0x14 => vec![
-                (if self.tick.is_multiple_of(2) { 0.15 } else { 0.78 } * 200.0) as u8,
+                (if self.tick.is_multiple_of(2) {
+                    0.15
+                } else {
+                    0.78
+                } * 200.0) as u8,
                 0x86,
             ],
             0x15 => vec![(0.62 * 200.0) as u8, 0xFF],
@@ -143,7 +156,68 @@ impl SimCar {
 
     fn answer(&mut self, req: &[u8]) -> Vec<String> {
         self.tick += 1;
-        let mut msgs: Vec<(&str, Vec<u8>)> = Vec::new();
+        let mut msgs: Vec<(String, Vec<u8>)> = if self.header == 0x7DF {
+            self.broadcast(req)
+                .into_iter()
+                .map(|(h, p)| (h.to_string(), p))
+                .collect()
+        } else {
+            self.module(self.header, req)
+                .map(|p| (format!("{:03X}", self.header + 8), p))
+                .into_iter()
+                .collect()
+        };
+        if let Some(f) = self.filter {
+            msgs.retain(|(h, _)| *h == format!("{f:03X}"));
+        }
+        if msgs.is_empty() {
+            return vec!["NO DATA".into()];
+        }
+        msgs.iter().flat_map(|(h, p)| self.frames(h, p)).collect()
+    }
+
+    /// One module's answer to a request sent to it alone: the engine and transmission speak UDS, the ABS only KWP2000 (as
+    /// many Toyota modules do), the airbag and instrument cluster UDS. Anything else is "not supported" (7F) or silence.
+    fn module(&mut self, tx: u16, req: &[u8]) -> Option<Vec<u8>> {
+        let refuse = |code: u8| Some(vec![0x7F, req[0], code]);
+        let (part, uds, codes): (&[u8], bool, &[u8]) = match tx {
+            0x7E0 => (b"89661-ICARUS", true, &[0x01, 0x71, 0x00, 0x09]),
+            0x7E1 => (b"35010-ICARUS", true, &[]),
+            0x7B0 => (b"89540-ICARUS", false, &[0x52, 0x41, 0x60]),
+            0x780 => (b"89170-ICARUS", true, &[]),
+            0x7C0 => (b"83800-ICARUS", true, &[]),
+            _ => return None,
+        };
+        match (req, uds) {
+            ([0x3E, 0x00], true) => Some(vec![0x7E, 0x00]),
+            ([0x3E, 0x00], false) => refuse(0x12),
+            ([0x3E, 0x01], false) => Some(vec![0x7E]),
+            ([0x01, pid], _) if tx == 0x7E0 => self
+                .engine_pid(*pid)
+                .map(|d| [&[0x41, *pid][..], &d].concat()),
+            ([0x19, 0x02, mask], true) => {
+                if tx == 0x7C0 && self.meter_busy {
+                    self.meter_busy = false;
+                    return refuse(0x78);
+                }
+                Some([&[0x59, 0x02, *mask][..], codes].concat())
+            }
+            ([0x18, ..], false) => Some([&[0x58, (codes.len() / 3) as u8][..], codes].concat()),
+            ([0x22, 0xF1, 0x87], true) => Some([&[0x62, 0xF1, 0x87][..], part].concat()),
+            ([0x22, 0xF1, 0x88], true) => {
+                Some([&[0x62, 0xF1, 0x88][..], b"ICARUS-SW-0001"].concat())
+            }
+            ([0x22, 0xF1, 0x90], true) if tx == 0x7E0 => {
+                Some([&[0x62, 0xF1, 0x90][..], VIN.as_bytes()].concat())
+            }
+            ([0x22, ..], true) => refuse(0x31),
+            _ => refuse(0x11),
+        }
+    }
+
+    /// Answers to OBD's broadcast (7DF), from every module that has one.
+    fn broadcast(&mut self, req: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
+        let mut msgs: Vec<(&'static str, Vec<u8>)> = Vec::new();
         match req {
             [0x01, pid] => {
                 if let Some(d) = self.engine_pid(*pid) {
@@ -188,10 +262,7 @@ impl SimCar {
             }
             _ => {}
         }
-        if msgs.is_empty() {
-            return vec!["NO DATA".into()];
-        }
-        msgs.iter().flat_map(|(h, p)| self.frames(h, p)).collect()
+        msgs
     }
 
     fn handle(&mut self, cmd: &str) {
@@ -209,6 +280,7 @@ impl SimCar {
         let reply: Vec<String> = match c.as_str() {
             "ATZ" => {
                 (self.echo, self.headers, self.spaces) = (true, false, true);
+                (self.header, self.filter) = (0x7DF, None);
                 vec!["".into(), "ELM327 v1.5".into()]
             }
             "ATI" => vec!["ELM327 v1.5".into()],
@@ -225,6 +297,26 @@ impl SimCar {
                 ok
             }
             "ATDPN" => vec!["A6".into()],
+            "ATCRA" => {
+                self.filter = None;
+                ok
+            }
+            _ if c.starts_with("ATSH") || c.starts_with("ATCRA") => {
+                match u16::from_str_radix(&c[if c.starts_with("ATSH") { 4 } else { 5 }..], 16) {
+                    Ok(id) if id <= 0x7FF => {
+                        if c.starts_with("ATSH") {
+                            self.header = id;
+                        } else {
+                            self.filter = Some(id);
+                        }
+                        ok
+                    }
+                    _ => vec!["?".into()],
+                }
+            }
+            _ if c.starts_with("ATFCSH") || c.starts_with("ATFCSD") || c.starts_with("ATFCSM") => {
+                ok
+            }
             "ATRV" => vec!["12.6V".into()],
             _ if c.starts_with("ATL")
                 || c.starts_with("ATSP")

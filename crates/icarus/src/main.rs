@@ -7,6 +7,7 @@ use icarus_core::xdf;
 use icarus_obd::elm::Elm;
 use icarus_obd::j1979::{self, DtcKind};
 use icarus_obd::port::Target;
+use icarus_obd::uds;
 use std::io::Write;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
@@ -25,6 +26,10 @@ Vehicle, through an OBD adapter (read-only: nothing is cleared or written):
   icarus obd pids  --adapter A               the live values each module offers, and what they mean
   icarus obd live  --adapter A [PID...] [--every MS] [--count N] [--csv FILE]
                                              watch live values (PIDs in hex, e.g. 0C 05 06 07); Ctrl+C stops
+  icarus obd scan  --adapter A [--make toyota|subaru|generic] [--sweep]
+                                             find every module (ABS, airbags, cluster...): identity and trouble codes,
+                                             as dealer tools do; --sweep tries every ID from 700 to 7F7 (slower)
+  icarus obd module ID --adapter A           one module (request ID in hex, e.g. 7B0): identity and all its codes
 
   The adapter A: sim (a simulated vehicle), /dev/ttyUSB0[@baud], bt:AA:BB:CC:DD:EE:FF[#channel] (paired Bluetooth, such as
   an OBDLink MX+), tcp:host:port (Wi-Fi). ICARUS_ADAPTER sets a default.";
@@ -64,6 +69,11 @@ fn parse_args(a: &[String], with_value: &[&str]) -> Result<Args, String> {
     };
     let mut i = 0;
     while i < a.len() {
+        if a[i] == "--sweep" {
+            out.opts.push(("sweep".into(), "yes".into()));
+            i += 1;
+            continue;
+        }
         if let Some(name) = a[i].strip_prefix("--") {
             if !with_value.contains(&name) {
                 return Err(format!("unknown option --{name}"));
@@ -359,15 +369,91 @@ fn connect(args: &Args) -> Result<Elm, String> {
 fn cmd_obd(a: &[String]) -> Result<(), String> {
     let args = parse_args(
         a.get(1..).unwrap_or(&[]),
-        &["adapter", "every", "count", "csv"],
+        &["adapter", "every", "count", "csv", "make"],
     )?;
     match a.first().map(String::as_str) {
         Some("info") => obd_info(&mut connect(&args)?),
         Some("codes") => obd_codes(&mut connect(&args)?),
         Some("pids") => obd_pids(&mut connect(&args)?),
         Some("live") => obd_live(&mut connect(&args)?, &args),
-        _ => Err("usage: icarus obd info|codes|pids|live --adapter A (see icarus --help)".into()),
+        Some("scan") => obd_scan(&mut connect(&args)?, &args),
+        Some("module") => obd_module(&mut connect(&args)?, &args),
+        _ => Err(
+            "usage: icarus obd info|codes|pids|live|scan|module --adapter A (see icarus --help)"
+                .into(),
+        ),
     }
+}
+
+fn print_module(elm: &mut Elm, tx: u16, name: &str) -> Result<(), String> {
+    println!("\n{tx:03X}  {name}");
+    for (what, value) in uds::module_identity(elm, tx).map_err(e)? {
+        println!("     {what:<17} {value}");
+    }
+    match uds::module_dtcs(elm, tx).map_err(e)? {
+        None => println!("     trouble codes     (the module would not say)"),
+        Some((dialect, codes)) => {
+            let lang = if dialect == uds::Dialect::Uds {
+                "UDS"
+            } else {
+                "KWP2000"
+            };
+            if codes.is_empty() {
+                println!("     trouble codes     none ({lang})");
+            }
+            for c in codes {
+                let ftb = c
+                    .failure_type
+                    .map(|f| format!("-{f:02X}"))
+                    .unwrap_or_default();
+                println!(
+                    "     trouble code      {}{ftb}  {} ({lang})",
+                    c.code,
+                    c.states.join(", ")
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn obd_scan(elm: &mut Elm, args: &Args) -> Result<(), String> {
+    let make = match args.opt("make") {
+        Some(m) => {
+            uds::Make::parse(m).ok_or(format!("unknown make {m:?}: toyota, subaru or generic"))?
+        }
+        None => uds::Make::Generic,
+    };
+    let list = if args.opt("sweep").is_some() {
+        uds::sweep()
+    } else {
+        uds::candidates(make)
+    };
+    eprintln!("looking at {} addresses...", list.len());
+    let mut found = 0;
+    for (tx, name) in list {
+        if uds::present(elm, tx).map_err(e)? {
+            found += 1;
+            print_module(elm, tx, name)?;
+        }
+    }
+    println!("\n{found} module(s) answered. Codes: P powertrain, C chassis (ABS, steering), B body (airbags, lights), U network.");
+    Ok(())
+}
+
+fn obd_module(elm: &mut Elm, args: &Args) -> Result<(), String> {
+    let [id] = args.pos.as_slice() else {
+        return Err("usage: icarus obd module ID --adapter A (ID in hex, e.g. 7B0)".into());
+    };
+    let tx = u16::from_str_radix(id.trim_start_matches("0x"), 16)
+        .map_err(|_| format!("{id} is not a module ID in hex"))?;
+    if !(0x700..=0x7F7).contains(&tx) || tx == 0x7DF {
+        return Err("module request IDs are 700-7F7 (7DF is the broadcast)".into());
+    }
+    if !uds::present(elm, tx).map_err(e)? {
+        return Err(format!("nothing answered at {tx:03X}"));
+    }
+    print_module(elm, tx, "module")
 }
 
 fn e(x: icarus_obd::elm::ObdError) -> String {
