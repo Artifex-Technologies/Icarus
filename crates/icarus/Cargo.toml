@@ -9,3 +9,4 @@ repository.workspace = true
 [dependencies]
 icarus-core = { path = "../icarus-core" }
 icarus-obd = { path = "../icarus-obd" }
+serde_json = "1"

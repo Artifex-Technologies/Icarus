@@ -11,6 +11,8 @@ use icarus_obd::{
     actuator, bus, charging, clear, dtc, garage, lookup, mode06, nhtsa, report, socketcan, uds,
     vehicles, vin,
 };
+mod mcp;
+
 use std::io::Write;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
@@ -43,6 +45,11 @@ Bus (watching only: nothing is sent onto the bus):
 Tools:
   icarus tires STOCK NEW [--gear 3.909] [--speed 65]
                                              what new tires do to the speedometer and gearing, and which regear restores it
+
+For an assistant:
+  icarus mcp                                 a read-only MCP server on stdin/stdout (codes explained, a vehicle check,
+                                             every module's codes, tires and gears) for Sarina or another assistant; the
+                                             adapter comes from ICARUS_ADAPTER. Nothing that clears or tests is offered
 
 Vehicles:
   icarus vin VIN [--nhtsa]                   what a VIN says: where it was built, maker, model year, check digit;
@@ -89,6 +96,7 @@ fn main() -> ExitCode {
         Some("bus") => cmd_bus(&args[1..]),
         Some("tires") => cmd_tires(&args[1..]),
         Some("recalls") => cmd_recalls(&args[1..]),
+        Some("mcp") => mcp::serve(),
         Some("-h" | "--help" | "help") | None => {
             println!("{HELP}");
             Ok(())

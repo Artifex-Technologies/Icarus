@@ -126,7 +126,9 @@ TCM shift tables, line pressure and converter lock-up through the same steps (id
 
 ## 6. Learning and the rest of the ecosystem
 
-- Sarina explains a log or a code in conversation ("why is long-term trim +12 % at idle?").
+- Sarina explains a log or a code in conversation ("why is long-term trim +12 % at idle?"): `icarus mcp` (done 2026-11-07,
+  read-only tools: codes explained, a vehicle check, every module's codes, tires and gears). Next: a log file as a tool
+  (a CSV from `obd live --csv`), still read-only.
 - Off-road extras: gauges for the trail (temperatures, voltages), logging to a file on the vehicle's computer.
 
 ## Hardware worth having

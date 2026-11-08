@@ -99,6 +99,21 @@ time limit, warning, a live value to watch). Their IDs are each maker's own, so 
 marked `checked = false` until seen working; none are in the built-in profiles yet. `sim:off` (the simulated vehicle,
 ignition on and engine off) has five to try: fan, throttle, fuel pump, EVAP vent valve, ABS pump.
 
+## Sarina (or another assistant)
+
+`icarus mcp` is a Model Context Protocol server on stdin/stdout with four read-only tools: `explain_code` (what a code
+means, where to start, the parts), `vehicle_check` (identity, check-engine light, readiness, codes explained, freeze frame,
+current values, on-board test results), `vehicle_modules` (every module's codes) and `tires_gears`. Nothing that clears
+codes, runs a test or writes is offered to a model; a test fails if a tool with such a name appears. The adapter comes from
+`ICARUS_ADAPTER` in the server's environment (`sim` for the simulated vehicle). For Sarina, a definition file of its own:
+
+```json
+{"mcpServers": {"icarus": {"command": "/home/me/.local/bin/icarus", "args": ["mcp"],
+  "env": {"ICARUS_ADAPTER": "bt:AA:BB:CC:DD:EE:FF"}, "read_only": true, "timeout_seconds": 120}}}
+```
+
+named by `SARINA_MCP_FILE` when she should have it (in `~/.sarina/mcp.json` her nightly evals would see the four tools too).
+
 ## The window
 
 `icarus-app` (Icarus in the app menu): the **Vehicle** page connects to the adapter and shows the VIN, the make's profile,
