@@ -88,10 +88,38 @@ the stock feel back.
 
 `icarus bus watch --adapter A` (the OBDLink's monitor mode) or `--can can0` (a Linux CAN interface such as a CANable),
 or the Bus page: every ID with its rate and last bytes, the bytes that just changed lit up (press a pedal or a switch and
-watch which byte follows), diagnostic messages between a tool and the modules put in words, and actuator tests another tool
-runs learned as `[[test]]` entries (unchecked, the most cautious conditions) that one button adds to the vehicle's file.
-A setting another tool changes (a write the module accepted) is learned the same way, as a `[[setting]]` entry with the
-value it read just before as "was". Watching only: nothing is sent onto the bus.
+watch which byte follows), and diagnostic messages between a tool and the modules put in words. Watching only: nothing
+is sent onto the bus. What another tool does while Icarus watches is learned (next section).
+
+## Learning from another tool
+
+Icarus learns a vehicle's settings and output tests by watching another tool use them on it: a dealer tool, a shop scan
+tool, a phone app that does customizations. A Y-splitter on the OBD port carries both: the other tool on one side, Icarus's
+adapter (monitor mode) on the other, or a CAN interface tapped into the bus. Icarus only listens.
+
+```sh
+icarus learn --adapter A           # type what you are about to do in the other tool, Enter (a mark), then do it; "stop" ends
+icarus learn --can can0 --ask-sarina
+```
+
+Or the **Learning** page: Start learning, type what you are about to do and press Mark before each change, Stop and save.
+
+- **What is learned.** A write the module accepted (UDS `2E` answered `6E`, KWP2000 `3B` answered `7B`) becomes a
+  `[[setting]]`, with the value the tool read just before (`22`/`21`) as "was" and the written one as "set", and whether
+  the tool opened the extended session first. An output-control request (UDS `2F ... 03`, KWP2000 `30 .. 07`) becomes a
+  `[[test]]`. A mark names the next one learned; one change per mark works best. Both are unchecked, with the most
+  cautious conditions; the airbag modules and immobiliser, key and odometer settings are never learned.
+- **What is not learned, but noted.** Security access (the tool unlocking a module), routines (service functions, coding
+  steps), writes too long for a setting, memory writes and programming, and writes the module refused, each in words.
+- **The session** is saved in the vehicle's `Logs` folder as `learning-DATE-TIME.md`: the module names from Icarus's
+  profile, the marks, what was learned, what was noted, and every diagnostic message in words. No VIN.
+- **Naming and adding.** On the Learning page each learned setting gets a name and names for its values ("was"/"set"
+  become "on"/"off"), and one button adds it to the vehicle's file (`~/.config/icarus/vehicles/MAKE.toml`); the Settings
+  and Tests pages then offer it.
+- **Sarina**, when installed (optional): Ask Sarina on a session (or `--ask-sarina`) has Sarina read the file
+  (`labyrinth-ask-sarina`, read-only) and say what each setting most likely is, names for it and its values, and what the
+  tool did that Icarus could not learn. Sarina's answer is a suggestion; the names are mine to give. Sarina can also open
+  the sessions through `icarus mcp` (`learning_sessions`).
 
 ## Actuator tests (bidirectional controls)
 
@@ -118,8 +146,8 @@ ignition on and engine off) has five to try: fan, throttle, fuel pump, EVAP vent
 ## Module settings
 
 What dealer tools call customizations: a feature a module keeps switched on or off, or a value it keeps (a chime, a lock
-behaviour, a light). Icarus learns them by watching such a tool change one on my own vehicle (the Bus page, `icarus bus
-watch`), and then changes them itself:
+behaviour, a light). Icarus learns them by watching such a tool change one on my own vehicle (previous section), and then
+changes them itself, on the Settings page (asks first, with the value now and the one chosen) or:
 
 ```sh
 icarus obd settings --adapter A                                # the settings known for this vehicle, and each one's value now
@@ -163,9 +191,10 @@ the saved file is for study only. No family's description ships yet: each needs 
 
 ## Sarina (or another assistant)
 
-`icarus mcp` is a Model Context Protocol server on stdin/stdout with four read-only tools: `explain_code` (what a code
+`icarus mcp` is a Model Context Protocol server on stdin/stdout with five read-only tools: `explain_code` (what a code
 means, where to start, the parts), `vehicle_check` (identity, check-engine light, readiness, codes explained, freeze frame,
-current values, on-board test results), `vehicle_modules` (every module's codes) and `tires_gears`. Nothing that clears
+current values, on-board test results), `vehicle_modules` (every module's codes), `learning_sessions` (what Icarus saved
+while watching another tool) and `tires_gears`. Nothing that clears
 codes, runs a test or writes is offered to a model; a test fails if a tool with such a name appears. The adapter comes from
 `ICARUS_ADAPTER` in the server's environment (`sim` for the simulated vehicle). For Sarina, a definition file of its own:
 
@@ -174,7 +203,8 @@ codes, runs a test or writes is offered to a model; a test fails if a tool with 
   "env": {"ICARUS_ADAPTER": "bt:AA:BB:CC:DD:EE:FF"}, "read_only": true, "timeout_seconds": 120}}}
 ```
 
-named by `SARINA_MCP_FILE` when she should have it (in `~/.sarina/mcp.json` her nightly evals would see the four tools too).
+named by `SARINA_MCP_FILE` when Sarina should have it (in `~/.sarina/mcp.json` Sarina's nightly evals would see the five
+tools too).
 
 ## The window
 
@@ -182,9 +212,12 @@ named by `SARINA_MCP_FILE` when she should have it (in `~/.sarina/mcp.json` her 
 the codes explained with Look up and parts buttons, the freeze frame, the check-engine light and readiness monitors, the
 vehicle's name, and Save report; **Modules** scans every module for its identity and codes;
 **Live data** picks values and draws them as they change, each with what it means; **Tests** runs actuator tests while a
-button is held; **Maps** opens a definition and an image
+button is held; **Settings** shows each module setting's value and changes it (asks first; undo puts the last change
+back); **Learning** watches another tool and names what it learned; **Bus** shows every ID and message; **Maps** opens a
+definition and an image
 (and a second image to compare: it starts on the first map the second one changed, changed cells outlined). Start options:
-`--connect [--adapter A] --page modules --scan`, `--live`, `--maps DEF.xdf IMAGE.bin [SECOND.bin]`.
+`--connect [--adapter A] --page modules --scan`, `--live`, `--maps DEF.xdf IMAGE.bin [SECOND.bin]`, `--learn [--mark TEXT]
+[--learn-seconds N]` (a learning watch at start, for demonstrations).
 
 ## What it does today
 

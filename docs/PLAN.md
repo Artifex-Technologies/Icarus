@@ -72,6 +72,8 @@ What those tools do, and where Icarus is:
 | Clear codes | done 2026-11-07: asks first, engine off, a report saved before; OBD-II 04, UDS/KWP 14 per module; logged |
 | Actuator tests (run the fan, open the throttle, cycle the ABS pump, click a relay) | done 2026-11-07: the engine (actuator.rs: allow-list, airbag ban, conditions, 30 s cap, hold-to-run, control returned on every path, log), `[[test]]` profile entries, five on the simulated vehicle. No real IDs yet: each maker's own |
 | Learn a test from another tool: watch the bus (adapter monitor mode, a Y-cable) while a shop tool runs it, decode its 2F/30 requests into a `[[test]]` entry | done 2026-11-07 (Bus page, icarus bus watch); one button adds it to the vehicle's file |
+| Learning from another tool, as a step of its own | done 2026-11-08: the Learning page and `icarus learn`: marks name what is learned next, settings and tests are named and added there, what is not learned (security access, routines, refused writes) is noted, each session saved in the vehicle's Logs; Sarina (optional) reads a session and suggests what each thing is (`labyrinth-ask-sarina`, read-only; `learning_sessions` in `icarus mcp`) |
+| Settings in the window | done 2026-11-08: the Settings page (value now, change with a yes, undo) |
 | Customizations: a setting a module keeps (Toyota's customizations, FORScan's feature switches) | done 2026-11-08, tested on the simulated vehicle: settings.rs (`22`/`2E`, `21`/`3B` only; value before kept in the vehicle's Logs first, read back, put back if not taken, undo; wired, 12 V, parked, engine off; never airbag, immobiliser, key or odometer), `[[setting]]` profile entries, learned from the bus like tests (`icarus obd settings / setting / setting-undo`). No real IDs yet: learned on the truck once the laptop is here |
 | As-built configuration (FORScan's whole-module blocks: paddle shifters, tire size) | after: a backup of the whole block before any change; module coding waits for section 4 |
 | Service functions (relearns, resets, bleeding, injector coding, TPMS IDs) | after: per vehicle |
@@ -137,7 +139,9 @@ TCM shift tables, line pressure and converter lock-up through the same steps (id
 - **Learned settings.** What a dealer tool changes on my own vehicle (a customization, a feature switched on), recorded by
   watching the bus while the tool does it (`icarus bus watch`, as actuator tests are learned), becomes a setting Icarus can
   change itself: the value there before read and kept, one-step undo, parked, wired. Built 2026-11-08 and tested on the
-  simulated vehicle (README, Module settings); waiting for the laptop at the truck to learn the real ones.
+  simulated vehicle (README, Module settings and Learning); waiting for the laptop at the truck to learn the real ones.
+  Learning needs another tool to make each change once while Icarus listens (a Y-splitter on the OBD port): Techstream on
+  a J2534 cable, a dealer visit, or a phone app that does Toyota customizations.
 
 ## 6. Learning and the rest of the ecosystem
 

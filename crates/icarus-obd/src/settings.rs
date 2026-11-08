@@ -260,6 +260,11 @@ pub fn log_path(vehicle_dir: &Path) -> std::path::PathBuf {
     vehicle_dir.join("Logs").join("settings-changes.tsv")
 }
 
+/// The change log for the vehicle with this VIN (`garage::logs_dir`).
+pub fn log_for(vin: Option<&str>) -> Result<std::path::PathBuf, String> {
+    Ok(crate::garage::logs_dir(vin)?.join("settings-changes.tsv"))
+}
+
 fn append(log: &Path, c: &Change) -> Result<(), String> {
     if let Some(d) = log.parent() {
         std::fs::create_dir_all(d).map_err(|e| e.to_string())?;

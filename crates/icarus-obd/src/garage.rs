@@ -126,6 +126,21 @@ pub fn ensure_in(lib: &Path, vin: &str, name: Option<&str>) -> std::io::Result<P
     Ok(dir)
 }
 
+/// Where a vehicle's own records go (setting changes, learning sessions): its folder's `Logs`, made if needed. The
+/// simulated vehicle, or one whose VIN could not be read, uses `~/.local/state/icarus/sim` instead.
+pub fn logs_dir(vin: Option<&str>) -> Result<PathBuf, String> {
+    let dir = match vin {
+        Some(v) if v != crate::sim::VIN => ensure(v)
+            .map_err(|x| format!("the vehicle's folder could not be made: {x}"))?
+            .join("Logs"),
+        _ => crate::audit::path()
+            .and_then(|p| p.parent().map(|d| d.join("sim")))
+            .ok_or("no state folder")?,
+    };
+    std::fs::create_dir_all(&dir).map_err(|x| format!("{}: {x}", dir.display()))?;
+    Ok(dir)
+}
+
 /// This vehicle's folder, made if needed (the simulated vehicle has none).
 pub fn ensure(vin: &str) -> std::io::Result<PathBuf> {
     if vin == crate::sim::VIN {

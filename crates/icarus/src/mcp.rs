@@ -2,13 +2,13 @@
 //! (Sarina, through her operator file ~/.sarina/mcp.json) can read a vehicle and explain it.
 //!
 //! **Read-only, always.** The tools here only read: identity, codes with their meanings, the freeze frame, live values,
-//! every module's codes, and the tires/gears arithmetic. Clearing codes, actuator tests and anything else that changes a
+//! every module's codes, the tires/gears arithmetic, and the learning sessions Icarus saved while watching another tool. Clearing codes, actuator tests and anything else that changes a
 //! vehicle are never offered to a model (a test checks the tool list), as Sarina's own rules keep launching agents
 //! CLI-only. The adapter is the one named by ICARUS_ADAPTER in the server's environment.
 
 use icarus_obd::elm::Elm;
 use icarus_obd::port::Target;
-use icarus_obd::{dtc, garage, j1979, report, uds, vehicles};
+use icarus_obd::{dtc, garage, j1979, learning, report, uds, vehicles};
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 
@@ -33,6 +33,13 @@ fn tool_list() -> Value {
             "inputSchema": {"type": "object", "properties": {}}
         },
         {
+            "name": "learning_sessions",
+            "description": "What Icarus saw while another diagnostic tool worked on one of my vehicles: the marks I made, the settings and output tests it learned, what it saw but could not learn, every message in words. Without a file: the list and the newest session; with one: that session. Read-only.",
+            "inputSchema": {"type": "object", "properties": {
+                "file": {"type": "string", "description": "optional: a session's file name from the list, e.g. learning-2026-11-08-1530.md"}
+            }}
+        },
+        {
             "name": "tires_gears",
             "description": "Speedometer error and gearing for a tire size change, and the regear that restores stock.",
             "inputSchema": {"type": "object", "properties": {
@@ -44,6 +51,59 @@ fn tool_list() -> Value {
             }, "required": ["stock", "new"]}
         }
     ])
+}
+
+/// The saved learning sessions, newest first: (file, which vehicle). Reads only (no folder is made).
+fn all_sessions() -> Vec<(std::path::PathBuf, String)> {
+    let mut v: Vec<(std::path::PathBuf, String)> = Vec::new();
+    for (_, name, dir) in garage::vehicles() {
+        let label = name.unwrap_or_else(|| "a vehicle".into());
+        v.extend(
+            learning::sessions(&dir.join("Logs"))
+                .into_iter()
+                .map(|p| (p, label.clone())),
+        );
+    }
+    if let Some(sim) = icarus_obd::audit::path().and_then(|p| p.parent().map(|d| d.join("sim"))) {
+        v.extend(
+            learning::sessions(&sim)
+                .into_iter()
+                .map(|p| (p, "the simulated vehicle".to_string())),
+        );
+    }
+    v.sort_by_key(|(p, _)| std::cmp::Reverse(std::fs::metadata(p).and_then(|m| m.modified()).ok()));
+    v
+}
+
+fn learning_sessions(file: Option<&str>) -> Result<String, String> {
+    let all = all_sessions();
+    let name = |p: &std::path::Path| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    if let Some(f) = file {
+        // only a session from the list: a name, never a path
+        let (p, _) = all
+            .iter()
+            .find(|(p, _)| name(p) == f)
+            .ok_or_else(|| format!("no learning session named {f:?}"))?;
+        return std::fs::read_to_string(p).map_err(|e| e.to_string());
+    }
+    let Some((newest, _)) = all.first() else {
+        return Ok(
+            "Icarus has no learning sessions yet (the Learning page, or icarus learn, makes one)."
+                .into(),
+        );
+    };
+    let mut t = String::from("Learning sessions, newest first:\n");
+    for (p, v) in all.iter().take(20) {
+        t += &format!("- {} ({v})\n", name(p));
+    }
+    t += "\nThe newest:\n\n";
+    t += &std::fs::read_to_string(newest).map_err(|e| e.to_string())?;
+    Ok(t)
 }
 
 fn connect() -> Result<Elm, String> {
@@ -260,6 +320,7 @@ fn call(name: &str, args: &Value) -> Result<String, String> {
         }
         "vehicle_check" => vehicle_check(),
         "vehicle_modules" => vehicle_modules(),
+        "learning_sessions" => learning_sessions(s("file").as_deref()),
         "tires_gears" => {
             let stock =
                 icarus_core::tires::Tire::parse(&s("stock").ok_or("give the stock tire size")?)?;
@@ -351,6 +412,7 @@ mod tests {
         "explain_code",
         "vehicle_check",
         "vehicle_modules",
+        "learning_sessions",
         "tires_gears",
     ];
 

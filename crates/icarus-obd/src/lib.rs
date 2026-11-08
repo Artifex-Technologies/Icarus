@@ -14,6 +14,7 @@ pub mod dtc;
 pub mod elm;
 pub mod garage;
 pub mod j1979;
+pub mod learning;
 pub mod link;
 pub mod lookup;
 pub mod mode06;

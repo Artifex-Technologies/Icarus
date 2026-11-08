@@ -1,6 +1,6 @@
 //! Icarus's window: the vehicle (adapter, identity, check-engine light, monitors, codes), its modules (identity and codes,
-//! as dealer tools show them), live values with graphs, and maps from an image and a definition (with what a tune
-//! changed). Read-only, like the rest of Icarus for now. Yggdrasil's look (yggdrasil-ui).
+//! as dealer tools show them), live values with graphs, actuator tests, module settings, learning from another tool, the
+//! bus, and maps from an image and a definition (with what a tune changed). Yggdrasil's look (yggdrasil-ui).
 
 mod worker;
 
@@ -24,17 +24,21 @@ enum Page {
     Modules,
     Live,
     Tests,
+    Settings,
+    Learn,
     Bus,
     Maps,
     Garage,
     Tools,
 }
 
-const PAGES: [(Page, &str); 8] = [
+const PAGES: [(Page, &str); 10] = [
     (Page::Vehicle, "Vehicle"),
     (Page::Modules, "Modules"),
     (Page::Live, "Live data"),
     (Page::Tests, "Tests"),
+    (Page::Settings, "Settings"),
+    (Page::Learn, "Learning"),
     (Page::Bus, "Bus"),
     (Page::Maps, "Maps"),
     (Page::Garage, "Garage"),
@@ -45,6 +49,8 @@ const PAGES: [(Page, &str); 8] = [
 enum Bg {
     Vin(Result<icarus_obd::nhtsa::VinDecode, String>),
     Recalls(Result<Vec<icarus_obd::nhtsa::Recall>, String>),
+    /// Sarina's answer about a learning session.
+    Sarina(Result<String, String>),
 }
 
 #[derive(PartialEq, Eq)]
@@ -87,7 +93,8 @@ enum MapEdit {
 }
 
 /// What to do at start (command line): `--connect` (the adapter from ICARUS_ADAPTER, or `--adapter A`), `--page NAME`,
-/// `--scan` and `--live` once connected, `--maps DEF.xdf IMAGE.bin [SECOND.bin]`.
+/// `--scan` and `--live` once connected, `--maps DEF.xdf IMAGE.bin [SECOND.bin]`, `--learn` (a learning watch once
+/// connected; `--mark TEXT` marks at its start and `--learn-seconds N` stops it, for demonstrations and screenshots).
 #[derive(Default)]
 struct Start {
     connect: bool,
@@ -96,6 +103,9 @@ struct Start {
     scan: bool,
     live: bool,
     bus: bool,
+    learn: bool,
+    mark: Option<String>,
+    learn_secs: Option<f64>,
     maps: Option<(String, String, String)>,
     /// `--map NAME`: the map to show first (with `--cell R,C`, that cell chosen for editing).
     map: Option<String>,
@@ -112,6 +122,19 @@ impl Start {
                 "--scan" => s.scan = true,
                 "--live" => s.live = true,
                 "--bus" => s.bus = true,
+                "--learn" => s.learn = true,
+                "--mark" => {
+                    i += 1;
+                    s.mark = Some(a.get(i).ok_or("--mark needs a text")?.clone());
+                }
+                "--learn-seconds" => {
+                    i += 1;
+                    s.learn_secs = Some(
+                        a.get(i)
+                            .and_then(|v| v.parse().ok())
+                            .ok_or("--learn-seconds needs a number")?,
+                    );
+                }
                 "--adapter" => {
                     i += 1;
                     s.adapter = Some(a.get(i).ok_or("--adapter needs a value")?.clone());
@@ -187,6 +210,24 @@ struct App {
     bus_can: bool,
     bus_ifname: String,
     bus: Option<worker::BusView>,
+    /// Settings: each one's value now (from the worker), the value picked per setting, a change waiting for the person's
+    /// yes (the setting and the value's name; None = undo), and whether the values were asked for since connecting.
+    setting_views: Vec<worker::SettingView>,
+    setting_pick: HashMap<String, String>,
+    confirm_setting: Option<(icarus_obd::settings::SettingDef, Option<String>)>,
+    settings_asked: bool,
+    /// Learning: the mark being typed, what the last watch learned (being named here; true once added to the file),
+    /// where its session was saved, earlier sessions, and Sarina's answer.
+    learn_mark: String,
+    learn_tests: Vec<(icarus_obd::actuator::TestDef, bool)>,
+    learn_settings: Vec<LearnSetting>,
+    learn_notes: Vec<String>,
+    learn_saved: Option<Result<String, String>>,
+    learn_sessions: Vec<std::path::PathBuf>,
+    sarina_busy: bool,
+    sarina_answer: Option<(String, Result<String, String>)>,
+    /// `--learn-seconds`: when the learning watch started at launch is stopped.
+    learn_stop_at: Option<std::time::Instant>,
     /// Vehicle folders: (VIN, name, folder), the one shown, a path to import.
     garage: Vec<(String, Option<String>, std::path::PathBuf)>,
     garage_sel: Option<usize>,
@@ -248,6 +289,19 @@ impl App {
             bus_can: false,
             bus_ifname: "can0".into(),
             bus: None,
+            setting_views: Vec::new(),
+            setting_pick: HashMap::new(),
+            confirm_setting: None,
+            settings_asked: false,
+            learn_mark: String::new(),
+            learn_tests: Vec::new(),
+            learn_settings: Vec::new(),
+            learn_notes: Vec::new(),
+            learn_saved: None,
+            learn_sessions: Vec::new(),
+            sarina_busy: false,
+            sarina_answer: None,
+            learn_stop_at: None,
             garage: icarus_obd::garage::vehicles(),
             garage_sel: None,
             import_path: String::new(),
@@ -345,6 +399,17 @@ impl App {
                     self.recalls = Some(r);
                 }
                 Bg::Vin(Err(e)) | Bg::Recalls(Err(e)) => self.error = Some(e),
+                Bg::Sarina(r) => {
+                    self.sarina_busy = false;
+                    self.status = if r.is_ok() {
+                        "Sarina answered.".into()
+                    } else {
+                        "Sarina did not answer.".into()
+                    };
+                    if let Some(a) = self.sarina_answer.as_mut() {
+                        a.1 = r;
+                    }
+                }
             }
         }
     }
@@ -391,6 +456,9 @@ impl App {
                     self.modules.clear();
                     self.history.clear();
                     self.selftests = None;
+                    self.setting_views.clear();
+                    self.settings_asked = false;
+                    self.refresh_sessions();
                     if std::mem::take(&mut self.start.scan) {
                         self.scanning = true;
                         let _ = self.tx.send(Cmd::Scan {
@@ -399,7 +467,16 @@ impl App {
                         });
                     }
                     if std::mem::take(&mut self.start.bus) {
-                        let _ = self.tx.send(Cmd::BusStart(None));
+                        let _ = self.tx.send(Cmd::BusStart(None, false));
+                    }
+                    if std::mem::take(&mut self.start.learn) {
+                        let _ = self.tx.send(Cmd::BusStart(None, true));
+                        if let Some(m) = self.start.mark.take() {
+                            let _ = self.tx.send(Cmd::BusMark(m));
+                        }
+                        self.learn_stop_at = self.start.learn_secs.map(|s| {
+                            std::time::Instant::now() + std::time::Duration::from_secs_f64(s)
+                        });
                     }
                     if std::mem::take(&mut self.start.live) && !self.chosen.is_empty() {
                         self.live_on = true;
@@ -447,9 +524,28 @@ impl App {
                 Event::Bus(v) => {
                     if let Some(e) = &v.ended {
                         self.status = format!("Bus: {e}.");
+                        // what was learned is named on the Learning page
+                        self.learn_tests = v.learned.iter().map(|t| (t.clone(), false)).collect();
+                        self.learn_settings = v.settings.iter().map(LearnSetting::new).collect();
+                        self.learn_notes = v.notes.clone();
+                        if v.learning {
+                            self.learn_saved = v.saved.clone();
+                            self.refresh_sessions();
+                        }
                     }
                     self.bus = Some(*v);
                 }
+                Event::Settings(v) => self.setting_views = v,
+                Event::SettingDone(r) => match r {
+                    Ok(m) => {
+                        self.status = m;
+                        self.error = None;
+                    }
+                    Err(m) => {
+                        self.status = "The setting was not changed.".into();
+                        self.error = Some(m);
+                    }
+                },
                 Event::Charging(c) => {
                     self.status = "Battery and charging measured.".into();
                     self.charging = Some(c);
@@ -1266,6 +1362,7 @@ impl App {
                 self.bus = None;
                 let _ = self.tx.send(Cmd::BusStart(
                     self.bus_can.then(|| self.bus_ifname.trim().to_string()),
+                    false,
                 ));
             }
         });
@@ -1283,7 +1380,6 @@ impl App {
             ))
             .weak(),
         );
-        let mut add: Option<icarus_obd::actuator::TestDef> = None;
         ui.columns(2, |cols| {
             egui::ScrollArea::vertical()
                 .id_salt("bus-ids")
@@ -1337,103 +1433,439 @@ impl App {
                     }
                 });
         });
-        if !b.learned.is_empty() {
-            ui.add_space(8.0);
-            let profile = self
-                .info
-                .as_ref()
-                .and_then(|i| i.profile.as_ref())
-                .map(|p| (p.id.clone(), p.name.clone()));
-            for t in &b.learned {
-                card(ui, pal, &t.name, |ui| {
-                    ui.label(RichText::new("Another tool ran this output test. Check what it drives before relying on it; it is added unchecked, with the most cautious conditions.").weak());
-                    ui.label(
-                        RichText::new(icarus_obd::bus::to_toml(t))
-                            .monospace()
-                            .small(),
-                    );
-                    let label = profile.as_ref().map_or(
-                        "Connect to a vehicle with a make profile to add it".to_string(),
-                        |p| format!("Add to the {} file", p.1),
-                    );
+        if !b.learned.is_empty() || !b.settings.is_empty() {
+            ui.add_space(6.0);
+            ui.label(format!(
+                "Learned while watching: {} test(s), {} setting(s). The Learning page names them and adds them to the vehicle's file.",
+                b.learned.len(),
+                b.settings.len()
+            ));
+        }
+        if running {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(250));
+        }
+    }
+
+    fn refresh_sessions(&mut self) {
+        let vin = self.info.as_ref().and_then(|i| i.vin.clone());
+        self.learn_sessions = icarus_obd::garage::logs_dir(vin.as_deref())
+            .map(|d| icarus_obd::learning::sessions(&d))
+            .unwrap_or_default();
+    }
+
+    fn ask_sarina(&mut self, ctx: &egui::Context, file: std::path::PathBuf) {
+        self.sarina_busy = true;
+        self.status = "Sarina is reading the session (she only reads)...".into();
+        let name = file
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+        self.sarina_answer = Some((name, Err("asking...".into())));
+        let (tx, c) = (self.bg_tx.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(Bg::Sarina(icarus_obd::learning::ask_sarina(&file)));
+            c.request_repaint();
+        });
+    }
+
+    fn page_settings(&mut self, ui: &mut egui::Ui, pal: &theme::Palette) {
+        let Some(info) = &self.info else {
+            ui.label("Connect on the Vehicle page first. (The simulated vehicle with its engine off is sim:off.)");
+            return;
+        };
+        let defs = info.settings.clone();
+        let wired = icarus_obd::port::Target::parse(self.adapter.trim()).is_ok_and(|t| t.wired());
+        if !defs.is_empty() && !self.settings_asked {
+            self.settings_asked = true;
+            let _ = self.tx.send(Cmd::SettingsRead);
+        }
+        card(ui, pal, "Module settings", |ui| {
+            ui.label("What dealer tools call customizations: a feature a module keeps switched on or off, or a value it keeps (a chime, a lock behaviour, a light).");
+            ui.label("A change writes the module's memory, so Icarus asks first, needs the conditions (by default engine off, parked) and a wired adapter, keeps the value there before in the vehicle's Logs folder, reads the new one back, and puts the old one back if the module did not take it. Never airbags, immobiliser, keys or odometer.");
+        });
+        if !wired {
+            ui.colored_label(pal.amber, "This adapter is wireless: settings can be read, but changing one needs a wired adapter (USB).");
+        }
+        if defs.is_empty() {
+            card(ui, pal, "No settings for this vehicle yet", |ui| {
+                ui.label("Each maker's settings are its own, and they differ by model and year, so Icarus learns them from your vehicle: the Learning page watches another tool change one and names it.");
+            });
+            return;
+        }
+        ui.horizontal(|ui| {
+            if ui.button("Read the values again").clicked() {
+                let _ = self.tx.send(Cmd::SettingsRead);
+            }
+        });
+        ui.add_space(4.0);
+        let mut ask: Option<(icarus_obd::settings::SettingDef, Option<String>)> = None;
+        for d in &defs {
+            let view = self.setting_views.iter().find(|v| v.name == d.name);
+            let now = view
+                .map(|v| v.now.clone())
+                .unwrap_or_else(|| "not read yet".into());
+            // the value offered first is one it does not have now (chosen once its value is known)
+            let mut unread = d.values.keys().next().cloned().unwrap_or_default();
+            let pick = if view.is_some() {
+                self.setting_pick.entry(d.name.clone()).or_insert_with(|| {
+                    d.values
+                        .keys()
+                        .find(|k| **k != now)
+                        .cloned()
+                        .unwrap_or_default()
+                })
+            } else {
+                &mut unread
+            };
+            card(ui, pal, &d.name, |ui| {
+                ui.label(
+                    RichText::new(format!(
+                        "module {:03X}, {}{}",
+                        d.module,
+                        d.protocol.label(),
+                        if d.checked {
+                            ""
+                        } else {
+                            ", not yet checked on a vehicle"
+                        }
+                    ))
+                    .small()
+                    .weak(),
+                );
+                if !d.note.is_empty() {
+                    ui.label(RichText::new(&d.note).small().weak());
+                }
+                ui.horizontal(|ui| {
+                    ui.label("Now:");
+                    ui.label(RichText::new(&now).strong());
+                    ui.add_space(12.0);
+                    egui::ComboBox::from_id_salt(("setting-pick", &d.name))
+                        .selected_text(pick.as_str())
+                        .show_ui(ui, |ui| {
+                            for k in d.values.keys() {
+                                ui.selectable_value(pick, k.clone(), k);
+                            }
+                        });
                     if ui
-                        .add_enabled(profile.is_some(), egui::Button::new(label))
+                        .add_enabled(
+                            wired && *pick != now && !pick.is_empty(),
+                            egui::Button::new("Change..."),
+                        )
                         .clicked()
                     {
-                        add = Some(t.clone());
+                        ask = Some((d.clone(), Some(pick.clone())));
+                    }
+                    if let Some(back) = view.and_then(|v| v.undo_to.as_ref()) {
+                        if ui
+                            .add_enabled(
+                                wired && *back != now,
+                                egui::Button::new(format!("Undo the last change (back to {back})")),
+                            )
+                            .clicked()
+                        {
+                            ask = Some((d.clone(), None));
+                        }
                     }
                 });
-            }
+            });
         }
-        let mut add_setting = None;
-        if !b.settings.is_empty() {
-            ui.add_space(8.0);
-            let profile = self
-                .info
-                .as_ref()
-                .and_then(|i| i.profile.as_ref())
-                .map(|p| p.name.clone());
-            for st in &b.settings {
-                card(ui, pal, &st.name, |ui| {
-                    ui.label(RichText::new("Another tool changed this module setting, and the module took it. \"was\" is the value it read just before. Find out what the setting is before relying on it; it is added unchecked, to be changed only parked with the engine off. Change it with icarus obd setting.").weak());
-                    ui.label(
-                        RichText::new(icarus_obd::settings::to_toml(st))
-                            .monospace()
-                            .small(),
-                    );
-                    let label = profile.as_ref().map_or(
-                        "Connect to a vehicle with a make profile to add it".to_string(),
-                        |p| format!("Add to the {p} file"),
-                    );
-                    if ui
-                        .add_enabled(profile.is_some(), egui::Button::new(label))
-                        .clicked()
-                    {
-                        add_setting = Some(st.clone());
-                    }
-                });
-            }
+        if ask.is_some() {
+            self.confirm_setting = ask;
         }
-        if let Some(st) = add_setting {
-            let id = self
-                .info
-                .as_ref()
-                .and_then(|i| i.profile.as_ref())
-                .map(|p| p.id.clone())
-                .unwrap_or_default();
-            match icarus_obd::vehicles::add_setting_to_user_file(
-                &id,
-                &icarus_obd::settings::to_toml(&st),
-            ) {
-                Ok(p) => {
-                    self.status = format!(
-                        "Added to {}: icarus obd settings lists it now.",
-                        p.display()
-                    )
+    }
+
+    fn page_learn(&mut self, ui: &mut egui::Ui, pal: &theme::Palette) {
+        let running = self.bus.as_ref().is_some_and(|b| b.running && b.learning);
+        let other_watch = self.bus.as_ref().is_some_and(|b| b.running && !b.learning);
+        card(ui, pal, "Learning from another tool", |ui| {
+            ui.label("Icarus learns a vehicle's settings and output tests by watching another tool use them on it: a dealer tool, a shop scan tool, a phone app that does customizations. It only listens; the other tool does the work.");
+            ui.label("1. A Y-splitter on the OBD port: the other tool on one side, Icarus's adapter on the other (or a CAN interface tapped into the bus). Ignition on, engine off.");
+            ui.label("2. Start learning. Before each change in the other tool, type what you are about to do (\"seat belt chime off\") and press Mark: what the module accepts next is named by it. One change per mark works best.");
+            ui.label("3. Stop. Name the values, add each to the vehicle's file; the Settings and Tests pages then offer them. The session is saved in the vehicle's Logs folder, and Sarina can read it and say what she makes of anything Icarus could not work out.");
+        });
+        ui.horizontal(|ui| {
+            ui.add_enabled_ui(!running && !other_watch, |ui| {
+                ui.radio_value(&mut self.bus_can, false, "the connected adapter");
+                ui.radio_value(&mut self.bus_can, true, "a Linux CAN interface");
+                if self.bus_can {
+                    ui.add(egui::TextEdit::singleline(&mut self.bus_ifname).desired_width(80.0));
                 }
-                Err(e) => self.error = Some(e),
-            }
-        }
-        if let Some(t) = add {
-            let id = self
-                .info
-                .as_ref()
-                .and_then(|i| i.profile.as_ref())
-                .map(|p| p.id.clone())
-                .unwrap_or_default();
-            match icarus_obd::vehicles::add_test_to_user_file(&id, &icarus_obd::bus::to_toml(&t)) {
-                Ok(p) => {
-                    self.status = format!("Added to {}: it is on the Tests page now.", p.display());
-                    if let Some(i) = self.info.as_mut() {
-                        i.tests.push(t);
-                    }
+            });
+            if running {
+                if ui.button("Stop and save").clicked() {
+                    let _ = self.tx.send(Cmd::BusStop);
                 }
-                Err(e) => self.error = Some(e),
+                ui.spinner();
+            } else if ui
+                .add_enabled(
+                    !other_watch,
+                    egui::Button::new(RichText::new("Start learning").color(pal.on_accent()))
+                        .fill(pal.accent),
+                )
+                .clicked()
+            {
+                self.live_on = false;
+                self.bus = None;
+                self.learn_saved = None;
+                self.sarina_answer = None;
+                let _ = self.tx.send(Cmd::BusStart(
+                    self.bus_can.then(|| self.bus_ifname.trim().to_string()),
+                    true,
+                ));
+            }
+        });
+        if other_watch {
+            ui.label(RichText::new("The Bus page is watching: stop it there first.").weak());
+        }
+        if running {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label("About to do:");
+                let r = ui.add(
+                    egui::TextEdit::singleline(&mut self.learn_mark)
+                        .hint_text("seat belt chime off")
+                        .desired_width(320.0),
+                );
+                let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if (ui.button("Mark").clicked() || enter) && !self.learn_mark.trim().is_empty() {
+                    let _ = self
+                        .tx
+                        .send(Cmd::BusMark(std::mem::take(&mut self.learn_mark)));
+                    r.request_focus();
+                }
+            });
+        }
+        if let Some(b) = &self.bus {
+            if b.learning {
+                ui.label(
+                    RichText::new(format!(
+                        "{} frames; learned so far: {} setting(s), {} test(s); {} thing(s) seen but not learned",
+                        b.frames,
+                        b.settings.len(),
+                        b.learned.len(),
+                        b.notes.len()
+                    ))
+                    .weak(),
+                );
+                egui::ScrollArea::vertical()
+                    .id_salt("learn-log")
+                    .max_height(220.0)
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        for l in b.log.iter().filter(|l| !l.contains(" 7DF ")) {
+                            let mark = l.contains("-- mark:");
+                            ui.label(RichText::new(l).monospace().small().color(if mark {
+                                pal.accent
+                            } else {
+                                pal.text
+                            }));
+                        }
+                    });
             }
         }
         if running {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(250));
+            return;
+        }
+        match &self.learn_saved {
+            Some(Ok(p)) => {
+                ui.add_space(6.0);
+                ui.label(format!("Session saved: {p}"));
+            }
+            Some(Err(e)) => {
+                ui.colored_label(pal.red, format!("The session could not be saved: {e}"));
+            }
+            None => {}
+        }
+        let profile = self
+            .info
+            .as_ref()
+            .and_then(|i| i.profile.as_ref())
+            .map(|p| (p.id.clone(), p.name.clone()));
+        let add_label = profile.as_ref().map_or(
+            "Connect to a vehicle with a make profile to add it".to_string(),
+            |p| format!("Add to the {} file", p.1),
+        );
+        let mut add_setting: Option<usize> = None;
+        let mut add_test: Option<usize> = None;
+        for (i, ls) in self.learn_settings.iter_mut().enumerate() {
+            card(
+                ui,
+                pal,
+                &format!("Setting {:X} on module {:03X}", ls.def.id, ls.def.module),
+                |ui| {
+                    ui.label(RichText::new("The other tool changed this and the module took it. \"was\" is what it read just before. Name the setting and its values; it is added unchecked, to be changed only parked with the engine off.").weak());
+                    ui.add_enabled_ui(!ls.added, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Name");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut ls.def.name).desired_width(360.0),
+                            );
+                        });
+                        for (old, new) in ls.names.iter_mut() {
+                            ui.horizontal(|ui| {
+                                let bytes = ls.def.values[old.as_str()]
+                                    .iter()
+                                    .map(|b| format!("{b:02X}"))
+                                    .collect::<Vec<_>>()
+                                    .join(" ");
+                                ui.label(RichText::new(format!("{bytes:>8}")).monospace());
+                                ui.add(egui::TextEdit::singleline(new).desired_width(160.0));
+                                if old != new {
+                                    ui.label(
+                                        RichText::new(format!("(was {old:?})")).small().weak(),
+                                    );
+                                }
+                            });
+                        }
+                        ui.checkbox(
+                            &mut ls.def.extended,
+                            "needs the extended session (seen: the tool opened it first)",
+                        );
+                    });
+                    if ls.added {
+                        ui.colored_label(
+                            pal.green,
+                            "In the vehicle's file: the Settings page offers it.",
+                        );
+                    } else if ui
+                        .add_enabled(profile.is_some(), egui::Button::new(add_label.as_str()))
+                        .clicked()
+                    {
+                        add_setting = Some(i);
+                    }
+                },
+            );
+        }
+        for (i, (t, added)) in self.learn_tests.iter_mut().enumerate() {
+            card(
+                ui,
+                pal,
+                &format!("Output test {:X} on module {:03X}", t.id, t.module),
+                |ui| {
+                    ui.label(RichText::new("The other tool ran this output test. Name it after what it drives; it is added unchecked, with the most cautious conditions.").weak());
+                    ui.add_enabled_ui(!*added, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Name");
+                            ui.add(egui::TextEdit::singleline(&mut t.name).desired_width(360.0));
+                        });
+                    });
+                    if *added {
+                        ui.colored_label(
+                            pal.green,
+                            "In the vehicle's file: the Tests page offers it.",
+                        );
+                    } else if ui
+                        .add_enabled(profile.is_some(), egui::Button::new(add_label.as_str()))
+                        .clicked()
+                    {
+                        add_test = Some(i);
+                    }
+                },
+            );
+        }
+        if !self.learn_notes.is_empty() {
+            card(ui, pal, "Seen but not learned", |ui| {
+                ui.label(RichText::new("What the other tool did that Icarus does not make into a setting or a test. Sarina can say what she makes of it.").weak());
+                for n in &self.learn_notes {
+                    ui.label(format!("• {n}"));
+                }
+            });
+        }
+        if let Some(i) = add_setting {
+            let id = profile.as_ref().map(|p| p.0.clone()).unwrap_or_default();
+            match self.learn_settings[i].named() {
+                Err(e) => self.error = Some(e),
+                Ok(d) => match icarus_obd::vehicles::add_setting_to_user_file(
+                    &id,
+                    &icarus_obd::settings::to_toml(&d),
+                ) {
+                    Ok(p) => {
+                        self.status = format!("Added to {}.", p.display());
+                        self.error = None;
+                        self.learn_settings[i].added = true;
+                        if let Some(info) = self.info.as_mut() {
+                            info.settings.push(d);
+                        }
+                        self.settings_asked = false;
+                    }
+                    Err(e) => self.error = Some(e),
+                },
+            }
+        }
+        if let Some(i) = add_test {
+            let id = profile.as_ref().map(|p| p.0.clone()).unwrap_or_default();
+            let mut t = self.learn_tests[i].0.clone();
+            t.name = t.name.trim().to_string();
+            match icarus_obd::vehicles::add_test_to_user_file(&id, &icarus_obd::bus::to_toml(&t)) {
+                Ok(p) => {
+                    self.status = format!("Added to {}: it is on the Tests page now.", p.display());
+                    self.error = None;
+                    self.learn_tests[i].1 = true;
+                    if let Some(info) = self.info.as_mut() {
+                        info.tests.push(t);
+                    }
+                }
+                Err(e) => self.error = Some(e),
+            }
+        }
+        // Sarina, for what Icarus could not work out
+        let sarina = icarus_obd::learning::sarina().is_some();
+        if !self.learn_sessions.is_empty() {
+            let mut ask: Option<std::path::PathBuf> = None;
+            card(ui, pal, "Sessions", |ui| {
+                if !sarina {
+                    ui.label(RichText::new("With Sarina installed (optional), she can read a session and say what each setting most likely is and what the tool did that Icarus could not learn.").weak());
+                }
+                for p in self.learn_sessions.iter().take(8) {
+                    let name = p
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_string();
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(&name).monospace());
+                        if ui.small_button("Open").clicked() {
+                            let _ = std::process::Command::new("xdg-open").arg(p).spawn();
+                        }
+                        if sarina
+                            && ui
+                                .add_enabled(
+                                    !self.sarina_busy,
+                                    egui::Button::new("Ask Sarina").small(),
+                                )
+                                .clicked()
+                        {
+                            ask = Some(p.clone());
+                        }
+                    });
+                }
+            });
+            if let Some(p) = ask {
+                self.ask_sarina(ui.ctx(), p);
+            }
+        }
+        if let Some((name, answer)) = &self.sarina_answer {
+            card(ui, pal, &format!("Sarina on {name}"), |ui| {
+                if self.sarina_busy {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Reading the session...");
+                    });
+                } else {
+                    match answer {
+                        Ok(t) => {
+                            ui.add(egui::Label::new(t.as_str()).selectable(true));
+                        }
+                        Err(e) => {
+                            ui.colored_label(pal.red, e);
+                        }
+                    }
+                }
+            });
         }
     }
 
@@ -2383,6 +2815,14 @@ impl eframe::App for App {
         theme::apply(&ctx, dark, accent);
         let pal = theme::palette_for(dark, accent);
         self.events();
+        if let Some(at) = self.learn_stop_at {
+            if std::time::Instant::now() >= at {
+                self.learn_stop_at = None;
+                let _ = self.tx.send(Cmd::BusStop);
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_millis(200));
+            }
+        }
         self.background();
 
         egui::Panel::left("pages")
@@ -2460,6 +2900,8 @@ impl eframe::App for App {
                                 Page::Vehicle => self.page_vehicle(ui, &pal),
                                 Page::Modules => self.page_modules(ui, &pal),
                                 Page::Tests => self.page_tests(ui, &pal),
+                                Page::Settings => self.page_settings(ui, &pal),
+                                Page::Learn => self.page_learn(ui, &pal),
                                 Page::Bus => self.page_bus(ui, &pal),
                                 Page::Garage => self.page_garage(ui, &pal),
                                 Page::Tools => self.page_tools(ui, &pal),
@@ -2508,7 +2950,119 @@ impl eframe::App for App {
                 self.confirm_clear = None;
             }
         }
+        if let Some((def, value)) = self.confirm_setting.clone() {
+            let mut go = false;
+            let mut cancel = false;
+            let now = self
+                .setting_views
+                .iter()
+                .find(|v| v.name == def.name)
+                .map(|v| v.now.clone())
+                .unwrap_or_else(|| "not read".into());
+            let to = match &value {
+                Some(v) => v.clone(),
+                None => self
+                    .setting_views
+                    .iter()
+                    .find(|v| v.name == def.name)
+                    .and_then(|v| v.undo_to.clone())
+                    .unwrap_or_default(),
+            };
+            let resp = egui::Modal::new(egui::Id::new("confirm-setting")).show(&ctx, |ui| {
+                ui.set_max_width(480.0);
+                ui.label(
+                    RichText::new(format!("{}: {now} -> {to}?", def.name))
+                        .size(17.0)
+                        .strong(),
+                );
+                ui.add_space(6.0);
+                ui.label(format!(
+                    "This writes module {:03X}'s memory. The value there now is read and kept in the vehicle's Logs folder first; the new one is read back afterwards, and if the module did not take it the old one is written back.",
+                    def.module
+                ));
+                let conds: Vec<&str> = def.conditions.iter().map(|c| c.describe()).collect();
+                if !conds.is_empty() {
+                    ui.label(format!("Needs: {}. Battery at 12 V or more (a charger on it helps).", conds.join(", ")));
+                }
+                if !def.checked {
+                    ui.colored_label(
+                        pal.amber,
+                        format!("Not yet checked on a vehicle. {}", def.note),
+                    );
+                }
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(RichText::new("Change it").color(pal.on_accent()))
+                                .fill(pal.accent),
+                        )
+                        .clicked()
+                    {
+                        go = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+            if go {
+                self.live_on = false;
+                let bytes = value.as_ref().and_then(|v| def.values.get(v).cloned());
+                if value.is_some() && bytes.is_none() {
+                    self.error = Some(format!("{} has no value named {to}", def.name));
+                } else {
+                    let _ = self.tx.send(Cmd::SettingChange { def, value: bytes });
+                    self.status = "Changing the setting...".into();
+                }
+                self.confirm_setting = None;
+            } else if cancel || resp.should_close() {
+                self.confirm_setting = None;
+            }
+        }
         chrome::outline(&ctx, &pal);
+    }
+}
+
+/// A learned setting being named on the Learning page: its values' names as learned and as typed, and whether it is in
+/// the vehicle's file now.
+struct LearnSetting {
+    def: icarus_obd::settings::SettingDef,
+    names: Vec<(String, String)>,
+    added: bool,
+}
+
+impl LearnSetting {
+    fn new(d: &icarus_obd::settings::SettingDef) -> LearnSetting {
+        LearnSetting {
+            def: d.clone(),
+            names: d.values.keys().map(|k| (k.clone(), k.clone())).collect(),
+            added: false,
+        }
+    }
+
+    /// The setting with the names as typed, checked: every value named, no two the same.
+    fn named(&self) -> Result<icarus_obd::settings::SettingDef, String> {
+        let mut d = self.def.clone();
+        d.name = d.name.trim().to_string();
+        if d.name.is_empty() {
+            return Err("give the setting a name".into());
+        }
+        let mut values = std::collections::BTreeMap::new();
+        for (old, new) in &self.names {
+            let n = new.trim();
+            if n.is_empty() {
+                return Err(format!("give the value now called {old:?} a name"));
+            }
+            if values
+                .insert(n.to_string(), self.def.values[old].clone())
+                .is_some()
+            {
+                return Err(format!("two values are named {n:?}"));
+            }
+        }
+        d.values = values;
+        Ok(d)
     }
 }
 
@@ -2516,7 +3070,7 @@ fn main() -> eframe::Result {
     let start = match Start::parse(&std::env::args().skip(1).collect::<Vec<_>>()) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("icarus-app: {e}\nusage: icarus-app [--connect] [--adapter A] [--page vehicle|modules|live|maps] [--scan] [--live] [--maps DEF.xdf IMAGE.bin [SECOND.bin]] [--map NAME [--cell R,C]]");
+            eprintln!("icarus-app: {e}\nusage: icarus-app [--connect] [--adapter A] [--page vehicle|modules|live|tests|settings|learning|bus|maps|garage|tools] [--scan] [--live] [--learn [--mark TEXT] [--learn-seconds N]] [--maps DEF.xdf IMAGE.bin [SECOND.bin]] [--map NAME [--cell R,C]]");
             std::process::exit(2);
         }
     };

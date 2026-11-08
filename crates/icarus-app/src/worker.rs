@@ -5,10 +5,11 @@ use icarus_obd::elm::{Elm, ObdError};
 use icarus_obd::garage::{self, Described};
 use icarus_obd::j1979::{self, DtcKind, FreezeFrame, Monitors};
 use icarus_obd::port::Target;
+use icarus_obd::settings::{self, SettingDef};
 use icarus_obd::uds::{self, Dialect, ModuleDtc};
 use icarus_obd::vehicles::{self, ModuleAddr, Profile};
 use icarus_obd::vin::{self, VinInfo};
-use icarus_obd::{actuator, clear, report};
+use icarus_obd::{actuator, clear, learning, report};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
@@ -34,9 +35,18 @@ pub enum Cmd {
     /// Measure battery and charging voltage for some seconds.
     Charging(u64, icarus_obd::charging::Battery),
     /// Watch the bus: through the connected adapter (None) or a Linux CAN interface (its name). Ends with BusStop or any
-    /// other command.
-    BusStart(Option<String>),
+    /// other command. A learning watch (true) is saved as a session in the vehicle's Logs folder when it ends.
+    BusStart(Option<String>, bool),
     BusStop,
+    /// While watching: the person is about to do this in the other tool (names what is learned next).
+    BusMark(String),
+    /// Read every setting's value now.
+    SettingsRead,
+    /// Change a setting to these bytes (one of its values), or put back the value before its last change (None).
+    SettingChange {
+        def: SettingDef,
+        value: Option<Vec<u8>>,
+    },
     /// Clear codes: every OBD-II module (None) or one module (request ID, answer ID, its dialect). A report is saved first.
     Clear(Option<(u16, u16, Dialect)>),
     TestHold,
@@ -62,6 +72,17 @@ pub struct Info {
     pub vehicle: Option<Described>,
     /// Actuator tests known for this vehicle.
     pub tests: Vec<actuator::TestDef>,
+    /// Module settings known for this vehicle.
+    pub settings: Vec<SettingDef>,
+}
+
+/// A setting as the Settings page shows it.
+pub struct SettingView {
+    pub name: String,
+    /// Its value now, in words (or why it could not be read).
+    pub now: String,
+    /// What undo would put back, when its last change is in the vehicle's log.
+    pub undo_to: Option<String>,
 }
 
 /// One ID in the bus table: (ID, count, Hz, last bytes, seconds since each byte changed).
@@ -75,6 +96,10 @@ pub struct BusView {
     pub log: Vec<String>,
     pub learned: Vec<actuator::TestDef>,
     pub settings: Vec<icarus_obd::settings::SettingDef>,
+    pub notes: Vec<String>,
+    /// Where a finished learning session was saved (or why it was not).
+    pub saved: Option<Result<String, String>>,
+    pub learning: bool,
     pub frames: u64,
     pub running: bool,
     pub ended: Option<String>,
@@ -101,6 +126,9 @@ fn view(a: &icarus_obd::bus::Analyzer, now: f64, running: bool, ended: Option<St
         log: a.log.iter().rev().take(200).rev().cloned().collect(),
         learned: a.learned.clone(),
         settings: a.settings.clone(),
+        notes: a.notes.clone(),
+        saved: None,
+        learning: false,
         frames: a.frames,
         running,
         ended,
@@ -130,6 +158,9 @@ pub enum Event {
     Bus(Box<BusView>),
     /// Codes cleared (what was said), and the Vehicle page's information read again.
     Cleared(String, Box<Info>),
+    Settings(Vec<SettingView>),
+    /// A setting change (or undo) ended: what was done, or why not.
+    SettingDone(Result<String, String>),
     TestStarted(String),
     /// A test ended: its name and why.
     TestStopped {
@@ -151,6 +182,9 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
         repaint();
     };
     let mut elm: Option<Elm> = None;
+    // the connection's adapter (changing a setting needs a wired one) and its vehicle's VIN (where its logs go)
+    let mut spec = String::new();
+    let mut vin: Option<String> = None;
     let mut live: Vec<u8> = Vec::new();
     let mut test: Option<actuator::Running> = None;
     let mut last_hold = Instant::now();
@@ -208,13 +242,16 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
                     }),
                 }
             }
-            Some(Cmd::Connect(spec)) => {
+            Some(Cmd::Connect(s)) => {
+                spec = s.clone();
+                let spec = s;
                 elm = None;
                 live.clear();
                 send(Event::Status(format!("Connecting to {spec}...")));
                 match connect(&spec, &profiles) {
                     Ok((e, info)) => {
                         elm = Some(e);
+                        vin = info.vin.clone();
                         send(Event::Connected(Box::new(info)));
                     }
                     Err(m) => send(Event::Failed(m)),
@@ -222,6 +259,7 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
             }
             Some(Cmd::Disconnect) => {
                 elm = None;
+                vin = None;
                 live.clear();
                 send(Event::Disconnected);
             }
@@ -297,7 +335,47 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
                     Err(x) => send(Event::Failed(x.to_string())),
                 }
             }
-            Some(Cmd::BusStart(source)) => {
+            Some(Cmd::SettingsRead) => {
+                let Some(e) = elm.as_mut() else { continue };
+                live.clear();
+                send(Event::Status("Reading the settings...".into()));
+                let defs = vehicles::settings_for(
+                    vin.as_deref().and_then(|v| vehicles::for_vin(&profiles, v)),
+                    vin.as_deref(),
+                );
+                send(Event::Settings(read_settings(e, &defs, vin.as_deref())));
+                send(Event::Status(format!("{} setting(s) read.", defs.len())));
+            }
+            Some(Cmd::SettingChange { def, value }) => {
+                let Some(e) = elm.as_mut() else { continue };
+                live.clear();
+                let wired = Target::parse(&spec).map(|t| t.wired()).unwrap_or(false);
+                let result = if !wired {
+                    Err("changing a setting writes the module's memory: connect through a wired adapter (USB), not Bluetooth or Wi-Fi".to_string())
+                } else {
+                    settings::log_for(vin.as_deref()).and_then(|log| match &value {
+                        Some(v) => settings::change(e, &def, v, &log),
+                        None => settings::undo(e, &def, &log),
+                    })
+                };
+                let said = result.map(|c| match c {
+                    None => format!("{}: already so, nothing written.", def.name),
+                    Some(c) => format!(
+                        "{}: {} -> {} (read back from the module). The value before is kept in the vehicle's Logs folder.",
+                        def.name,
+                        def.show(&c.before),
+                        def.show(&c.after)
+                    ),
+                });
+                send(Event::SettingDone(said));
+                let defs = vehicles::settings_for(
+                    vin.as_deref().and_then(|v| vehicles::for_vin(&profiles, v)),
+                    vin.as_deref(),
+                );
+                send(Event::Settings(read_settings(e, &defs, vin.as_deref())));
+            }
+            Some(Cmd::BusMark(_)) => {}
+            Some(Cmd::BusStart(source, learning)) => {
                 live.clear();
                 let mut a = icarus_obd::bus::Analyzer::default();
                 let t0 = Instant::now();
@@ -305,10 +383,11 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
                 let mut pending: Option<Cmd> = None;
                 // keep watching? (a stop or any other command ends it; another command is handled afterwards)
                 let mut go_on =
-                    |a: &icarus_obd::bus::Analyzer, pending: &mut Option<Cmd>| -> bool {
+                    |a: &mut icarus_obd::bus::Analyzer, pending: &mut Option<Cmd>| -> bool {
                         match rx.try_recv() {
                             Ok(Cmd::BusStop) => return false,
                             Ok(Cmd::TestHold) => {}
+                            Ok(Cmd::BusMark(label)) => a.mark(&label, t0.elapsed().as_secs_f64()),
                             Ok(other) => {
                                 *pending = Some(other);
                                 return false;
@@ -317,12 +396,9 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
                         }
                         if last_view.elapsed() >= Duration::from_millis(250) {
                             last_view = Instant::now();
-                            send(Event::Bus(Box::new(view(
-                                a,
-                                t0.elapsed().as_secs_f64(),
-                                true,
-                                None,
-                            ))));
+                            let mut v = view(a, t0.elapsed().as_secs_f64(), true, None);
+                            v.learning = learning;
+                            send(Event::Bus(Box::new(v)));
                         }
                         true
                     };
@@ -335,7 +411,7 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
                                 Ok(None) => {}
                                 Err(x) => break Err(x.to_string()),
                             }
-                            if !go_on(&a, &mut pending) {
+                            if !go_on(&mut a, &mut pending) {
                                 break Ok("stopped".to_string());
                             }
                         },
@@ -352,7 +428,7 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
                                 ) {
                                     a.add(&f);
                                 }
-                                go_on(&a, &mut pending)
+                                go_on(&mut a, &mut pending)
                             })
                             .map_err(|x| x.to_string())
                         }
@@ -362,12 +438,34 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
                     Ok(how) => how,
                     Err(m) => format!("could not watch: {m}"),
                 };
-                send(Event::Bus(Box::new(view(
-                    &a,
-                    t0.elapsed().as_secs_f64(),
-                    false,
-                    Some(ended),
-                ))));
+                let mut last = view(&a, t0.elapsed().as_secs_f64(), false, Some(ended));
+                last.learning = learning;
+                if learning {
+                    let vehicle = match vin.as_deref() {
+                        Some(v) if v == icarus_obd::sim::VIN => "the simulated vehicle".to_string(),
+                        Some(v) => garage::get(v)
+                            .map(|d| d.name())
+                            .or_else(|| vehicles::for_vin(&profiles, v).map(|p| p.name.clone()))
+                            .unwrap_or_else(|| "a vehicle".into()),
+                        None => "a vehicle that gave no VIN".into(),
+                    };
+                    let what = match &source {
+                        Some(ifn) => format!("the CAN interface {ifn}"),
+                        None => format!("the adapter {spec}"),
+                    };
+                    let modules = vin
+                        .as_deref()
+                        .and_then(|v| vehicles::for_vin(&profiles, v))
+                        .map(vehicles::candidates)
+                        .unwrap_or_default();
+                    let text = learning::session_text(&a, &what, &vehicle, &modules);
+                    last.saved = Some(
+                        garage::logs_dir(vin.as_deref())
+                            .and_then(|d| learning::save(&d, &text))
+                            .map(|p| p.display().to_string()),
+                    );
+                }
+                send(Event::Bus(Box::new(last)));
                 if let Some(c) = pending {
                     // the command that ended the watch is handled next
                     queued = Some(c);
@@ -505,6 +603,7 @@ fn gather(elm: &mut Elm, profiles: &[Profile]) -> Result<Info, String> {
     let freeze = j1979::freeze_frame(elm).map_err(e)?;
     let vehicle = vin.as_deref().and_then(garage::get);
     let tests = vehicles::tests_for(profile.as_ref(), vin.as_deref());
+    let settings = vehicles::settings_for(profile.as_ref(), vin.as_deref());
     let info = Info {
         adapter: format!(
             "{}{}",
@@ -525,9 +624,28 @@ fn gather(elm: &mut Elm, profiles: &[Profile]) -> Result<Info, String> {
         codes,
         freeze,
         tests,
+        settings,
         vehicle,
     };
     Ok(info)
+}
+
+/// Every setting's value now, and what undo would put back. Reads only.
+fn read_settings(elm: &mut Elm, defs: &[SettingDef], vin: Option<&str>) -> Vec<SettingView> {
+    let log = settings::log_for(vin).ok();
+    defs.iter()
+        .map(|d| SettingView {
+            name: d.name.clone(),
+            now: match settings::read(elm, d) {
+                Ok((v, _)) => d.show(&v),
+                Err(x) => format!("could not be read ({x})"),
+            },
+            undo_to: log
+                .as_deref()
+                .and_then(|l| settings::last_change(l, d))
+                .map(|c| d.show(&c.before)),
+        })
+        .collect()
 }
 
 fn scan(

@@ -143,8 +143,8 @@ impl SimCar {
     }
 
     /// What the bus carries in one tick (5 ms): wheel speeds and an engine message every tick, a status message every 10, a
-    /// door switch every 20 (it flips every 400), and every 400 ticks another tool running a throttle test and an ABS pump
-    /// test and changing a cluster setting and an ABS setting, for the analyser to learn.
+    /// door switch every 20 (it flips every 400), and every 400 ticks another tool changing a cluster setting and an ABS
+    /// setting, then running a throttle test and an ABS pump test, for the analyser to learn.
     fn bus_tick(&self, t: u64) -> Vec<String> {
         let mut out = Vec::new();
         let rpm = (790.0 + 40.0 * (t as f64 * 0.05).sin()) as u16;
@@ -169,6 +169,18 @@ impl SimCar {
         }
         let step = t % 400;
         let script: &[&str] = &[
+            "7C0 02 10 03",
+            "7C8 02 50 03",
+            "7C0 03 22 A0 01",
+            "7C8 04 62 A0 01 01",
+            "7C0 04 2E A0 01 00",
+            "7C8 03 6E A0 01",
+            "7C0 02 10 01",
+            "7C8 02 50 01",
+            "7B0 02 21 20",
+            "7B8 03 61 20 00",
+            "7B0 03 3B 20 01",
+            "7B8 02 7B 20",
             "7E0 02 10 03",
             "7E8 02 50 03",
             "7E0 05 2F F0 02 03 4C",
@@ -183,18 +195,6 @@ impl SimCar {
             "7B8 03 70 10 07",
             "7B0 03 30 10 00",
             "7B8 03 70 10 00",
-            "7C0 02 10 03",
-            "7C8 02 50 03",
-            "7C0 03 22 A0 01",
-            "7C8 04 62 A0 01 01",
-            "7C0 04 2E A0 01 00",
-            "7C8 03 6E A0 01",
-            "7C0 02 10 01",
-            "7C8 02 50 01",
-            "7B0 02 21 20",
-            "7B8 03 61 20 00",
-            "7B0 03 3B 20 01",
-            "7B8 02 7B 20",
         ];
         if (100..100 + script.len() as u64 * 10).contains(&step) && (step - 100).is_multiple_of(10)
         {

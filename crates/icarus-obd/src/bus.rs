@@ -213,12 +213,46 @@ pub struct Analyzer {
     pending_writes: HashMap<(u16, u16, bool), Vec<u8>>,
     /// Modules another tool has in the extended diagnostic session.
     extended: HashSet<u16>,
+    /// What the person said they were about to do in the other tool (`mark`), with the time: newest last.
+    pub marks: Vec<(f64, String)>,
+    /// The mark that names what is learned next, until it has named one.
+    naming: Option<String>,
+    /// What was seen but not learned, in words (security access, routines, refused writes...): for the person, or for
+    /// Sarina, to work out.
+    pub notes: Vec<String>,
     pub frames: u64,
     /// Diagnostic messages described so far (the log keeps only the last 500).
     pub logged: u64,
 }
 
 impl Analyzer {
+    /// The person is about to do `label` in the other tool: it goes into the log, and names the next test or setting
+    /// learned (one change per mark; what follows it gets the usual "Learned: ..." name). An empty label names nothing.
+    pub fn mark(&mut self, label: &str, at: f64) {
+        let label = label.trim();
+        self.log.push_back(format!("{at:8.3}  -- mark: {label}"));
+        self.logged += 1;
+        self.marks.push((at, label.to_string()));
+        self.naming = (!label.is_empty()).then(|| label.to_string());
+    }
+
+    /// The name the next learned item gets: the mark's, else `default`. `take` uses the mark up.
+    fn name_for(&mut self, default: String, take: bool) -> String {
+        if take {
+            return self.naming.take().unwrap_or(default);
+        }
+        self.naming.clone().unwrap_or(default)
+    }
+
+    fn note(&mut self, what: String) {
+        if !self.notes.contains(&what) && self.notes.len() < 200 {
+            self.log
+                .push_back(format!("{:>8}  -- not learned: {what}", ""));
+            self.logged += 1;
+            self.notes.push(what);
+        }
+    }
+
     pub fn add(&mut self, f: &Frame) {
         self.frames += 1;
         let s = self.ids.entry(f.id).or_insert_with(|| IdStats {
@@ -315,10 +349,46 @@ impl Analyzer {
                 self.pending_writes
                     .insert((id, *lid as u16, true), v.to_vec());
             }
+            [0x2E, hi, lo, v @ ..] => self.note(format!(
+                "{id:03X}: a write of {} bytes to {hi:02X}{lo:02X}, too long for a setting (coding, or a block of several settings)",
+                v.len()
+            )),
+            [0x3B, lid, v @ ..] => self.note(format!(
+                "{id:03X}: a write of {} bytes to local identifier {lid:02X}, too long for a setting (coding, or a block of several settings)",
+                v.len()
+            )),
             [0x6E, hi, lo, ..] => {
                 self.setting_written(rx_tx, u16::from_be_bytes([*hi, *lo]), Protocol::Uds)
             }
             [0x7B, lid, ..] => self.setting_written(rx_tx, *lid as u16, Protocol::Kwp),
+            // 78 is "response pending", not a refusal: the answer is still to come
+            [0x7F, sid @ (0x2E | 0x3B | 0x2F | 0x30), code] if *code != 0x78 => {
+                let kwp = *sid == 0x3B;
+                self.pending_writes.retain(|k, _| !(k.0 == rx_tx && k.2 == kwp));
+                self.note(format!(
+                    "{rx_tx:03X} refused the tool's {}: {}",
+                    service(*sid),
+                    crate::uds::nrc(*code)
+                ));
+            }
+            [0x27, level, ..] if level % 2 == 1 => self.note(format!(
+                "{id:03X}: security access (level {level:02X}): the tool unlocked the module first. Icarus never does this, so \
+                 what the tool did next may need it"
+            )),
+            [0x31, kind, hi, lo, ..] => self.note(format!(
+                "{id:03X}: routine {hi:02X}{lo:02X} ({}): a service function or coding step; Icarus does not learn routines",
+                match kind {
+                    0x01 => "start",
+                    0x02 => "stop",
+                    0x03 => "result",
+                    _ => "?",
+                }
+            )),
+            [0x3D, ..] => self.note(format!("{id:03X}: a write to memory by address: never learned")),
+            [0x34 | 0x36, ..] => self.note(format!("{id:03X}: programming (a download to the module): flashing, never learned")),
+            [0x2F, hi, lo, p, ..] if *p != 0x00 && *p != 0x03 => self.note(format!(
+                "{id:03X}: output control {hi:02X}{lo:02X} with control type {p:02X} (only short-term adjustment, 03, is learned)"
+            )),
             _ => {}
         }
     }
@@ -357,8 +427,12 @@ impl Analyzer {
             values.insert("was".to_string(), b);
         }
         values.insert("set".to_string(), value);
+        let default = format!(
+            "Learned: setting {did:0w$X} on {tx:03X}",
+            w = if protocol == Protocol::Uds { 4 } else { 2 }
+        );
         let s = SettingDef {
-            name: format!("Learned: setting {did:0w$X} on {tx:03X}", w = if protocol == Protocol::Uds { 4 } else { 2 }),
+            name: self.name_for(default, false),
             module: tx,
             rx: None,
             protocol,
@@ -369,8 +443,12 @@ impl Analyzer {
             note: format!("Learned by watching another tool ({}): find out what it changes before relying on it.", crate::report::now()),
             checked: false,
         };
-        if s.refused().is_none() {
-            self.settings.push(s);
+        match s.refused() {
+            None => {
+                self.name_for(String::new(), true);
+                self.settings.push(s);
+            }
+            Some(why) => self.note(format!("{tx:03X} {did:X}: {why}")),
         }
     }
 
@@ -402,8 +480,12 @@ impl Analyzer {
             }
             return;
         }
+        let default = format!(
+            "Learned: output {out:0w$X} on {tx:03X}",
+            w = if protocol == Protocol::Uds { 4 } else { 2 }
+        );
         let t = TestDef {
-            name: format!("Learned: output {out:0w$X} on {tx:03X}", w = if protocol == Protocol::Uds { 4 } else { 2 }),
+            name: self.name_for(default, false),
             module: tx,
             rx: None,
             protocol,
@@ -417,8 +499,12 @@ impl Analyzer {
             watch: None,
             checked: false,
         };
-        if t.refused().is_none() {
-            self.learned.push(t);
+        match t.refused() {
+            None => {
+                self.name_for(String::new(), true);
+                self.learned.push(t);
+            }
+            Some(why) => self.note(format!("{tx:03X} output {out:X}: {why}")),
         }
     }
 }
@@ -572,6 +658,65 @@ mod tests {
         let entry = crate::settings::to_toml(s);
         let p = crate::vehicles::parse("x", "test", &format!("name = \"x\"\n{entry}")).unwrap();
         assert_eq!(&p.settings[0], s, "{entry}");
+    }
+
+    #[test]
+    fn marks_name_what_is_learned_and_the_rest_is_noted() {
+        let mut a = Analyzer::default();
+        a.mark("Seat belt chime off", 1.0);
+        let convo: &[(u32, &[u8])] = &[
+            (0x7C0, &[0x04, 0x2E, 0xA0, 0x01, 0x00]),
+            (0x7C8, &[0x03, 0x7F, 0x2E, 0x78]), // pending, then yes
+            (0x7C8, &[0x03, 0x6E, 0xA0, 0x01]),
+            (0x7C0, &[0x04, 0x2E, 0xA0, 0x02, 0x01]),
+            (0x7C8, &[0x03, 0x6E, 0xA0, 0x02]),
+            (0x7E0, &[0x02, 0x27, 0x01]),
+            (0x7E0, &[0x04, 0x31, 0x01, 0xFF, 0x00]),
+            (0x7B0, &[0x03, 0x3B, 0x30, 0x01]),
+            (0x7B8, &[0x03, 0x7F, 0x3B, 0x22]),
+        ];
+        for (i, (id, d)) in convo.iter().enumerate() {
+            a.add(&f(*id, d, 2.0 + i as f64));
+        }
+        a.mark("", 20.0);
+        a.add(&f(0x7C0, &[0x04, 0x2E, 0xA0, 0x03, 0x01], 21.0));
+        a.add(&f(0x7C8, &[0x03, 0x6E, 0xA0, 0x03], 21.1));
+        let names: Vec<&str> = a.settings.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "Seat belt chime off",
+                "Learned: setting A002 on 7C0",
+                "Learned: setting A003 on 7C0"
+            ]
+        );
+        assert!(a.log[0].contains("mark: Seat belt chime off"));
+        assert_eq!(a.notes.len(), 3, "{:?}", a.notes);
+        assert!(
+            a.notes[0].contains("security access") && a.notes[1].contains("routine FF00 (start)")
+        );
+        assert!(
+            a.notes[2].contains("7B0 refused the tool's write data (KWP2000)"),
+            "{:?}",
+            a.notes
+        );
+        assert_eq!(
+            a.marks,
+            vec![
+                (1.0, "Seat belt chime off".to_string()),
+                (20.0, String::new())
+            ]
+        );
+        // a mark that names a refused kind of setting does not get it learned
+        let mut b = Analyzer::default();
+        b.mark("immobiliser: add a key", 0.0);
+        b.add(&f(0x750, &[0x04, 0x2E, 0x10, 0x01, 0x01], 1.0));
+        b.add(&f(0x758, &[0x03, 0x6E, 0x10, 0x01], 1.1));
+        assert!(
+            b.settings.is_empty() && b.notes[0].contains("immobiliser"),
+            "{:?}",
+            b.notes
+        );
     }
 
     #[test]

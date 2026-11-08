@@ -8,8 +8,8 @@ use icarus_obd::elm::Elm;
 use icarus_obd::j1979::{self, DtcKind};
 use icarus_obd::port::Target;
 use icarus_obd::{
-    actuator, audit, bus, charging, clear, dtc, garage, lookup, mode06, nhtsa, report, settings,
-    sim, socketcan, uds, vehicles, vin,
+    actuator, bus, charging, clear, dtc, garage, lookup, mode06, nhtsa, report, settings, sim,
+    socketcan, uds, vehicles, vin,
 };
 mod mcp;
 
@@ -46,6 +46,12 @@ Bus (watching only: nothing is sent onto the bus):
   icarus bus watch (--adapter A | --can can0) [--seconds N] [--raw]
                                              every ID with its rate and changing bytes, diagnostic messages in words, and
                                              actuator tests another tool runs, as entries for the vehicle's file
+  icarus learn (--adapter A | --can can0) [--seconds N] [--ask-sarina]
+                                             learn from another tool working on the vehicle (a Y-cable on the OBD port):
+                                             type what you are about to do in it and press Enter (a mark), then do it;
+                                             \"stop\" or Ctrl+C ends. The settings and tests it changed come out named by
+                                             your marks, saved with everything seen in the vehicle's Logs folder;
+                                             --ask-sarina has Sarina read the session and say what she makes of it
 
 Interfaces:
   icarus devices                             the tuners and interfaces plugged in (SCT, COBB, HP Tuners, CP210x/FTDI
@@ -112,6 +118,7 @@ fn main() -> ExitCode {
         Some("dtc") => cmd_dtc(&args[1..]),
         Some("garage") => cmd_garage(&args[1..]),
         Some("bus") => cmd_bus(&args[1..]),
+        Some("learn") => cmd_learn(&args[1..]),
         Some("tires") => cmd_tires(&args[1..]),
         Some("recalls") => cmd_recalls(&args[1..]),
         Some("mcp") => mcp::serve(),
@@ -1120,20 +1127,6 @@ fn vehicle_settings(elm: &mut Elm) -> Result<(Option<String>, Vec<settings::Sett
 }
 
 /// Where a vehicle's setting changes are kept: its own folder's Logs (the simulation's in Icarus's state folder).
-fn settings_log(vin: Option<&str>) -> Result<std::path::PathBuf, String> {
-    match vin {
-        Some(v) if v != sim::VIN => garage::ensure(v)
-            .map(|d| settings::log_path(&d))
-            .map_err(|x| format!("the vehicle's folder could not be made: {x}")),
-        _ => {
-            let state = audit::path()
-                .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
-                .ok_or("no state folder")?;
-            Ok(state.join("sim-settings-changes.tsv"))
-        }
-    }
-}
-
 fn obd_settings(elm: &mut Elm) -> Result<(), String> {
     let (_, list) = vehicle_settings(elm)?;
     if list.is_empty() {
@@ -1217,7 +1210,7 @@ fn obd_setting(args: &Args, undo: bool) -> Result<(), String> {
             ))
         }
     };
-    let log = settings_log(vin.as_deref())?;
+    let log = settings::log_for(vin.as_deref())?;
     let target = match value {
         Some(v) => s.values.get(v.as_str()).cloned().ok_or_else(|| {
             format!(
@@ -1518,6 +1511,151 @@ fn cmd_bus(a: &[String]) -> Result<(), String> {
         println!("\nTests seen run by another tool (add them to the vehicle's file, ~/.config/icarus/vehicles/MAKE.toml, after checking what each drives):\n");
         for t in &an.learned {
             println!("{}", bus::to_toml(t));
+        }
+    }
+    Ok(())
+}
+
+fn cmd_learn(a: &[String]) -> Result<(), String> {
+    let args = parse_args(
+        &a.iter()
+            .filter(|x| *x != "--ask-sarina")
+            .cloned()
+            .collect::<Vec<_>>(),
+        &["adapter", "can", "seconds"],
+    )?;
+    let ask = a.iter().any(|x| x == "--ask-sarina");
+    if ask && icarus_obd::learning::sarina().is_none() {
+        return Err(
+            "--ask-sarina: Sarina is not installed (labyrinth-ask-sarina is not on PATH)".into(),
+        );
+    }
+    let secs: Option<f64> = args
+        .opt("seconds")
+        .map(|v| v.parse().map_err(|_| "--seconds needs a number"))
+        .transpose()?;
+    // each line typed while watching is a mark; "stop" ends the session (as do Ctrl+C and --seconds)
+    let (ltx, lrx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        for line in std::io::stdin().lock().lines().map_while(Result::ok) {
+            if ltx.send(line).is_err() {
+                return;
+            }
+        }
+    });
+    actuator::catch_interrupt();
+    let mut an = bus::Analyzer::default();
+    let start = std::time::Instant::now();
+    let mut printed = 0u64;
+    let mut step = |an: &mut bus::Analyzer, f: Option<bus::Frame>| {
+        if let Some(f) = f {
+            an.add(&f);
+        }
+        let mut go =
+            !actuator::interrupted() && secs.is_none_or(|s| start.elapsed().as_secs_f64() < s);
+        while let Ok(l) = lrx.try_recv() {
+            if l.trim().eq_ignore_ascii_case("stop") {
+                go = false;
+            } else {
+                an.mark(&l, start.elapsed().as_secs_f64());
+            }
+        }
+        let new = (an.logged - printed).min(an.log.len() as u64) as usize;
+        for l in an.log.iter().skip(an.log.len() - new) {
+            println!("{l}");
+        }
+        printed = an.logged;
+        go
+    };
+    let all = profiles();
+    let (vin, source, vehicle) = if let Some(ifn) = args.opt("can") {
+        (
+            None,
+            format!("the CAN interface {ifn}"),
+            "a vehicle Icarus did not ask (CAN interface)".to_string(),
+        )
+    } else {
+        let mut elm = connect(&args)?;
+        let vin = j1979::vin(&mut elm).map_err(e)?;
+        let vehicle = match vin.as_deref() {
+            Some(v) if v == sim::VIN => "the simulated vehicle".to_string(),
+            Some(v) => garage::get(v)
+                .map(|d| d.name())
+                .or_else(|| vehicles::for_vin(&all, v).map(|p| p.name.clone()))
+                .unwrap_or_else(|| "a vehicle".into()),
+            None => "a vehicle that gave no VIN".into(),
+        };
+        eprintln!("Learning on {vehicle}. Icarus only listens: nothing is sent onto the bus.");
+        eprintln!("Before each change in the other tool, type what you are about to do and press Enter (\"seat belt chime off\"); \"stop\" or Ctrl+C ends.");
+        let proto = elm.protocol;
+        let ended = elm
+            .monitor(|line| {
+                let f = bus::parse_line(line, proto, start.elapsed().as_secs_f64());
+                step(&mut an, f)
+            })
+            .map_err(e)?;
+        eprintln!("({ended})");
+        (
+            vin,
+            format!(
+                "the adapter {}",
+                args.opt("adapter")
+                    .map(str::to_string)
+                    .or_else(|| std::env::var("ICARUS_ADAPTER").ok())
+                    .unwrap_or_default()
+            ),
+            vehicle,
+        )
+    };
+    if let Some(ifn) = args.opt("can") {
+        eprintln!("Learning on the CAN interface {ifn}. Icarus only listens. Type what you are about to do and press Enter before each change; \"stop\" or Ctrl+C ends.");
+        let sock = socketcan::open(ifn).map_err(|x| x.to_string())?;
+        loop {
+            let f = sock
+                .read(
+                    std::time::Duration::from_millis(100),
+                    start.elapsed().as_secs_f64(),
+                )
+                .map_err(|x| x.to_string())?;
+            if !step(&mut an, f) {
+                break;
+            }
+        }
+    }
+    let modules = vin
+        .as_deref()
+        .and_then(|v| vehicles::for_vin(&all, v))
+        .map(vehicles::candidates)
+        .unwrap_or_default();
+    let text = icarus_obd::learning::session_text(&an, &source, &vehicle, &modules);
+    let dir = garage::logs_dir(vin.as_deref())?;
+    let saved = icarus_obd::learning::save(&dir, &text)?;
+    println!(
+        "\n{} frames. Learned: {} setting(s), {} test(s); {} thing(s) seen but not learned. Saved: {}",
+        an.frames,
+        an.settings.len(),
+        an.learned.len(),
+        an.notes.len(),
+        saved.display()
+    );
+    for s in &an.settings {
+        println!("\n{}", settings::to_toml(s));
+    }
+    for t in &an.learned {
+        println!("\n{}", bus::to_toml(t));
+    }
+    for n in &an.notes {
+        println!("not learned: {n}");
+    }
+    if !an.settings.is_empty() || !an.learned.is_empty() {
+        println!("\nRename them (and the values \"was\" and \"set\") as you like, then add them to ~/.config/icarus/vehicles/MAKE.toml, or use the Learning page, which does both.");
+    }
+    if ask {
+        eprintln!("\nAsking Sarina about the session (she only reads)...");
+        match icarus_obd::learning::ask_sarina(&saved) {
+            Ok(answer) => println!("\nSarina:\n{answer}"),
+            Err(x) => eprintln!("{x}"),
         }
     }
     Ok(())
