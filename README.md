@@ -90,7 +90,8 @@ the stock feel back.
 or the Bus page: every ID with its rate and last bytes, the bytes that just changed lit up (press a pedal or a switch and
 watch which byte follows), diagnostic messages between a tool and the modules put in words, and actuator tests another tool
 runs learned as `[[test]]` entries (unchecked, the most cautious conditions) that one button adds to the vehicle's file.
-Watching only: nothing is sent onto the bus.
+A setting another tool changes (a write the module accepted) is learned the same way, as a `[[setting]]` entry with the
+value it read just before as "was". Watching only: nothing is sent onto the bus.
 
 ## Actuator tests (bidirectional controls)
 
@@ -113,6 +114,32 @@ The tests are data: `[[test]]` entries in a vehicle profile (module, protocol, o
 time limit, warning, a live value to watch). Their IDs are each maker's own, so a profile carries only IDs from a source,
 marked `checked = false` until seen working; none are in the built-in profiles yet. `sim:off` (the simulated vehicle,
 ignition on and engine off) has five to try: fan, throttle, fuel pump, EVAP vent valve, ABS pump.
+
+## Module settings
+
+What dealer tools call customizations: a feature a module keeps switched on or off, or a value it keeps (a chime, a lock
+behaviour, a light). Icarus learns them by watching such a tool change one on my own vehicle (the Bus page, `icarus bus
+watch`), and then changes them itself:
+
+```sh
+icarus obd settings --adapter A                                # the settings known for this vehicle, and each one's value now
+icarus obd setting "seat belt chime" off --adapter A           # asks "yes", keeps the value before, writes, reads it back
+icarus obd setting-undo "seat belt chime" --adapter A          # back to what it was before the last change
+```
+
+The fence is in code (`crates/icarus-obd/src/settings.rs`): only reading and writing one data identifier goes out (UDS
+`22`/`2E`, KWP2000 `21`/`3B`, the session they need and tester present); never security access, routines or programming;
+never airbag or occupant-detection modules, immobiliser or key settings, or odometer values. A change needs a wired adapter
+(not Bluetooth or Wi-Fi), the battery at 12 V or more, and its conditions (by default engine off and parked). The value
+there before is read and written to the vehicle's `Logs/settings-changes.tsv` before anything is written; the new value is
+read back, and if the module did not take it, the old one is written back. Only named values from the profile can be
+written: a value never seen on the vehicle goes into its profile first, by hand. Every change is in
+`~/.local/state/icarus/actions.log`.
+
+Settings are data too: `[[setting]]` entries (module, protocol, identifier, named values, whether the module needs the
+extended session, conditions). None are in the built-in profiles: each maker's are its own, and each module's differ by
+model and year, so they come from watching a tool on my own vehicle. `sim:off` has two to try: the cluster's seat belt chime
+(UDS) and the ABS module's buzzer (KWP2000).
 
 ## Editing maps and checksums
 
@@ -161,7 +188,8 @@ button is held; **Maps** opens a definition and an image
 
 ## What it does today
 
-Everything below only reads, except the actuator tests (next section), which drive a part for as long as you hold the button.
+Everything below only reads, except the actuator tests, which drive a part for as long as you hold the button, and module
+settings (both above).
 
 **Files** (no vehicle needed):
 
@@ -240,7 +268,8 @@ transmission modules, a CAN bus view, and a desktop app.
 - Ship one-click emissions "delete" features. Thresholds and calibration values (what sets what off) are ordinary maps, and
   emissions readings (oxygen sensors, lambda, fuel trims, catalyst temperature, monitors) are part of the live data.
 - Bypass immobilizers or change odometer readings.
-- Flash or recode a module without a verified full backup first (actuator tests are the only writes so far).
+- Flash or recode a module without a verified full backup first (the writes so far: actuator tests, clearing codes and
+  module settings, each with the value before kept and a way back).
 
 ## Licence
 

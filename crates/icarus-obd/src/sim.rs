@@ -33,6 +33,8 @@ pub struct SimCar {
     cleared: std::collections::HashSet<u16>,
     /// In monitor mode (ATMA/STMA): the bus tick, frames streamed until any byte arrives.
     monitoring: Option<u64>,
+    /// Module settings (`sim::settings`): (module, identifier) -> value.
+    settings: std::collections::HashMap<(u16, u16), Vec<u8>>,
 }
 
 impl Default for SimCar {
@@ -64,6 +66,7 @@ impl SimCar {
             driven: Default::default(),
             cleared: Default::default(),
             monitoring: None,
+            settings: [((0x7C0, 0xA001), vec![0x01]), ((0x7B0, 0x20), vec![0x00])].into_iter().collect(),
         }
     }
 
@@ -139,7 +142,7 @@ impl SimCar {
 
     /// What the bus carries in one tick (5 ms): wheel speeds and an engine message every tick, a status message every 10, a
     /// door switch every 20 (it flips every 400), and every 400 ticks another tool running a throttle test and an ABS pump
-    /// test, for the analyser to learn.
+    /// test and changing a cluster setting and an ABS setting, for the analyser to learn.
     fn bus_tick(&self, t: u64) -> Vec<String> {
         let mut out = Vec::new();
         let rpm = (790.0 + 40.0 * (t as f64 * 0.05).sin()) as u16;
@@ -178,6 +181,18 @@ impl SimCar {
             "7B8 03 70 10 07",
             "7B0 03 30 10 00",
             "7B8 03 70 10 00",
+            "7C0 02 10 03",
+            "7C8 02 50 03",
+            "7C0 03 22 A0 01",
+            "7C8 04 62 A0 01 01",
+            "7C0 04 2E A0 01 00",
+            "7C8 03 6E A0 01",
+            "7C0 02 10 01",
+            "7C8 02 50 01",
+            "7B0 02 21 20",
+            "7B8 03 61 20 00",
+            "7B0 03 3B 20 01",
+            "7B8 02 7B 20",
         ];
         if (100..100 + script.len() as u64 * 10).contains(&step) && (step - 100).is_multiple_of(10)
         {
@@ -431,6 +446,33 @@ impl SimCar {
                 Some([&[0x59, 0x02, *mask][..], codes].concat())
             }
             ([0x18, ..], false) => Some([&[0x58, (codes.len() / 3) as u8][..], codes].concat()),
+            // settings: the cluster's chime (UDS, changed only in the extended session), the ABS module's buzzer (KWP2000,
+            // changed only with the engine off)
+            ([0x22, 0xA0, 0x01], true) if tx == 0x7C0 => Some([&[0x62, 0xA0, 0x01][..], &self.settings[&(tx, 0xA001)]].concat()),
+            ([0x2E, hi, lo, v @ ..], true) if tx == 0x7C0 => {
+                if u16::from_be_bytes([*hi, *lo]) != 0xA001 {
+                    return refuse(0x31);
+                }
+                if !self.extended.contains(&tx) {
+                    return refuse(0x7F);
+                }
+                if v.len() != 1 || v[0] > 1 {
+                    return refuse(if v.len() != 1 { 0x13 } else { 0x31 });
+                }
+                self.settings.insert((tx, 0xA001), v.to_vec());
+                Some(vec![0x6E, *hi, *lo])
+            }
+            ([0x21, 0x20], false) if tx == 0x7B0 => Some([&[0x61, 0x20][..], &self.settings[&(tx, 0x20)]].concat()),
+            ([0x3B, 0x20, v @ ..], false) if tx == 0x7B0 => {
+                if self.engine_on {
+                    return refuse(0x22);
+                }
+                if v.len() != 1 {
+                    return refuse(0x13);
+                }
+                self.settings.insert((tx, 0x20), v.to_vec());
+                Some(vec![0x7B, 0x20])
+            }
             ([0x22, 0xF1, 0x87], true) => Some([&[0x62, 0xF1, 0x87][..], part].concat()),
             ([0x22, 0xF1, 0x88], true) => {
                 Some([&[0x62, 0xF1, 0x88][..], b"ICARUS-SW-0001"].concat())
@@ -698,6 +740,28 @@ mod tests {
     }
 }
 
+/// The simulated vehicle's settings. Like its tests, their identifiers (A001 on the cluster, 20 on the ABS module) exist only
+/// in this simulation.
+pub fn settings() -> Vec<crate::settings::SettingDef> {
+    use crate::actuator::{Condition::*, Protocol};
+    let s = |name: &str, module: u16, protocol: Protocol, id: u16, extended: bool| crate::settings::SettingDef {
+        name: name.into(),
+        module,
+        rx: None,
+        protocol,
+        id,
+        values: [("off".to_string(), vec![0x00]), ("on".to_string(), vec![0x01])].into_iter().collect(),
+        extended,
+        conditions: vec![EngineOff, Stationary],
+        note: String::new(),
+        checked: true,
+    };
+    vec![
+        s("Cluster: seat belt chime", 0x7C0, Protocol::Uds, 0xA001, true),
+        s("ABS: buzzer when the system is switched off", 0x7B0, Protocol::Kwp, 0x20, false),
+    ]
+}
+
 /// The simulated vehicle's actuator tests. Their identifiers (F001-F004 on the engine computer, 10 on the ABS module) exist only
 /// in this simulation: they are never in a real vehicle's profile.
 pub fn tests() -> Vec<crate::actuator::TestDef> {
@@ -800,6 +864,10 @@ mod monitor_tests {
         assert_eq!(ended, "stopped");
         assert!(a.ids.contains_key(&0x2C4) && a.ids.contains_key(&0x610));
         assert_eq!(a.learned.len(), 2, "{:?}", a.learned);
+        assert_eq!(a.settings.len(), 2, "the cluster's and the ABS module's setting: {:?}", a.settings);
+        let chime = a.settings.iter().find(|s| s.module == 0x7C0).unwrap();
+        assert_eq!((chime.id, chime.extended), (0xA001, true));
+        assert_eq!((chime.values["was"].clone(), chime.values["set"].clone()), (vec![0x01], vec![0x00]));
         // the adapter answers normally afterwards
         assert_eq!(crate::j1979::vin(&mut elm).unwrap().as_deref(), Some(VIN));
     }

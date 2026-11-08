@@ -1269,7 +1269,7 @@ impl App {
                 ));
             }
         });
-        ui.label(RichText::new("Watching only: nothing is sent onto the bus. Press a pedal or a switch and see which byte follows (changed bytes light up). Diagnostic messages are put in words; actuator tests another tool runs are learned.").weak());
+        ui.label(RichText::new("Watching only: nothing is sent onto the bus. Press a pedal or a switch and see which byte follows (changed bytes light up). Diagnostic messages are put in words; actuator tests another tool runs, and settings it changes, are learned.").weak());
         let Some(b) = &self.bus else { return };
         ui.label(
             RichText::new(format!(
@@ -1363,6 +1363,28 @@ impl App {
                         add = Some(t.clone());
                     }
                 });
+            }
+        }
+        let mut add_setting = None;
+        if !b.settings.is_empty() {
+            ui.add_space(8.0);
+            let profile = self.info.as_ref().and_then(|i| i.profile.as_ref()).map(|p| p.name.clone());
+            for st in &b.settings {
+                card(ui, pal, &st.name, |ui| {
+                    ui.label(RichText::new("Another tool changed this module setting, and the module took it. \"was\" is the value it read just before. Find out what the setting is before relying on it; it is added unchecked, to be changed only parked with the engine off. Change it with icarus obd setting.").weak());
+                    ui.label(RichText::new(icarus_obd::settings::to_toml(st)).monospace().small());
+                    let label = profile.as_ref().map_or("Connect to a vehicle with a make profile to add it".to_string(), |p| format!("Add to the {p} file"));
+                    if ui.add_enabled(profile.is_some(), egui::Button::new(label)).clicked() {
+                        add_setting = Some(st.clone());
+                    }
+                });
+            }
+        }
+        if let Some(st) = add_setting {
+            let id = self.info.as_ref().and_then(|i| i.profile.as_ref()).map(|p| p.id.clone()).unwrap_or_default();
+            match icarus_obd::vehicles::add_setting_to_user_file(&id, &icarus_obd::settings::to_toml(&st)) {
+                Ok(p) => self.status = format!("Added to {}: icarus obd settings lists it now.", p.display()),
+                Err(e) => self.error = Some(e),
             }
         }
         if let Some(t) = add {

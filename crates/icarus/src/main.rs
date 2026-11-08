@@ -8,8 +8,8 @@ use icarus_obd::elm::Elm;
 use icarus_obd::j1979::{self, DtcKind};
 use icarus_obd::port::Target;
 use icarus_obd::{
-    actuator, bus, charging, clear, dtc, garage, lookup, mode06, nhtsa, report, socketcan, uds,
-    vehicles, vin,
+    actuator, audit, bus, charging, clear, dtc, garage, lookup, mode06, nhtsa, report, settings, sim,
+    socketcan, uds, vehicles, vin,
 };
 mod mcp;
 
@@ -77,6 +77,13 @@ Trouble codes:
   icarus obd test NAME --adapter A [--value PERCENT] [--seconds N] [--yes]
                                              run one: asks first, checks its conditions, stops after N seconds or Ctrl+C
                                              and hands control back to the module (sim:off = the simulated engine off)
+  icarus obd settings --adapter A            module settings known for this vehicle and their values now (reads only)
+  icarus obd setting NAME VALUE --adapter A [--yes]
+                                             change one to one of its named values: asks first, needs a wired adapter,
+                                             engine off and parked; the value before is kept in the vehicle's Logs folder
+                                             and the new one read back
+  icarus obd setting-undo NAME --adapter A [--yes]
+                                             put it back to what it was before its last change
   icarus obd selftests --adapter A           on-board test results (Mode 06): each monitor's last measurement and limits,
                                              misfire counts per cylinder
   icarus obd charging --adapter A [--battery agm|flooded] [--seconds 20]
@@ -573,6 +580,9 @@ fn cmd_obd(a: &[String]) -> Result<(), String> {
         Some("selftests") => obd_selftests(&mut connect(&args)?),
         Some("charging") => obd_charging(&mut connect(&args)?, &args),
         Some("test") => obd_test(&mut connect(&args)?, &args),
+        Some("settings") => obd_settings(&mut connect(&args)?),
+        Some("setting") => obd_setting(&args, false),
+        Some("setting-undo") => obd_setting(&args, true),
         _ => Err(
             "usage: icarus obd info|codes|pids|live|scan|module --adapter A (see icarus --help)"
                 .into(),
@@ -1101,6 +1111,135 @@ fn obd_test(elm: &mut Elm, args: &Args) -> Result<(), String> {
     Ok(())
 }
 
+fn vehicle_settings(elm: &mut Elm) -> Result<(Option<String>, Vec<settings::SettingDef>), String> {
+    let all = profiles();
+    let vin = j1979::vin(elm).map_err(e)?;
+    let profile = vin.as_deref().and_then(|v| vehicles::for_vin(&all, v));
+    let list = vehicles::settings_for(profile, vin.as_deref());
+    Ok((vin, list))
+}
+
+/// Where a vehicle's setting changes are kept: its own folder's Logs (the simulation's in Icarus's state folder).
+fn settings_log(vin: Option<&str>) -> Result<std::path::PathBuf, String> {
+    match vin {
+        Some(v) if v != sim::VIN => garage::ensure(v)
+            .map(|d| settings::log_path(&d))
+            .map_err(|x| format!("the vehicle's folder could not be made: {x}")),
+        _ => {
+            let state = audit::path()
+                .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+                .ok_or("no state folder")?;
+            Ok(state.join("sim-settings-changes.tsv"))
+        }
+    }
+}
+
+fn obd_settings(elm: &mut Elm) -> Result<(), String> {
+    let (_, list) = vehicle_settings(elm)?;
+    if list.is_empty() {
+        println!("No module settings are known for this vehicle yet: their IDs are the maker's own. Watch a dealer tool change one (icarus bus), then add what it learned to the vehicle's profile as a [[setting]] entry (docs/PLAN.md).");
+    }
+    for s in &list {
+        let now = match settings::read(elm, s) {
+            Ok((v, _)) => s.show(&v),
+            Err(x) => format!("could not read it: {x}"),
+        };
+        println!(
+            "{}  ({:03X}, {}{})",
+            s.name,
+            s.module,
+            s.protocol.label(),
+            if s.checked { "" } else { ", not yet checked on a vehicle" }
+        );
+        println!(
+            "    now: {now}   values: {}",
+            s.values.keys().map(String::as_str).collect::<Vec<_>>().join(", ")
+        );
+        if !s.note.is_empty() {
+            println!("    {}", s.note);
+        }
+    }
+    Ok(())
+}
+
+fn obd_setting(args: &Args, undo: bool) -> Result<(), String> {
+    let (name, value) = match (undo, args.pos.as_slice()) {
+        (false, [n, v]) => (n, Some(v)),
+        (true, [n]) => (n, None),
+        _ => {
+            return Err(if undo {
+                "usage: icarus obd setting-undo \"NAME\" --adapter A [--yes]"
+            } else {
+                "usage: icarus obd setting \"NAME\" VALUE --adapter A [--yes]  (VALUE: one of the names icarus obd settings lists)"
+            }
+            .into())
+        }
+    };
+    let spec = args.opt("adapter").map(str::to_string).or_else(|| std::env::var("ICARUS_ADAPTER").ok()).unwrap_or_default();
+    if let Ok(t) = Target::parse(&spec) {
+        if !t.wired() {
+            return Err("changing a setting writes the module's memory: use a wired adapter (USB), not Bluetooth or Wi-Fi".into());
+        }
+    }
+    let mut elm = connect(args)?;
+    let (vin, list) = vehicle_settings(&mut elm)?;
+    let n = name.to_lowercase();
+    let hits: Vec<&settings::SettingDef> = match list.iter().find(|s| s.name.to_lowercase() == n) {
+        Some(s) => vec![s],
+        None => list.iter().filter(|s| s.name.to_lowercase().contains(&n)).collect(),
+    };
+    let s = match hits.as_slice() {
+        [s] => *s,
+        [] => return Err(format!("no setting matches {name:?} (icarus obd settings lists them)")),
+        _ => return Err(format!("{name:?} matches {} settings; be more exact", hits.len())),
+    };
+    let log = settings_log(vin.as_deref())?;
+    let target = match value {
+        Some(v) => s.values.get(v.as_str()).cloned().ok_or_else(|| {
+            format!(
+                "{} takes {} (a value not seen on the vehicle goes into its profile first)",
+                s.name,
+                s.values.keys().map(String::as_str).collect::<Vec<_>>().join(", ")
+            )
+        })?,
+        None => {
+            settings::last_change(&log, s)
+                .ok_or_else(|| format!("no change of {} in {}", s.name, log.display()))?
+                .before
+        }
+    };
+    let (now, _) = settings::read(&mut elm, s)?;
+    println!("{} on module {:03X}: {} -> {}", s.name, s.module, s.show(&now), s.show(&target));
+    if now == target {
+        println!("Already so: nothing to write.");
+        return Ok(());
+    }
+    settings::ready(&mut elm, s)?;
+    if !s.checked {
+        println!("WARNING: not yet checked on a vehicle. {}", s.note);
+    }
+    println!("Ignition on, engine off, parked; a charger on the battery if you have one. The value there now is kept in {} first.", log.display());
+    if args.opt("yes").is_none() {
+        print!("Type yes to change it: ");
+        std::io::stdout().flush().ok();
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line).map_err(|x| x.to_string())?;
+        if line.trim() != "yes" {
+            return Err("not changed".into());
+        }
+    }
+    match settings::change(&mut elm, s, &target, &log)? {
+        None => println!("Already so: nothing written."),
+        Some(c) => println!(
+            "Changed: {} -> {} (read back from the module). The way back: icarus obd setting-undo {:?}",
+            s.show(&c.before),
+            s.show(&c.after),
+            s.name
+        ),
+    }
+    Ok(())
+}
+
 fn obd_charging(elm: &mut Elm, args: &Args) -> Result<(), String> {
     let battery = match args.opt("battery") {
         Some(b) => charging::Battery::parse(b).ok_or("--battery is agm or flooded")?,
@@ -1332,6 +1471,12 @@ fn cmd_bus(a: &[String]) -> Result<(), String> {
             s.count,
             bytes.join(" ")
         );
+    }
+    if !an.settings.is_empty() {
+        println!("\nSettings another tool changed (add them to the vehicle's profile, then find out what each one is):\n");
+        for s in &an.settings {
+            println!("{}", settings::to_toml(s));
+        }
     }
     if !an.learned.is_empty() {
         println!("\nTests seen run by another tool (add them to the vehicle's file, ~/.config/icarus/vehicles/MAKE.toml, after checking what each drives):\n");

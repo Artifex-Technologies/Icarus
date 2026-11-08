@@ -35,6 +35,16 @@ pub enum Target {
 }
 
 impl Target {
+    /// A cable all the way: what anything that writes a module's memory needs (a dropped wireless link mid-write can leave
+    /// the module half-written). A serial port named `rfcomm` is Bluetooth; the simulation counts as wired.
+    pub fn wired(&self) -> bool {
+        match self {
+            Target::Sim { .. } => true,
+            Target::Serial { path, .. } => !path.contains("rfcomm"),
+            Target::Bluetooth { .. } | Target::Tcp(_) => false,
+        }
+    }
+
     pub fn parse(s: &str) -> Result<Target, String> {
         if s == "sim" || s == "sim:off" {
             return Ok(Target::Sim {
@@ -271,6 +281,13 @@ impl Port for TcpPort {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_cable_is_wired() {
+        let w = |s: &str| Target::parse(s).unwrap().wired();
+        assert!(w("sim") && w("/dev/ttyUSB0") && w("/dev/ttyACM0@115200"));
+        assert!(!w("/dev/rfcomm0") && !w("bt:AA:BB:CC:DD:EE:FF") && !w("tcp:192.168.0.10:35000"));
+    }
 
     #[test]
     fn targets_from_the_command_line() {

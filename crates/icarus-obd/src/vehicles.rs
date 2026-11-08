@@ -27,6 +27,9 @@ pub struct Profile {
     /// Actuator tests (`[[test]]` entries; see `actuator`).
     #[serde(default, rename = "test")]
     pub tests: Vec<crate::actuator::TestDef>,
+    /// Module settings (`[[setting]]` entries; see `settings`).
+    #[serde(default, rename = "setting")]
+    pub settings: Vec<crate::settings::SettingDef>,
     /// The file's name without `.toml` (how `--make` picks it).
     #[serde(skip)]
     pub id: String,
@@ -108,6 +111,11 @@ pub fn parse(id: &str, source: &str, text: &str) -> Result<Profile, String> {
     for t in &p.tests {
         if let Some(why) = t.refused() {
             return Err(format!("{source}: test \"{}\" refused: {why}", t.name));
+        }
+    }
+    for s in &p.settings {
+        if let Some(why) = s.refused() {
+            return Err(format!("{source}: setting \"{}\" refused: {why}", s.name));
         }
     }
     for w in &p.wmi {
@@ -216,11 +224,22 @@ fn merge(base: &mut Profile, user: Profile) {
             None => base.tests.push(t),
         }
     }
+    for t in user.settings {
+        match base.settings.iter_mut().find(|b| b.name == t.name) {
+            Some(b) => *b = t,
+            None => base.settings.push(t),
+        }
+    }
     base.source = user.source;
 }
 
-/// Adds a test (a `[[test]]` entry) to the user's file for this make, creating the file if needed: it then adds to the
-/// built-in profile of the same name. The entry is checked before anything is written.
+/// Adds a setting (a `[[setting]]` entry) to the user's file for this make, as `add_test_to_user_file` does a test.
+pub fn add_setting_to_user_file(profile_id: &str, entry: &str) -> Result<PathBuf, String> {
+    add_test_to_user_file(profile_id, entry)
+}
+
+/// Adds a test (a `[[test]]` entry; any entry, checked the same way) to the user's file for this make, creating the file if
+/// needed: it then adds to the built-in profile of the same name. The entry is checked before anything is written.
 pub fn add_test_to_user_file(profile_id: &str, entry: &str) -> Result<PathBuf, String> {
     if profile_id.is_empty()
         || !profile_id
@@ -291,6 +310,15 @@ pub fn tests_for(profile: Option<&Profile>, vin: Option<&str>) -> Vec<crate::act
     let mut v: Vec<_> = profile.map(|p| p.tests.clone()).unwrap_or_default();
     if vin == Some(crate::sim::VIN) {
         v.extend(crate::sim::tests());
+    }
+    v
+}
+
+/// The module settings for a vehicle: its profile's, and the simulated vehicle's own when it is the simulation.
+pub fn settings_for(profile: Option<&Profile>, vin: Option<&str>) -> Vec<crate::settings::SettingDef> {
+    let mut v: Vec<_> = profile.map(|p| p.settings.clone()).unwrap_or_default();
+    if vin == Some(crate::sim::VIN) {
+        v.extend(crate::sim::settings());
     }
     v
 }
