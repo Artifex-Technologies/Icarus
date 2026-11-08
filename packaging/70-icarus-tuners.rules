@@ -1,0 +1,6 @@
+# Icarus: the tuners and vehicle interfaces that have no Linux driver of their own (they speak their maker's protocol over raw
+# USB), opened by the person at the computer (uaccess: the user logged in at the seat, nobody else, and not over the network).
+# Installed to /etc/udev/rules.d by scripts/install-local.sh --udev. One line per maker; add a device when it is in hand.
+
+# SCT / Derive Power (Bully Dog): the X4 (5059:4040, "SCT MB103"), and the newer devices on Derive's WinUSB driver (5059:4080)
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="5059", TAG+="uaccess"
