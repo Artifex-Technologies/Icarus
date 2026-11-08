@@ -130,6 +130,13 @@ A module is bricked when a write stops halfway or puts the wrong thing in. Icaru
 
 TCM shift tables, line pressure and converter lock-up through the same steps (identify, read, edit, write on the bench first).
 
+- **Tacoma S mode that holds the gear.** On the 2016+ Tacoma's 6-speed automatic, S mode limits the highest gear (S4: no
+  higher than 4th) and the transmission still shifts below it on its own; holding the chosen gear is the TCM's shift logic,
+  a calibration edit, not a setting (I want this; 2026-11-08). The 2016 Focus had S and L the same way.
+- **Learned settings.** What a dealer tool changes on my own vehicle (a customization, a feature switched on), recorded by
+  watching the bus while the tool does it (`icarus bus watch`, as actuator tests are learned), becomes a setting Icarus can
+  change itself: the value there before read and kept, one-step undo, parked, wired. Waiting for the laptop at the truck.
+
 ## 6. Learning and the rest of the ecosystem
 
 - Sarina explains a log or a code in conversation ("why is long-term trim +12 % at idle?"): `icarus mcp` (done 2026-11-07,

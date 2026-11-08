@@ -14,9 +14,13 @@ repository; `.gitignore` keeps `*.bin` and `/private` out).
   committed; tests use small files written for them.
 - Limits: no one-click emissions "delete" features, no immobilizer bypass, no odometer changes. Thresholds and calibration
   values are ordinary maps; emissions readings are ordinary live data.
-- The only writes to a vehicle are actuator tests (only through `crates/icarus-obd/src/actuator.rs`) and clearing codes
-  (only through `clear.rs`, a report saved first), with their allow-lists (the airbag ban, conditions, time limit, return of control on every path). Do not widen them without the owner's say; no
-  guessed test IDs in a real vehicle's profile (unverified IDs could drive something else). Flashing and coding wait for
-  docs/PLAN.md section 4's conditions, built and tested on a bench ECU.
+- Icarus is meant to do more than read (my decision, 2026-11-08: "We built it with the intention of doing more than that"):
+  actuator tests, clearing codes, changing a module's settings, coding and flashing all belong in it. Each kind of write has
+  its own module and allow-list (today: actuator tests in `crates/icarus-obd/src/actuator.rs`, clearing in `clear.rs`, a
+  report saved first) and the same safeguards: the value or image there before is read and kept first, with a way back;
+  only what was learned on my own vehicle or verified for it (no guessed IDs in a real vehicle's profile: an unverified ID
+  could drive something else); conditions (parked, engine off where it matters, voltage held up); wired for anything that
+  writes memory; the airbag modules never. A new kind of write is built that way, not left out. Flashing and coding still
+  wait for docs/PLAN.md section 4's conditions, built and tested on a bench ECU first.
   Disassembling ECU firmware happens in Limbo, as for any binary.
 - The plan and its order: [docs/PLAN.md](docs/PLAN.md).
