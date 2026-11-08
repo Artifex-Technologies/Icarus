@@ -1,6 +1,8 @@
 # Icarus: the plan
 
-Started 2026-11-07. Factory ECUs first, open ECUs second (for those, LibreTune goes into Agora instead of being rebuilt here).
+Started 2026-11-07. Factory ECUs first, open ECUs second (for those, LibreTune goes into Agora instead of being rebuilt here:
+on 2026-11-07 it had only nightly builds, no stable release, AUR or Flathub package, so it waits for an open ECU to tune or a
+stable release, whichever comes first).
 Every step reads before it writes, and nothing writes to a module until reading, checking and restoring are proven on a bench.
 
 ## 0. Foundation (done 2026-11-07)
