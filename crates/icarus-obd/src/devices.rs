@@ -58,7 +58,7 @@ pub const KNOWN: &[Known] = &[
         "SCT",
         "X4 (7015) / MB103",
         Access::RawUsb,
-        "Ford tuner; recognised, its protocol not yet learned",
+        "Ford tuner; its protocol is locked (a challenge-response with SCT's secret, encrypted data): use SCT's own program in a Limbo Windows guest",
     ),
     dev(
         0x5059,

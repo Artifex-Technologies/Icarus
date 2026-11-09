@@ -17,9 +17,13 @@ serial port (likely yes); COBB's AccessPort Manager uses libusb-win32 or WinUSB 
 
 1. **Read the installer as data** in a quarantine folder: what kind of installer, who signed it, which drivers (their `.inf`
    files name the USB IDs and say which Windows USB stack is used), which libraries.
-2. **Run the maker's program only inside Limbo**: a disposable Linux guest with Wine, the device passed through by its USB ID
-   (listed in `/etc/limbo/host-policy.json` `usb_allow`, approved per session with `sudo limbo passthrough approve`).
-3. **Record the conversation on the host** (`usbmon`, Wireshark): the guest's USB traffic passes through the host's USB stack.
+2. **Run the maker's program only inside Limbo**: a disposable Linux guest with Wine, or a Windows guest when the program
+   needs its own kernel driver (Wine loads none), the device passed through by its USB ID (listed in
+   `/etc/limbo/host-policy.json` `usb_allow`; approved per session with `sudo limbo passthrough approve`, or for good with
+   `usb_standing`, as the SCT X4 is).
+3. **Record the conversation on the host**: `sudo limbo capture --seconds N GUEST.json OUT.pcap` writes that device's
+   traffic only (nothing else on its USB bus) to a file Wireshark opens; the guest's USB traffic passes through the
+   host's USB stack.
 4. **Write Icarus's own driver** from what was seen, read-only commands first, each command on an allow-list.
 
 The udev rule `packaging/70-icarus-tuners.rules` lets the person at the computer open these devices (no root).
@@ -52,8 +56,27 @@ sends nothing to any device. Speaking each device's own protocol is the next ste
 | USB | `5059:4040` "SCT LLC SCT MB103": one vendor-specific interface, three bulk endpoints (0x81 in, 0x02 out, 0x83 in), no mass storage |
 | Linux | no driver binds; raw USB (libusb/usbfs) only |
 | Maker's software | SCT Device Updater: a WiX bundle; the app is a packed .NET program (needs .NET 4.8); drivers: Derive's WinUSB driver for `5059:4080` (newer devices) and an older InstallShield-packed driver for the X4 |
-| State | passed through to a Limbo guest and seen there (2026-11-08). The Device Updater (with .NET 4.8) runs under Wine in that guest, but never sees the device: it reaches the X4 through **Jungo WinDriver 10.1.1** (`wdapi_dotnet1011.dll` over WinDriver's own kernel driver), and Wine cannot load Windows kernel drivers. A USB recording inside the guest showed no traffic at all while it ran |
-| Next | the maker's program needs real Windows with WinDriver's driver: a Windows guest in Limbo (an evaluation edition needs no licence key for its trial period) with the X4 passed through, and its traffic recorded on the host. Or the X4's protocol learned without the maker's program (what it says when plugged in, its file transfer) |
+| Under Wine | the Device Updater (with .NET 4.8) runs under Wine in a Linux guest but never sees the device: it reaches the X4 through **Jungo WinDriver 10.1.1** (`wdapi_dotnet1011.dll` over WinDriver's own kernel driver), and Wine cannot load Windows kernel drivers (no USB traffic at all, 2026-11-08) |
+| In a Windows guest | works (2026-11-08, Limbo's Windows 11 guest, the X4 passed through). SCT's bundle installs the X4's Jungo driver (the device shows as "iTSXDEVICE", working), then stops at Derive's driver package for newer devices (its certificate step fails), so `SCTDeviceUpdater.msi` goes on by itself. The program needs administrator rights, asks to download Derive's driver (not needed for the X4: No), and then reads the device information and pulls the device's files ("Get Stock File from Device" saves an encrypted `.bef` backup) |
+
+What the X4 says, seen from outside (`sudo limbo capture`, the device's traffic only, while the Device Updater read the
+device information and its files):
+
+- **Two bulk endpoints:** commands out on 0x02, answers in on 0x81 (0x83 unused, no control requests).
+- **Commands** are 20 bytes: the marker `c7 55 16 aa`, a 16-bit sequence number, a 16-bit flag (which way data goes), a
+  16-bit command code, 6 bytes of parameters, a 32-bit data length. Data follows in that direction, and every exchange
+  ends with a 16-byte status from the device: the marker `aa 17 55 82`, the same sequence number, a status and a length.
+- **A challenge-response before each operation:** command 0x62 returns 64 bytes that differ every time, 0x32 (parameter
+  0x1234) returns 64 more, and with 0xC2 the program sends 64 bytes computed from them.
+- **Device information** (codes 0x54, 0x5A, 0x5B, 0x60, 0x61, 0x64, 0x80, 0x81, 0x84, 0x85): 64-byte answers, encrypted.
+- **Files:** 0x10 sends a path in plain text (`\FOLDER\NAME.EXT`), 0x77 returns a listing in plain text (entries
+  separated by `|<>|`), 0x00 reads the next 4,096-byte chunk (the last one shorter). The contents are encrypted on the
+  device itself, with an 8-byte block cipher block by block (runs of the same 8 bytes where the plain text repeats).
+
+**So Icarus cannot talk to the X4 itself:** every operation needs SCT's secret for the challenge-response, and the
+device information and files are encrypted with SCT's keys. Watching cannot reveal the secret (the challenge is new every
+time), and taking SCT's program apart to find it is outside this clean-room work. The X4 stays usable through SCT's own
+program in a Limbo Windows guest. The recording and the device's files stay outside this repository.
 
 ## VF Tuner (OVT) — Toyota and Lexus
 
