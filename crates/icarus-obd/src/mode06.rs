@@ -35,13 +35,6 @@ impl TestResult {
             unit,
         ))
     }
-
-    /// How far into its allowed range the value sits (0 % at the limit it moves away from, 100 % at the other), for a
-    /// one-sided limit: where the value is against the limit that matters.
-    pub fn margin(&self) -> Option<f64> {
-        let span = (self.max - self.min) as f64;
-        (span > 0.0).then(|| (self.value - self.min) as f64 / span * 100.0)
-    }
 }
 
 /// Unit and scaling IDs (SAE J1979): only those Icarus is sure of; others are shown raw.
