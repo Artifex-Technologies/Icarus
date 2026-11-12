@@ -47,11 +47,15 @@ const PAGES: [(Page, &str); 10] = [
 
 /// Answers from the NHTSA thread.
 enum Bg {
-    Vin(Result<icarus_obd::nhtsa::VinDecode, String>),
+    /// Boxed: a decode is far larger than the other answers.
+    Vin(Result<Box<icarus_obd::nhtsa::VinDecode>, String>),
     Recalls(Result<Vec<icarus_obd::nhtsa::Recall>, String>),
     /// Sarina's answer about a learning session.
     Sarina(Result<String, String>),
 }
+
+/// What a clear removes the codes from: None = every OBD-II module, Some = one module (tx, rx, dialect).
+type ClearTarget = Option<(u16, u16, Dialect)>;
 
 #[derive(PartialEq, Eq)]
 enum Link {
@@ -196,7 +200,7 @@ struct App {
     test_note: String,
     test_reading: Option<f64>,
     /// A clear waiting for the person's yes: None = every OBD-II module, Some = one module (tx, rx, dialect).
-    confirm_clear: Option<(Option<(u16, u16, Dialect)>, String)>,
+    confirm_clear: Option<(ClearTarget, String)>,
     selftests: Option<Vec<icarus_obd::mode06::TestResult>>,
     battery_agm: bool,
     /// NHTSA lookups run on their own thread; answers come back here.
@@ -392,7 +396,7 @@ impl App {
                 Bg::Vin(Ok(d)) => {
                     self.name_edit = d.name();
                     self.status = "NHTSA's answer is in the name field: Save keeps it.".into();
-                    self.nhtsa = Some(d);
+                    self.nhtsa = Some(*d);
                 }
                 Bg::Recalls(Ok(r)) => {
                     self.status = format!("{} recall(s) on record.", r.len());
@@ -949,7 +953,9 @@ impl App {
         }
         if ask_vin {
             if let Some(v) = vin.clone() {
-                self.ask_nhtsa(ui.ctx(), move || Bg::Vin(icarus_obd::nhtsa::decode_vin(&v)));
+                self.ask_nhtsa(ui.ctx(), move || {
+                    Bg::Vin(icarus_obd::nhtsa::decode_vin(&v).map(Box::new))
+                });
             }
         }
         if ask_recalls {
@@ -2388,11 +2394,15 @@ impl App {
                 Ok(())
             }
             (MapEdit::UndoElement, Kind::Table(t)) => {
-                def.span(&t.z).map(|r| rom.revert_range(r));
+                if let Some(r) = def.span(&t.z) {
+                    rom.revert_range(r);
+                }
                 Ok(())
             }
             (MapEdit::UndoElement, Kind::Constant(d)) => {
-                def.span(d).map(|r| rom.revert_range(r));
+                if let Some(r) = def.span(d) {
+                    rom.revert_range(r);
+                }
                 Ok(())
             }
             (MapEdit::Flag(on), Kind::Flag(f)) => {

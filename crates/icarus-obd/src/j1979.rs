@@ -238,8 +238,10 @@ pub fn parse_dtcs(answers: &[Answer], sid: u8, can: bool) -> PerModule<Vec<Strin
             &a.data[1..]
         };
         let codes: Vec<String> = body
-            .chunks_exact(2)
-            .filter(|c| c != &[0, 0])
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .filter(|c| **c != [0, 0])
             .map(|c| dtc(c[0], c[1]))
             .collect();
         match out.iter_mut().find(|o| o.0 == a.from) {
@@ -485,7 +487,9 @@ pub fn cvns(elm: &mut dyn Link) -> Result<Vec<(String, Vec<String>)>, ObdError> 
             (
                 a.from.clone(),
                 a.data[3..]
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .map(|c| c.iter().map(|b| format!("{b:02X}")).collect())
                     .collect(),
             )

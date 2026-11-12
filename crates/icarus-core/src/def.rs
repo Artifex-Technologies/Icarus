@@ -28,6 +28,8 @@ pub struct Element {
     pub kind: Kind,
 }
 
+// Elements are built once per definition and matched by reference (`Constant(d) | Table(Table { z: d, .. })`); boxing Table saves little.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub enum Kind {
     /// One value.

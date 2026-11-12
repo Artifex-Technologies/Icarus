@@ -44,7 +44,7 @@ pub fn check_read_only(data: &[u8]) -> Result<(), ObdError> {
         0x2E | 0x3B => "write data",
         0x2F | 0x30 => "drive outputs (actuator tests)",
         0x31 => "run a routine",
-        0x34 | 0x35 | 0x36 | 0x37 => "transfer software (programming)",
+        0x34..=0x37 => "transfer software (programming)",
         0x3D => "write memory",
         0x85 => "control trouble code setting",
         _ => "something Icarus does not know is safe",
@@ -131,7 +131,9 @@ pub fn parse_uds_dtcs(d: &[u8]) -> Option<Vec<ModuleDtc>> {
     }
     Some(
         d[3..]
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|c| c[..3] != [0, 0, 0])
             .map(|c| ModuleDtc {
                 code: dtc(c[0], c[1]),
@@ -150,7 +152,9 @@ pub fn parse_kwp_dtcs(d: &[u8]) -> Option<Vec<ModuleDtc>> {
     }
     Some(
         d[2..]
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .filter(|c| c[..2] != [0, 0])
             .map(|c| {
                 let mut states = Vec::new();

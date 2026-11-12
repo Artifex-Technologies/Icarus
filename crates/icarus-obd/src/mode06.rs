@@ -120,7 +120,9 @@ pub fn parse(data: &[u8]) -> Vec<TestResult> {
         return vec![];
     }
     data[1..]
-        .chunks_exact(9)
+        .as_chunks::<9>()
+        .0
+        .iter()
         .filter(|b| b[1] != 0) // TID 0 would be a support map, not a result
         .map(|b| {
             let signed = b[2] & 0x80 != 0;

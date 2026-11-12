@@ -144,10 +144,7 @@ pub fn logs_dir(vin: Option<&str>) -> Result<PathBuf, String> {
 /// This vehicle's folder, made if needed (the simulated vehicle has none).
 pub fn ensure(vin: &str) -> std::io::Result<PathBuf> {
     if vin == crate::sim::VIN {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "the simulated vehicle has no folder",
-        ));
+        return Err(std::io::Error::other("the simulated vehicle has no folder"));
     }
     let names = load();
     ensure_in(&library(), vin, names.get(vin).map(String::as_str))
