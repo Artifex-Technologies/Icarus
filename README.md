@@ -306,6 +306,10 @@ transmission modules, a CAN bus view, and a desktop app.
 - Flash or recode a module without a verified full backup first (the writes so far: actuator tests, clearing codes and
   module settings, each with the value before kept and a way back).
 
+## Version
+
+`VERSION` is Icarus's own version (1.0.0 since 2026-11-11, its first numbered release), for when it is packaged. How the numbers work and how to make a release: [Labyrinth_OS docs/VERSIONING.md](https://github.com/Artifex-Technologies/Labyrinth_OS/blob/main/docs/VERSIONING.md).
+
 ## Licence
 
 MPL-2.0, like the rest of the ecosystem. The reference projects I looked at are GPL or proprietary: Icarus takes ideas and
