@@ -12,6 +12,9 @@ use icarus_obd::{dtc, garage, j1979, learning, report, uds, vehicles};
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 
+/// Icarus's own version: the VERSION file at the top of the repository, read when this is built (Labyrinth_OS's docs/VERSIONING.md).
+const VERSION: &str = include_str!("../../../VERSION").trim_ascii();
+
 fn tool_list() -> Value {
     json!([
         {
@@ -353,7 +356,7 @@ pub fn handle(msg: &Value) -> Option<Value> {
                 .pointer("/params/protocolVersion")
                 .and_then(|v| v.as_str())
                 .unwrap_or("2024-11-05");
-            json!({"protocolVersion": version, "capabilities": {"tools": {}}, "serverInfo": {"name": "icarus", "version": env!("CARGO_PKG_VERSION")}})
+            json!({"protocolVersion": version, "capabilities": {"tools": {}}, "serverInfo": {"name": "icarus", "version": VERSION}})
         }
         "ping" => json!({}),
         "tools/list" => json!({"tools": tool_list()}),
@@ -439,6 +442,11 @@ mod tests {
     fn a_session() {
         let init = handle(&json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"protocolVersion": "2025-03-26"}})).unwrap();
         assert_eq!(init["result"]["protocolVersion"], "2025-03-26");
+        assert_eq!(
+            init["result"]["serverInfo"]["version"],
+            include_str!("../../../VERSION").trim(),
+            "Icarus's VERSION"
+        );
         assert!(
             handle(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"})).is_none(),
             "no answer to a notification"
