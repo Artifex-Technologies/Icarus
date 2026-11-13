@@ -1411,8 +1411,10 @@ fn cmd_bus(a: &[String]) -> Result<(), String> {
             "usage: icarus bus watch (--adapter A | --can can0) [--seconds N] [--raw]".into(),
         );
     }
-    let args = parse_args(&a[1..], &["adapter", "can", "seconds"])?;
+    // --raw is a switch of its own: taken out before the options are read (parse_args refused it as unknown, so it never worked)
     let raw = a.iter().any(|x| x == "--raw");
+    let rest: Vec<String> = a[1..].iter().filter(|x| *x != "--raw").cloned().collect();
+    let args = parse_args(&rest, &["adapter", "can", "seconds"])?;
     let secs: f64 = args
         .opt("seconds")
         .map(|v| v.parse().map_err(|_| "--seconds needs a number"))
