@@ -2,6 +2,8 @@
 //! as dealer tools show them), live values with graphs, actuator tests, module settings, learning from another tool, the
 //! bus, and maps from an image and a definition (with what a tune changed). Yggdrasil's look (yggdrasil-ui).
 
+mod autoconn;
+mod single;
 mod worker;
 
 use eframe::egui::{self, vec2, Color32, CornerRadius, Margin, RichText, Sense, Stroke};
@@ -248,6 +250,13 @@ struct App {
     page: Page,
     tx: Sender<Cmd>,
     rx: Receiver<Event>,
+    /// Connect by itself, and again whenever the adapter answers once more (a real adapter is known; autoconn.rs).
+    auto: bool,
+    /// Disconnect was pressed: no more tries until Connect is.
+    user_off: bool,
+    last_try: std::time::Instant,
+    /// What a later `icarus-app ...` handed over (single.rs).
+    handed: Receiver<Vec<String>>,
     adapter: String,
     link: Link,
     status: String,
@@ -272,6 +281,20 @@ impl App {
         let (wtx, rx) = channel();
         let c = ctx.clone();
         std::thread::spawn(move || worker::run(wrx, wtx, move || c.request_repaint()));
+        // the adapter: the one named, the one that last worked, or a paired Bluetooth OBD adapter (autoconn.rs)
+        let chosen = autoconn::choose_here(
+            start
+                .adapter
+                .clone()
+                .or_else(|| std::env::var("ICARUS_ADAPTER").ok()),
+        );
+        // later starts hand their arguments over here (single.rs)
+        let (handed_tx, handed_rx) = channel::<Vec<String>>();
+        let c2 = ctx.clone();
+        single::listen(move |args| {
+            let _ = handed_tx.send(args);
+            c2.request_repaint();
+        });
         let mut app = App {
             name_edit: String::new(),
             report_all: true,
@@ -320,11 +343,11 @@ impl App {
             page: start.page.unwrap_or(Page::Vehicle),
             tx,
             rx,
-            adapter: start
-                .adapter
-                .clone()
-                .or_else(|| std::env::var("ICARUS_ADAPTER").ok())
-                .unwrap_or_else(|| "sim".into()),
+            adapter: chosen.0.clone(),
+            auto: chosen.1,
+            user_off: false,
+            last_try: std::time::Instant::now(),
+            handed: handed_rx,
             link: Link::Off,
             status: "Not connected.".into(),
             error: None,
@@ -382,11 +405,51 @@ impl App {
                 }
             }
         }
-        if app.start.connect {
+        // a real adapter known (named, the last one that worked, or a paired Bluetooth OBD adapter): connect at once
+        if app.start.connect || app.auto {
             app.link = Link::Busy;
+            app.last_try = std::time::Instant::now();
             let _ = app.tx.send(Cmd::Connect(app.adapter.trim().to_string()));
         }
         app
+    }
+
+    /// While a known adapter does not answer (asleep with the engine off), try again every few seconds.
+    fn keep_trying(&mut self, ctx: &egui::Context) {
+        if !self.auto || self.user_off || self.link != Link::Off {
+            return;
+        }
+        if self.last_try.elapsed() >= autoconn::RETRY {
+            self.last_try = std::time::Instant::now();
+            self.link = Link::Busy;
+            let _ = self.tx.send(Cmd::Connect(self.adapter.trim().to_string()));
+        }
+        ctx.request_repaint_after(std::time::Duration::from_secs(1));
+    }
+
+    /// A later `icarus-app ARGS`: its page, and its adapter (connecting to it when asked), then to the front.
+    fn take_handed(&mut self, ctx: &egui::Context) {
+        while let Ok(args) = self.handed.try_recv() {
+            if let Ok(st) = Start::parse(&args) {
+                if let Some(p) = st.page {
+                    self.page = p;
+                }
+                if let Some(a) = st
+                    .adapter
+                    .filter(|a| *a != self.adapter && self.link == Link::Off)
+                {
+                    self.adapter = a;
+                }
+                if st.connect && self.link == Link::Off {
+                    self.user_off = false;
+                    self.auto = self.adapter.trim() != "sim";
+                    self.link = Link::Busy;
+                    self.last_try = std::time::Instant::now();
+                    let _ = self.tx.send(Cmd::Connect(self.adapter.trim().to_string()));
+                }
+            }
+            single::raise(ctx);
+        }
     }
 
     fn background(&mut self) {
@@ -433,6 +496,9 @@ impl App {
                 Event::Status(s) => self.status = s,
                 Event::Connected(info) => {
                     self.link = Link::On;
+                    // the adapter to start with next time, and to come back to when it answers again
+                    autoconn::remember(self.adapter.trim());
+                    self.auto = self.adapter.trim() != "sim";
                     self.error = None;
                     self.status = "Connected.".into();
                     self.chosen.retain(|p| info.live.contains(p));
@@ -495,8 +561,17 @@ impl App {
                     }
                     self.scanning = false;
                     self.live_on = false;
-                    self.status = "Something went wrong.".into();
-                    self.error = Some(m);
+                    if self.auto && !self.user_off {
+                        // asleep or out of reach: say so, and try again shortly (keep_trying)
+                        self.status = format!(
+                            "Waiting for the adapter ({}): start the engine, or switch the ignition on and press its button.",
+                            self.adapter.trim()
+                        );
+                        self.error = None;
+                    } else {
+                        self.status = "Something went wrong.".into();
+                        self.error = Some(m);
+                    }
                 }
                 Event::Disconnected => {
                     self.link = Link::Off;
@@ -593,6 +668,9 @@ impl App {
                     if ui.button("Connect").clicked() {
                         self.link = Link::Busy;
                         self.error = None;
+                        self.user_off = false;
+                        self.auto = self.adapter.trim() != "sim";
+                        self.last_try = std::time::Instant::now();
                         let _ = self.tx.send(Cmd::Connect(self.adapter.trim().to_string()));
                     }
                 }
@@ -601,6 +679,7 @@ impl App {
                 }
                 Link::On => {
                     if ui.button("Disconnect").clicked() {
+                        self.user_off = true;
                         let _ = self.tx.send(Cmd::Disconnect);
                     }
                 }
@@ -2831,6 +2910,8 @@ impl eframe::App for App {
         theme::apply(&ctx, dark, accent);
         let pal = theme::palette_for(dark, accent);
         self.events();
+        self.take_handed(&ctx);
+        self.keep_trying(&ctx);
         if let Some(at) = self.learn_stop_at {
             if std::time::Instant::now() >= at {
                 self.learn_stop_at = None;
@@ -3083,7 +3164,12 @@ impl LearnSetting {
 }
 
 fn main() -> eframe::Result {
-    let start = match Start::parse(&std::env::args().skip(1).collect::<Vec<_>>()) {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    // one Icarus at a time: an open one takes these arguments and comes to the front
+    if single::hand_over(&args) {
+        return Ok(());
+    }
+    let start = match Start::parse(&args) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("icarus-app: {e}\nusage: icarus-app [--connect] [--adapter A] [--page vehicle|modules|live|tests|settings|learning|bus|maps|garage|tools] [--scan] [--live] [--learn [--mark TEXT] [--learn-seconds N]] [--maps DEF.xdf IMAGE.bin [SECOND.bin]] [--map NAME [--cell R,C]]");
