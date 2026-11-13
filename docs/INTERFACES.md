@@ -46,7 +46,8 @@ The udev rule `packaging/70-icarus-tuners.rules` lets the person at the computer
 | FTDI and CP210x cables (ELM327, OBDLink SX/EX) | `0403:6001`, `0403:6015`, `10c4:ea60` | serial | serial | standard IDs |
 
 `icarus devices` lists what of this is plugged in and whether this user may open it (the udev rule in
-`packaging/70-icarus-tuners.rules` gives the person at the seat each of these; `bash scripts/install-local.sh --udev`). It
+`packaging/70-icarus-tuners.rules` gives the person at the seat each of these; the icarus-git package installs it, and
+`bash scripts/install-local.sh --udev` does for a checkout). It
 sends nothing to any device. Speaking each device's own protocol is the next step, device by device.
 
 ## SCT X4 (7015) — Ford

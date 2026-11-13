@@ -221,14 +221,15 @@ impl Found {
                     format!("ready: {}", p.display())
                 } else {
                     format!(
-                        "{} is there but not yours to open: bash scripts/install-local.sh --udev",
+                        "{} is there but not yours to open: install the icarus-git package (its udev rule), then plug it in again",
                         p.display()
                     )
                 }
             }
             Access::RawUsb if can_open(&self.node) => "ready: Icarus can open it (raw USB)".into(),
             Access::RawUsb => {
-                "plugged in, but not yours to open: bash scripts/install-local.sh --udev".into()
+                "plugged in, but not yours to open: install the icarus-git package (its udev rule), then plug it in again"
+                    .into()
             }
         }
     }
@@ -382,7 +383,7 @@ mod tests {
         );
         assert_eq!(sct.node, PathBuf::from("/dev/bus/usb/001/008"));
         assert_eq!(sct.status(|_| true), "ready: Icarus can open it (raw USB)");
-        assert!(sct.status(|_| false).contains("--udev"));
+        assert!(sct.status(|_| false).contains("udev rule"));
         let cp = &found[1];
         assert_eq!(cp.ports, vec!["ttyUSB0"]);
         assert_eq!(cp.status(|_| true), "ready: /dev/ttyUSB0");

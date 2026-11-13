@@ -4,7 +4,8 @@ A vehicle tuning, learning and diagnostics tool for Linux: engine, transmission 
 TCM). I'm building it to learn vehicle electronics hands-on while I build two off-road vehicles, and because no open tool on
 Linux tunes factory ECUs.
 
-Part of the Artifex ecosystem (Labyrinth OS, Yggdrasil, Heimdall, Sarina, Daedalus...). This repository is private.
+Part of the Artifex ecosystem (Labyrinth OS, Yggdrasil, Heimdall, Sarina, Daedalus...). Licensed MPL-2.0. Nothing from a real
+vehicle is ever in this repository: no VIN, ECU image, calibration or log (the VINs in the tests are made up).
 
 ## Screenshots
 
@@ -28,20 +29,34 @@ three-feather wing sweeping back from the hub: Icarus' wings on a vehicle. I pic
 ([docs/icon-concepts.jpg](docs/icon-concepts.jpg), the top-middle one, kept for reference only); the icon is drawn from
 scratch, not traced. No text and no background art, so it stays clear at 16 px.
 
-- `packaging/icons/liki-native/icarus.svg`: the glyph in Liki's native form (24x24, fills only, no colour; `liki-build` gives
-  it the tile, the style and the accent colour). It is not in Liki: Yggdrasil's repository is public and Icarus isn't.
+- The glyph in Liki's native form (24x24, fills only, no colour; `liki-build` gives it the tile, the style and the accent
+  colour) is in Liki itself, as Yggdrasil's own apps' are: Yggdrasil `packages/liki/share/brand-icons/native/icarus.svg`.
 - `packaging/icons/icarus.svg`: the app's own icon in Yggdrasil's look, the glyph in the default accent (124, 84, 214) on the
-  dark rounded tile, exactly what Liki's `rounded` shape and `purple` style would make. `install-local.sh` puts it and the
-  PNGs (`packaging/icons/NxN/icarus.png`, 16 to 512) in hicolor; `icarus.desktop` names `Icon=icarus`, and the window
+  dark rounded tile, exactly what Liki's `rounded` shape and `purple` style would make. The package (and `install-local.sh`)
+  puts it and the PNGs (`packaging/icons/NxN/icarus.png`, 16 to 512) in hicolor; `icarus.desktop` names `Icon=icarus`, and the window
   carries the 256 px one.
 - Every shape and style, and the small sizes: [docs/icon-preview.png](docs/icon-preview.png).
 
 The PNGs are made from the SVG: `rsvg-convert -w N -h N packaging/icons/icarus.svg -o packaging/icons/NxN/icarus.png`.
 
-## Install (on my machines)
+## Install
+
+Icarus is in Agora (Labyrinth OS's app store, under Utilities), or from Labyrinth's package repository:
 
 ```sh
-bash scripts/install-local.sh        # builds, puts icarus and icarus-app in ~/.local/bin, Icarus in the app menu
+sudo pacman -S icarus-git
+```
+
+The package (its recipe is Labyrinth_OS `packages/pkgbuilds/icarus-git`) builds this repository, runs `cargo test
+--workspace`, and installs `icarus` and `icarus-app` in `/usr/bin`, Icarus in the app menu with its icon, and the tuner
+access rules (`packaging/70-icarus-tuners.rules`, in `/usr/lib/udev/rules.d`). Updates come with the system's, through Agora
+or pacman.
+
+To try a checkout without the package:
+
+```sh
+bash scripts/install-local.sh            # builds, puts icarus and icarus-app in ~/.local/bin, Icarus in the app menu
+bash scripts/install-local.sh --remove   # takes that out again (do this before installing the package: ~/.local/bin comes first)
 ```
 
 ## Trouble codes

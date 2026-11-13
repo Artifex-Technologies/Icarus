@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Builds Icarus and installs it for this account: `icarus` (command line) and `icarus-app` (the window) in ~/.local/bin, and
-# Icarus in the app menu with its icon (hicolor). Icarus is private, so it is installed from this checkout, not from a
-# package repository.
+# Builds Icarus from this checkout and installs it for this account, to try a change: `icarus` (command line) and `icarus-app`
+# (the window) in ~/.local/bin, and Icarus in the app menu with its icon (hicolor). The normal install is the package
+# (`icarus-git`, from Agora or Labyrinth's package repository); ~/.local/bin comes first in PATH, so --remove this copy
+# before relying on the package.
 #   bash scripts/install-local.sh            build and install
 #   bash scripts/install-local.sh --remove   take it out again
 #   bash scripts/install-local.sh --udev     also let the person at the computer open tuners with no Linux driver (needs sudo once:
