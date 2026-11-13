@@ -3090,13 +3090,20 @@ fn main() -> eframe::Result {
             std::process::exit(2);
         }
     };
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([1180.0, 760.0])
+        .with_min_inner_size([760.0, 480.0])
+        .with_title("Icarus")
+        .with_app_id("icarus")
+        .with_decorations(false);
+    // the window's own icon (where the desktop takes it from the window rather than from icarus.desktop)
+    if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!(
+        "../../../packaging/icons/256x256/icarus.png"
+    )) {
+        viewport = viewport.with_icon(icon);
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1180.0, 760.0])
-            .with_min_inner_size([760.0, 480.0])
-            .with_title("Icarus")
-            .with_app_id("icarus")
-            .with_decorations(false),
+        viewport,
         ..Default::default()
     };
     eframe::run_native(

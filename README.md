@@ -21,6 +21,23 @@ Maps shows, compares and edits tables (fuel, spark, limits): click a cell, type 
 new file (never over the original), its checksums corrected where they are known. Writing an image to an ECU comes only after
 the rules in docs/PLAN.md, on a bench ECU first.
 
+## Icon
+
+<img src="packaging/icons/128x128/icarus.png" width="64" alt="Icarus icon"> A wheel seen side-on (tyre, rim, hub) with a
+three-feather wing sweeping back from the hub: Icarus' wings on a vehicle. I picked it from AI-generated concepts
+([docs/icon-concepts.jpg](docs/icon-concepts.jpg), the top-middle one, kept for reference only); the icon is drawn from
+scratch, not traced. No text and no background art, so it stays clear at 16 px.
+
+- `packaging/icons/liki-native/icarus.svg`: the glyph in Liki's native form (24x24, fills only, no colour; `liki-build` gives
+  it the tile, the style and the accent colour). It is not in Liki: Yggdrasil's repository is public and Icarus isn't.
+- `packaging/icons/icarus.svg`: the app's own icon in Yggdrasil's look, the glyph in the default accent (124, 84, 214) on the
+  dark rounded tile, exactly what Liki's `rounded` shape and `purple` style would make. `install-local.sh` puts it and the
+  PNGs (`packaging/icons/NxN/icarus.png`, 16 to 512) in hicolor; `icarus.desktop` names `Icon=icarus`, and the window
+  carries the 256 px one.
+- Every shape and style, and the small sizes: [docs/icon-preview.png](docs/icon-preview.png).
+
+The PNGs are made from the SVG: `rsvg-convert -w N -h N packaging/icons/icarus.svg -o packaging/icons/NxN/icarus.png`.
+
 ## Install (on my machines)
 
 ```sh
