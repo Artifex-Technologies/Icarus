@@ -164,6 +164,9 @@ pub struct Elm {
     pub voltage: Option<f64>,
     /// The one module requests go to (request ID, answer ID), or None: OBD's broadcast to every module (7DF).
     target: Option<(u16, u16)>,
+    /// CAN auto-formatting is off (`ATCAF0`, for watching the bus): it goes back on (`ATCAF1`) before the next request,
+    /// which needs the adapter to add and strip ISO-TP's length bytes.
+    raw_frames: bool,
 }
 
 const LINE_ERRORS: [&str; 12] = [
@@ -191,6 +194,7 @@ impl Elm {
             protocol: Protocol::Other(0),
             voltage: None,
             target: None,
+            raw_frames: false,
         };
         let reset = elm.command("ATZ", Duration::from_secs(4))?;
         elm.id = reset
@@ -273,6 +277,7 @@ impl Elm {
 
     /// Sends an OBD request (e.g. `[0x01, 0x0C]`, engine speed) to every module and returns each one's answer.
     pub fn request(&mut self, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
+        self.format_frames()?;
         if self.target.is_some() {
             self.ok_commands(&["ATSH7DF", "ATCRA", "ATFCSM0"])?;
             self.target = None;
@@ -294,6 +299,7 @@ impl Elm {
                 "{tx:X}/{rx:X} are not 11-bit CAN IDs"
             )));
         }
+        self.format_frames()?;
         if self.target != Some((tx, rx)) {
             let (sh, cra, fc) = (
                 format!("ATSH{tx:03X}"),
@@ -308,11 +314,70 @@ impl Elm {
 
     /// Watches every frame on the bus (STMA on an STN chip, else ATMA), handing each line to `each` until it returns false or
     /// the adapter stops by itself (its buffer full, for one). Returns how it ended. Nothing is sent onto the bus.
-    pub fn monitor(&mut self, mut each: impl FnMut(&str) -> bool) -> Result<String, ObdError> {
+    ///
+    /// Settings change for the watch, and auto-formatting is put back afterwards:
+    /// - `ATCSM1`, silent monitoring: the adapter neither acknowledges frames nor sends anything while it watches. It is the
+    ///   default on ELM327 v1.4 and later and on STN chips (OBDLink), and nothing in Icarus turns it off; it is said again
+    ///   so a setting left by another program cannot make the adapter take part in the bus. An adapter that does not know
+    ///   the command (an ELM327 before v1.4, many clones) may acknowledge frames while it watches, so Icarus does not watch
+    ///   through it.
+    /// - `STCMM0`, on an STN chip only: the STN's own CAN monitoring mode, receive-only (1 would make it a normal node that
+    ///   acknowledges frames). STMA is the STN's monitor command, and it is not certain that `ATCSM1` alone governs it, so
+    ///   both are said, and both must answer OK before anything is watched.
+    /// - `ATCAF0`, CAN auto-formatting off: with it on, the adapter reads every frame as an ISO-TP message and cuts any
+    ///   whose first byte is 01-07 to that length, so most of the bus's ordinary frames (an engine-speed frame "2C4 03 1A
+    ///   F8 00 1C 00 00 00") lost their last bytes. Off, each frame shows whole. It goes back on (`ATCAF1`) when the watch
+    ///   ends, and, if that fails, before the next request, since requests need it.
+    ///
+    /// An OK to `ATCSM1` or `STCMM0` proves only that the adapter accepted the command, not that it obeys it: a clone that
+    /// answers OK to everything can still acknowledge frames while it watches.
+    ///
+    /// Only the adapter refusing `ATCSM1` or `STCMM0` is reported as an adapter that cannot stay silent; a timeout or a lost
+    /// link comes back as itself. If the watch went well but `ATCAF1` failed, the watch's result comes back, saying that
+    /// auto-formatting goes back on before the next request (it stays pending until it does).
+    pub fn monitor(&mut self, each: impl FnMut(&str) -> bool) -> Result<String, ObdError> {
         if self.target.is_some() {
             self.ok_commands(&["ATSH7DF", "ATCRA", "ATFCSM0"])?;
             self.target = None;
         }
+        let silent: &[&str] = if self.stn.is_some() {
+            &["ATCSM1", "STCMM0"]
+        } else {
+            &["ATCSM1"]
+        };
+        self.ok_commands(silent).map_err(|e| match e {
+            ObdError::Adapter(why) => ObdError::Adapter(format!(
+                "this adapter cannot promise to stay silent on the bus while it watches ({why}); \
+                 an ELM327 v1.4 or later, or an OBDLink, can"
+            )),
+            other => other,
+        })?;
+        self.raw_frames = true;
+        let watched = self
+            .ok_commands(&["ATCAF0"])
+            .and_then(|()| self.watch(each));
+        // put back whatever happened to the watch; on failure `raw_frames` stays set and the next request tries again
+        match (watched, self.format_frames()) {
+            (Err(e), _) => Err(e),
+            (Ok(how), Ok(())) => Ok(how),
+            (Ok(how), Err(e)) => Ok(format!(
+                "{how}; CAN auto-formatting could not be turned back on yet ({e}), so it goes back on before the next request"
+            )),
+        }
+    }
+
+    /// Turns CAN auto-formatting back on after a watch (`ATCAF1`), when it is off.
+    fn format_frames(&mut self) -> Result<(), ObdError> {
+        if self.raw_frames {
+            self.ok_commands(&["ATCAF1"])?;
+            self.raw_frames = false;
+        }
+        Ok(())
+    }
+
+    /// Monitor mode itself: the command, then lines until `each` says stop or the adapter stops by itself. The only byte
+    /// sent after the command is the one that ends monitoring, which the adapter does not put on the bus.
+    fn watch(&mut self, mut each: impl FnMut(&str) -> bool) -> Result<String, ObdError> {
         let cmd = if self.stn.is_some() { "STMA" } else { "ATMA" };
         let mut junk = [0u8; 256];
         while self.port.recv(&mut junk, Duration::ZERO)? > 0 {}

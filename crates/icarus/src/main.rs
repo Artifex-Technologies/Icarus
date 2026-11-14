@@ -39,7 +39,8 @@ Vehicle, through an OBD adapter (read-only: nothing is cleared or written):
   icarus obd scan  --adapter A [--make NAME] [--sweep]
                                              find every module (ABS, airbags, cluster...): identity and trouble codes,
                                              as dealer tools do. The make comes from the VIN (or --make, see icarus
-                                             vehicles); --sweep tries every ID from 700 to 7F7 (slower)
+                                             vehicles); --sweep tries every request ID from 700 to 7F7 (slower;
+                                             never 7DF or a known answer ID such as 7E8-7EF)
   icarus obd module ID[/ANSWER] --adapter A  one module (request ID in hex, e.g. 7B0, or 713/77D): identity and codes
 
 Bus (watching only: nothing is sent onto the bus):
@@ -668,7 +669,7 @@ fn obd_scan(elm: &mut Elm, args: &Args) -> Result<(), String> {
         }
     };
     let list = if args.opt("sweep").is_some() {
-        uds::sweep()
+        uds::sweep(&all)
     } else {
         vehicles::candidates(&profile)
     };
@@ -685,12 +686,13 @@ fn obd_scan(elm: &mut Elm, args: &Args) -> Result<(), String> {
     }
     eprintln!("looking at {} addresses...", list.len());
     let (mut found, mut later) = (0, Vec::new());
+    let mut guard = uds::ScanGuard::default();
     for m in &list {
         if let Some(why) = m.unreachable() {
             later.push(format!("{:03X}  {}: {why}", m.tx, m.name));
             continue;
         }
-        if uds::present(elm, m.tx, m.rx()).map_err(e)? {
+        if guard.present(elm, m).map_err(e)? {
             found += 1;
             print_module(elm, m)?;
         }

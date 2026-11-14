@@ -35,6 +35,20 @@ pub struct SimCar {
     monitoring: Option<u64>,
     /// Module settings (`sim::settings`): (module, identifier) -> value.
     settings: std::collections::HashMap<(u16, u16), Vec<u8>>,
+    /// CAN auto-formatting (ATCAF, on by default): requests get ISO-TP's length byte added, and in monitor mode a frame whose
+    /// first byte is 01-07 is read as an ISO-TP single frame and cut to that length, as a real adapter does.
+    caf: bool,
+    /// Silent monitoring (ATCSM, on by default): off, a real adapter would acknowledge every frame it watches.
+    csm: bool,
+    /// The adapter has an STN chip (an OBDLink): it answers STI, and has its own CAN monitoring mode (STCMM).
+    stn: bool,
+    /// The STN chip's CAN monitoring mode (STCMM): 0 receive-only (its default), 1 a normal node that acknowledges frames.
+    cmm: u8,
+    /// Silent monitoring is off when the adapter starts and after every ATZ (ATCSM0, and STCMM1 on an STN chip), as another
+    /// program could have left it: only Icarus asking for it can make the adapter watch silently.
+    loud: bool,
+    /// The adapter watched the bus while not silent: it would have acknowledged frames.
+    pub acked: bool,
 }
 
 impl Default for SimCar {
@@ -69,6 +83,36 @@ impl SimCar {
             settings: [((0x7C0, 0xA001), vec![0x01]), ((0x7B0, 0x20), vec![0x00])]
                 .into_iter()
                 .collect(),
+            caf: true,
+            csm: true,
+            stn: false,
+            cmm: 0,
+            loud: false,
+            acked: false,
+        }
+    }
+
+    /// An adapter whose silent monitoring is off (see `loud`), with an STN chip when `stn`.
+    #[cfg(test)]
+    pub(crate) fn loud(stn: bool) -> SimCar {
+        SimCar {
+            csm: false,
+            cmm: 1,
+            stn,
+            loud: true,
+            ..SimCar::new()
+        }
+    }
+
+    /// A monitor-mode line as the adapter prints it: with auto-formatting on, a frame whose first byte is 01-07 is taken for
+    /// an ISO-TP single frame and only that many bytes after it are shown.
+    fn monitored(&self, line: &str) -> String {
+        let toks: Vec<&str> = line.split_whitespace().collect();
+        match toks.get(1).and_then(|t| u8::from_str_radix(t, 16).ok()) {
+            Some(len @ 1..=7) if self.caf && toks.len() > 2 + len as usize => {
+                toks[..2 + len as usize].join(" ")
+            }
+            _ => line.to_string(),
         }
     }
 
@@ -585,6 +629,7 @@ impl SimCar {
         let reply: Vec<String> = match c.as_str() {
             "ATZ" => {
                 (self.echo, self.headers, self.spaces) = (true, false, true);
+                (self.caf, self.csm, self.cmm) = (true, !self.loud, u8::from(self.loud));
                 (self.header, self.filter) = (0x7DF, None);
                 vec!["".into(), "ELM327 v1.5".into()]
             }
@@ -603,8 +648,26 @@ impl SimCar {
             }
             "ATDPN" => vec!["A6".into()],
             "ATMA" | "STMA" => {
+                if c == "STMA" && !self.stn {
+                    self.say(&["?".to_string()]);
+                    return;
+                }
                 self.monitoring = Some(0);
+                self.acked |= !self.csm || (self.stn && self.cmm != 0);
                 return;
+            }
+            "STI" if self.stn => vec!["STN2255 v5.10.3".into()],
+            "STCMM0" | "STCMM1" if self.stn => {
+                self.cmm = u8::from(c.ends_with('1'));
+                ok
+            }
+            "ATCAF0" | "ATCAF1" => {
+                self.caf = c.ends_with('1');
+                ok
+            }
+            "ATCSM0" | "ATCSM1" => {
+                self.csm = c.ends_with('1');
+                ok
             }
             "ATCRA" => {
                 self.filter = None;
@@ -643,7 +706,15 @@ impl SimCar {
                     .step_by(2)
                     .map(|i| u8::from_str_radix(&c[i..i + 2], 16).unwrap())
                     .collect();
-                self.answer(&req)
+                if self.caf {
+                    self.answer(&req)
+                } else {
+                    // auto-formatting off: the bytes go out as the whole frame, so the first is read as ISO-TP's length
+                    match req.first().map(|&b| b as usize) {
+                        Some(len @ 1..=7) if req.len() > len => self.answer(&req[1..1 + len]),
+                        _ => vec!["NO DATA".into()],
+                    }
+                }
             }
             _ => vec!["?".into()],
         };
@@ -675,6 +746,7 @@ impl Port for SimCar {
             if self.output.len() < 4096 {
                 std::thread::sleep(Duration::from_millis(5));
                 for line in self.bus_tick(t) {
+                    let line = self.monitored(&line);
                     self.output.extend(line.as_bytes());
                     self.output.push_back(b'\r');
                 }
@@ -869,6 +941,81 @@ pub fn tests() -> Vec<crate::actuator::TestDef> {
     ]
 }
 
+/// The simulated car behind a port that writes down everything sent to the adapter (one entry per send), for tests that
+/// check what Icarus puts on the wire.
+#[cfg(test)]
+pub(crate) mod recording {
+    use super::SimCar;
+    use crate::port::Port;
+    use std::io;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    pub(crate) struct Recorder {
+        car: SimCar,
+        sent: Arc<Mutex<Vec<String>>>,
+        /// A command this adapter does not know (it answers "?"), as an older or cloned adapter would.
+        pub unknown: Option<&'static str>,
+        /// `unknown` is refused only once, then passed on like any other command.
+        pub once: bool,
+        /// A command whose sending fails (the link to the adapter lost), with nothing reaching the adapter.
+        pub broken: Option<&'static str>,
+        pending: Vec<u8>,
+    }
+
+    impl Recorder {
+        /// The port and the log of what was sent. The entry "ACKED" marks the adapter watching the bus with silent
+        /// monitoring off, when it would have acknowledged frames.
+        pub(crate) fn new(car: SimCar) -> (Recorder, Arc<Mutex<Vec<String>>>) {
+            let sent = Arc::new(Mutex::new(Vec::new()));
+            let r = Recorder {
+                car,
+                sent: sent.clone(),
+                unknown: None,
+                once: false,
+                broken: None,
+                pending: Vec::new(),
+            };
+            (r, sent)
+        }
+    }
+
+    impl Port for Recorder {
+        fn send(&mut self, data: &[u8]) -> io::Result<()> {
+            let text = String::from_utf8_lossy(data).to_string();
+            self.sent.lock().unwrap().push(text.clone());
+            if self.broken.is_some_and(|c| text == format!("{c}\r")) {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "the adapter went away",
+                ));
+            }
+            if self.unknown.is_some_and(|c| text == format!("{c}\r")) {
+                if self.once {
+                    self.unknown = None;
+                }
+                self.pending.extend(b"?\r\r>");
+                return Ok(());
+            }
+            let r = self.car.send(data);
+            if std::mem::take(&mut self.car.acked) {
+                self.sent.lock().unwrap().push("ACKED".into());
+            }
+            r
+        }
+
+        fn recv(&mut self, buf: &mut [u8], timeout: Duration) -> io::Result<usize> {
+            if self.pending.is_empty() {
+                return self.car.recv(buf, timeout);
+            }
+            let n = buf.len().min(self.pending.len());
+            buf[..n].copy_from_slice(&self.pending[..n]);
+            self.pending.drain(..n);
+            Ok(n)
+        }
+    }
+}
+
 #[cfg(test)]
 mod monitor_tests {
     use super::*;
@@ -904,6 +1051,210 @@ mod monitor_tests {
             (vec![0x01], vec![0x00])
         );
         // the adapter answers normally afterwards
+        assert_eq!(crate::j1979::vin(&mut elm).unwrap().as_deref(), Some(VIN));
+    }
+
+    #[test]
+    fn with_auto_formatting_on_the_adapter_cuts_frames_short() {
+        // what a real adapter does in monitor mode when CAN auto-formatting is left on: the engine frame 2C4 starts 03 (the
+        // engine speed's high byte), so only 03 and three bytes after it show
+        let mut s = SimCar::new();
+        s.send(b"ATE0\rATMA\r").unwrap();
+        let mut text = Vec::new();
+        let mut b = [0u8; 4096];
+        for _ in 0..5 {
+            let n = s.recv(&mut b, Duration::ZERO).unwrap();
+            text.extend_from_slice(&b[..n]);
+        }
+        let text = String::from_utf8_lossy(&text);
+        let engine: Vec<&str> = text.split('\r').filter(|l| l.starts_with("2C4")).collect();
+        assert!(!engine.is_empty());
+        assert!(
+            engine.iter().all(|l| l.split_whitespace().count() == 1 + 4),
+            "{engine:?}"
+        );
+    }
+
+    #[test]
+    fn monitoring_shows_whole_frames_silently_and_puts_formatting_back() {
+        use crate::sim::recording::Recorder;
+        use std::collections::{BTreeMap, BTreeSet};
+        // this adapter starts, and comes back from ATZ, not silent: watching without ATCSM1 would acknowledge frames
+        let mut loud = SimCar::loud(false);
+        loud.send(b"ATZ\rATMA\r").unwrap();
+        assert!(loud.acked);
+        let (port, sent) = Recorder::new(SimCar::loud(false));
+        let mut elm = Elm::connect(Box::new(port)).unwrap();
+        sent.lock().unwrap().clear();
+        let mut lengths: BTreeMap<u32, BTreeSet<usize>> = BTreeMap::new();
+        let mut frames = 0;
+        let ended = elm
+            .monitor(|line| {
+                if let Some(f) = parse_line(line, elm_bus(), 0.0) {
+                    lengths.entry(f.id).or_default().insert(f.data.len());
+                    frames += 1;
+                }
+                frames < 300
+            })
+            .unwrap();
+        assert_eq!(ended, "stopped");
+        // 2C4 starts 03 and 3B7 starts 01: with auto-formatting on they came out 4 and 2 bytes long
+        assert_eq!(lengths[&0x2C4], BTreeSet::from([8]), "{lengths:?}");
+        assert_eq!(lengths[&0x3B7], BTreeSet::from([5]), "{lengths:?}");
+        let log = sent.lock().unwrap().clone();
+        let at = |c: &str| {
+            log.iter()
+                .position(|l| *l == format!("{c}\r"))
+                .unwrap_or_else(|| panic!("{c} was not sent: {log:?}"))
+        };
+        assert!(
+            at("ATCSM1") < at("ATMA") && at("ATCAF0") < at("ATMA"),
+            "{log:?}"
+        );
+        assert_eq!(
+            &log[at("ATMA") + 1..at("ATCAF1")],
+            &["\r".to_string()],
+            "while watching, only the byte that ends monitoring is sent: {log:?}"
+        );
+        assert!(
+            !log.iter().any(|l| l == "ACKED"),
+            "after ATCSM1 the adapter watched silently: {log:?}"
+        );
+        // requests need auto-formatting back on
+        assert_eq!(crate::j1979::vin(&mut elm).unwrap().as_deref(), Some(VIN));
+    }
+
+    /// What was sent to the adapter, and the position of the first `cmd` in it.
+    fn position(log: &[String], cmd: &str) -> Option<usize> {
+        log.iter().position(|l| *l == format!("{cmd}\r"))
+    }
+
+    #[test]
+    fn an_obdlink_watches_in_receive_only_mode() {
+        use crate::sim::recording::Recorder;
+        // with ATCSM1 alone, an STN chip left in STCMM1 would still acknowledge frames
+        let mut loud = SimCar::loud(true);
+        loud.send(b"ATZ\rATCSM1\rSTMA\r").unwrap();
+        assert!(loud.acked);
+        let (port, sent) = Recorder::new(SimCar::loud(true));
+        let mut elm = Elm::connect(Box::new(port)).unwrap();
+        assert!(elm.stn.is_some());
+        sent.lock().unwrap().clear();
+        let mut frames = 0;
+        let ended = elm
+            .monitor(|line| {
+                frames += usize::from(!line.is_empty());
+                frames < 100
+            })
+            .unwrap();
+        assert_eq!(ended, "stopped");
+        let log = sent.lock().unwrap().clone();
+        let at = |c: &str| position(&log, c).unwrap_or_else(|| panic!("{c} was not sent: {log:?}"));
+        assert!(
+            at("ATCSM1") < at("STMA") && at("STCMM0") < at("STMA"),
+            "{log:?}"
+        );
+        assert!(position(&log, "ATMA").is_none(), "{log:?}");
+        assert!(!log.iter().any(|l| l == "ACKED"), "{log:?}");
+        assert_eq!(crate::j1979::vin(&mut elm).unwrap().as_deref(), Some(VIN));
+    }
+
+    #[test]
+    fn an_obdlink_that_refuses_receive_only_mode_does_not_watch() {
+        use crate::sim::recording::Recorder;
+        let (mut port, sent) = Recorder::new(SimCar::loud(true));
+        port.unknown = Some("STCMM0");
+        let mut elm = Elm::connect(Box::new(port)).unwrap();
+        sent.lock().unwrap().clear();
+        let e = elm.monitor(|_| false).unwrap_err().to_string();
+        assert!(e.contains("silent") && e.contains("STCMM0"), "{e}");
+        let log = sent.lock().unwrap().clone();
+        assert!(
+            position(&log, "STMA").is_none() && position(&log, "ATCAF0").is_none(),
+            "{log:?}"
+        );
+        assert_eq!(crate::j1979::vin(&mut elm).unwrap().as_deref(), Some(VIN));
+    }
+
+    #[test]
+    fn a_lost_link_is_not_blamed_on_silent_monitoring() {
+        use crate::sim::recording::Recorder;
+        let (mut port, sent) = Recorder::new(SimCar::new());
+        port.broken = Some("ATCSM1");
+        let mut elm = Elm::connect(Box::new(port)).unwrap();
+        sent.lock().unwrap().clear();
+        let e = elm.monitor(|_| false).unwrap_err();
+        assert!(matches!(e, crate::elm::ObdError::Io(_)), "{e}");
+        assert!(!e.to_string().contains("silent"), "{e}");
+        let log = sent.lock().unwrap().clone();
+        assert!(
+            position(&log, "ATMA").is_none() && position(&log, "ATCAF0").is_none(),
+            "{log:?}"
+        );
+    }
+
+    #[test]
+    fn a_refused_atcaf0_still_puts_formatting_back() {
+        use crate::sim::recording::Recorder;
+        let (mut port, sent) = Recorder::new(SimCar::new());
+        port.unknown = Some("ATCAF0");
+        let mut elm = Elm::connect(Box::new(port)).unwrap();
+        sent.lock().unwrap().clear();
+        let e = elm.monitor(|_| false).unwrap_err().to_string();
+        assert!(e.contains("ATCAF0") && !e.contains("silent"), "{e}");
+        let log = sent.lock().unwrap().clone();
+        assert!(position(&log, "ATMA").is_none(), "{log:?}");
+        let (caf0, caf1) = (position(&log, "ATCAF0"), position(&log, "ATCAF1"));
+        assert!(caf0.is_some() && caf1 > caf0, "{log:?}");
+        assert_eq!(crate::j1979::vin(&mut elm).unwrap().as_deref(), Some(VIN));
+    }
+
+    #[test]
+    fn a_failed_restore_keeps_the_watch_and_is_retried_before_the_next_request() {
+        use crate::sim::recording::Recorder;
+        let (mut port, sent) = Recorder::new(SimCar::new());
+        (port.unknown, port.once) = (Some("ATCAF1"), true);
+        let mut elm = Elm::connect(Box::new(port)).unwrap();
+        sent.lock().unwrap().clear();
+        let mut frames = 0;
+        let ended = elm
+            .monitor(|line| {
+                frames += usize::from(!line.is_empty());
+                frames < 100
+            })
+            .unwrap();
+        assert!(
+            ended.starts_with("stopped") && ended.contains("before the next request"),
+            "{ended}"
+        );
+        assert!(position(&sent.lock().unwrap(), "ATCAF1").is_some());
+        // auto-formatting is still off in the adapter; the next request puts it back first, before any header or data
+        sent.lock().unwrap().clear();
+        assert!(crate::uds::present(&mut elm, 0x7B0, 0x7B8).unwrap());
+        let log = sent.lock().unwrap().clone();
+        assert_eq!(log.first().map(String::as_str), Some("ATCAF1\r"), "{log:?}");
+        assert_eq!(
+            log.iter().filter(|l| *l == "ATCAF1\r").count(),
+            1,
+            "{log:?}"
+        );
+        assert_eq!(crate::j1979::vin(&mut elm).unwrap().as_deref(), Some(VIN));
+    }
+
+    #[test]
+    fn an_adapter_that_cannot_stay_silent_does_not_watch() {
+        use crate::sim::recording::Recorder;
+        let (mut port, sent) = Recorder::new(SimCar::new());
+        port.unknown = Some("ATCSM1");
+        let mut elm = Elm::connect(Box::new(port)).unwrap();
+        sent.lock().unwrap().clear();
+        let e = elm.monitor(|_| false).unwrap_err().to_string();
+        assert!(e.contains("silent"), "{e}");
+        let log = sent.lock().unwrap().clone();
+        assert!(
+            !log.iter().any(|l| l == "ATMA\r" || l == "ATCAF0\r"),
+            "{log:?}"
+        );
         assert_eq!(crate::j1979::vin(&mut elm).unwrap().as_deref(), Some(VIN));
     }
 

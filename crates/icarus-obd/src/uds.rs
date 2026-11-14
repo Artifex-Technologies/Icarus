@@ -262,10 +262,66 @@ pub fn present(elm: &mut dyn Link, tx: u16, rx: u16) -> Result<bool, ObdError> {
     Ok(false)
 }
 
-/// Every request ID from 700 to 7F7 except the OBD broadcast (7DF): a slower search that finds modules anywhere.
-pub fn sweep() -> Vec<crate::vehicles::ModuleAddr> {
+/// IDs the sweep never sends on, from the loaded profiles: OBD's broadcast (7DF), the OBD-II answer IDs (7E8-7EF), and the
+/// answer ID of every module any profile names (its `rx`, or its request ID + 8).
+///
+/// A request sent on one of these would look, to every module on the bus, like that module's own answer: a gateway or the
+/// tester side of another module can act on it, and the module whose ID it is sees a frame it did not send (on some
+/// modules, a bus fault). 7DF would reach every module at once. So the sweep sends only on IDs that could be requests.
+pub fn sweep_skips(profiles: &[crate::vehicles::Profile]) -> std::collections::BTreeSet<u16> {
+    let mut skip: std::collections::BTreeSet<u16> = (0x7E8..=0x7EF).collect();
+    skip.insert(0x7DF);
+    skip.extend(
+        profiles
+            .iter()
+            .flat_map(|p| p.modules.iter().map(|m| m.rx())),
+    );
+    skip
+}
+
+/// One scan's memory of the modules it has found, so that it never sends on their answer IDs.
+///
+/// `sweep_skips` knows only the answer IDs that profiles name, but the sweep is there to find modules no profile names. When
+/// one answers at, say, 740 (answering from 748), a later request on 748 would look like that module's own answer, the
+/// hazard `sweep_skips` describes. Candidates go up in order and an answer ID is usually its request ID + 8, so without this
+/// the sweep would reach it. Both scans (the app's and the command line's) ask through [`ScanGuard::present`].
+#[derive(Debug, Default)]
+pub struct ScanGuard {
+    /// Answer ID -> the request ID of the module found answering from it.
+    answers: std::collections::BTreeMap<u16, u16>,
+}
+
+impl ScanGuard {
+    /// The module found earlier in this scan whose answer ID is `tx`, when there is one: the scan must not send on `tx`.
+    pub fn answer_of(&self, tx: u16) -> Option<u16> {
+        self.answers.get(&tx).copied()
+    }
+
+    /// [`present`] for one step of a scan: false, with nothing sent, when `m`'s request ID is the answer ID of a module found
+    /// earlier in this scan; otherwise it asks, and remembers `m`'s answer ID when `m` answers.
+    pub fn present(
+        &mut self,
+        elm: &mut dyn Link,
+        m: &crate::vehicles::ModuleAddr,
+    ) -> Result<bool, ObdError> {
+        if self.answer_of(m.tx).is_some() {
+            return Ok(false);
+        }
+        let there = present(elm, m.tx, m.rx())?;
+        if there {
+            self.answers.insert(m.rx(), m.tx);
+        }
+        Ok(there)
+    }
+}
+
+/// Every candidate request ID from 700 to 7F7 (a slower search that finds modules anywhere), leaving out the IDs of
+/// `sweep_skips`: the broadcast and every known answer ID, which the sweep must not transmit on. The answer IDs of modules
+/// the sweep itself finds are left out as it goes, by [`ScanGuard`].
+pub fn sweep(profiles: &[crate::vehicles::Profile]) -> Vec<crate::vehicles::ModuleAddr> {
+    let skip = sweep_skips(profiles);
     (0x700..=0x7F7)
-        .filter(|id| *id != 0x7DF)
+        .filter(|id| !skip.contains(id))
         .map(|tx| crate::vehicles::ModuleAddr {
             tx,
             rx: None,
@@ -328,6 +384,99 @@ mod tests {
             nrc(0x31),
             "request out of range (this identifier does not exist here)"
         );
+    }
+
+    #[test]
+    fn the_sweep_never_sends_on_the_broadcast_or_an_answer_id() {
+        use crate::sim::recording::Recorder;
+        use std::collections::BTreeSet;
+        let mut all = crate::vehicles::builtin();
+        all.push(
+            crate::vehicles::parse(
+                "mine",
+                "a user file",
+                "name = \"mine\"\n[[module]]\ntx = 0x7A0\nrx = 0x7A3\nname = \"odd answer ID\"\n",
+            )
+            .unwrap(),
+        );
+        let skip = sweep_skips(&all);
+        for id in [0x7DF, 0x7E8, 0x7E9, 0x7EF, 0x7B8, 0x758, 0x77D, 0x7A3] {
+            assert!(skip.contains(&id), "{id:03X}");
+        }
+        let list = sweep(&all);
+        assert!(list.iter().all(|m| !skip.contains(&m.tx)));
+        assert!(list.iter().any(|m| m.tx == 0x7E0) && list.iter().any(|m| m.tx == 0x7B0));
+        // on the wire: every request goes out under the header (ATSH) set last, which must never be a skipped ID
+        let (port, sent) = Recorder::new(SimCar::new());
+        let mut elm = Elm::connect(Box::new(port)).unwrap();
+        sent.lock().unwrap().clear();
+        let mut found = Vec::new();
+        for m in &list {
+            if present(&mut elm, m.tx, m.rx()).unwrap() {
+                found.push(m.tx);
+            }
+        }
+        assert_eq!(found, vec![0x780, 0x7B0, 0x7C0, 0x7E0, 0x7E1]);
+        let sent_on = sent_on(&sent.lock().unwrap());
+        assert!(
+            sent_on.is_disjoint(&skip),
+            "{:03X?}",
+            sent_on.intersection(&skip).collect::<Vec<_>>()
+        );
+        assert_eq!(sent_on, list.iter().map(|m| m.tx).collect::<BTreeSet<_>>());
+    }
+
+    /// The IDs requests went out on, from a log of what was sent to the adapter: every request goes out under the header
+    /// (ATSH) set last, 7DF until one is set.
+    fn sent_on(log: &[String]) -> std::collections::BTreeSet<u16> {
+        let (mut header, mut on) = (0x7DF, std::collections::BTreeSet::new());
+        for l in log {
+            let c = l.trim_end_matches('\r');
+            if let Some(h) = c.strip_prefix("ATSH") {
+                header = u16::from_str_radix(h, 16).unwrap();
+            } else if !c.is_empty() && c.chars().all(|ch| ch.is_ascii_hexdigit()) {
+                on.insert(header);
+            }
+        }
+        on
+    }
+
+    #[test]
+    fn the_sweep_never_sends_on_the_answer_id_of_a_module_it_found() {
+        use crate::sim::recording::Recorder;
+        // with no profile loaded, only 7DF and 7E8-7EF are known answer IDs: 788, 7B8 and 7C8 (where the simulated 780, 7B0
+        // and 7C0 answer from) are in the list, and only what the sweep finds can keep it off them
+        let list = sweep(&[]);
+        for id in [0x788, 0x7B8, 0x7C8] {
+            assert!(list.iter().any(|m| m.tx == id), "{id:03X}");
+        }
+        let (port, sent) = Recorder::new(SimCar::new());
+        let mut elm = Elm::connect(Box::new(port)).unwrap();
+        sent.lock().unwrap().clear();
+        let mut guard = ScanGuard::default();
+        let mut found = Vec::new();
+        for m in &list {
+            if guard.present(&mut elm, m).unwrap() {
+                found.push(m.tx);
+            }
+        }
+        assert_eq!(found, vec![0x780, 0x7B0, 0x7C0, 0x7E0, 0x7E1]);
+        for (rx, tx) in [
+            (0x788, 0x780),
+            (0x7B8, 0x7B0),
+            (0x7C8, 0x7C0),
+            (0x7E9, 0x7E1),
+        ] {
+            assert_eq!(guard.answer_of(rx), Some(tx), "{rx:03X}");
+        }
+        let on = sent_on(&sent.lock().unwrap());
+        for id in [0x788, 0x7B8, 0x7C8] {
+            assert!(!on.contains(&id), "a request went out on {id:03X}");
+        }
+        // the IDs around them were still asked
+        for id in [0x787, 0x789, 0x7B7, 0x7B9, 0x7C7, 0x7C9] {
+            assert!(on.contains(&id), "{id:03X} was not asked");
+        }
     }
 
     #[test]

@@ -1187,7 +1187,8 @@ impl App {
                         }
                     }
                 });
-            ui.checkbox(&mut self.sweep, "every ID 700-7F7 (slower)");
+            ui.checkbox(&mut self.sweep, "every request ID 700-7F7 (slower)")
+                .on_hover_text("Never 7DF or an answer ID (7E8-7EF, or one a vehicle profile names): a request there would look like another module's answer.");
             if self.scanning {
                 ui.spinner();
             } else if ui.button("Scan").clicked() {

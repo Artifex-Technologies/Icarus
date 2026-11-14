@@ -684,12 +684,13 @@ fn scan(
         }
     };
     let list = if sweep {
-        uds::sweep()
+        uds::sweep(profiles)
     } else {
         vehicles::candidates(&profile)
     };
     send(Event::ScanStarted(profile.name.clone(), list.len()));
     let (mut found, mut unreachable) = (0, Vec::new());
+    let mut guard = uds::ScanGuard::default();
     for (i, m) in list.iter().enumerate() {
         if let Some(why) = m.unreachable() {
             unreachable.push(format!("{:03X}  {}: {why}", m.tx, m.name));
@@ -701,7 +702,7 @@ fn scan(
             i + 1,
             list.len()
         )));
-        if uds::present(elm, m.tx, m.rx()).map_err(e)? {
+        if guard.present(elm, m).map_err(e)? {
             found += 1;
             let identity = uds::module_identity(elm, m.tx, m.rx()).map_err(e)?;
             let dtcs = uds::module_dtcs(elm, m.tx, m.rx()).map_err(e)?;
