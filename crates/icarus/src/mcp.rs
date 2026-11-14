@@ -43,6 +43,13 @@ fn tool_list() -> Value {
             }}
         },
         {
+            "name": "drive_logs",
+            "description": "Recorded drives (icarus obd live --csv): without a file, the list and a summary of the newest; with one, that drive's summary: fuel trims for each bank by driving condition (idle, light, moderate, hard) and the gap between the banks, the rear oxygen sensors, coolant and voltage, and sudden timing drops (at the rev limiter or a shift, or other). Offline: reads files only.",
+            "inputSchema": {"type": "object", "properties": {
+                "file": {"type": "string", "description": "optional: a recording's file name from the list, e.g. drive-2026-11-13_132432.csv"}
+            }}
+        },
+        {
             "name": "tires_gears",
             "description": "Speedometer error and gearing for a tire size change, and the regear that restores stock.",
             "inputSchema": {"type": "object", "properties": {
@@ -54,6 +61,38 @@ fn tool_list() -> Value {
             }, "required": ["stock", "new"]}
         }
     ])
+}
+
+/// The recorded drives: the list (newest first, at most 20) and the newest one's summary, or the named one's.
+fn drive_logs(file: Option<&str>) -> Result<String, String> {
+    use icarus_obd::drivelog;
+    let dirs = drivelog::folders();
+    if let Some(f) = file.filter(|f| !f.is_empty()) {
+        let p = drivelog::by_name(&dirs, f).ok_or_else(|| format!("no recording named {f}"))?;
+        return drivelog::summarize_file(&p);
+    }
+    let all = drivelog::list(&dirs);
+    let Some(newest) = all.first() else {
+        return Ok(
+            "No recorded drives yet (icarus obd live ... --csv FILE, or Record in the window)."
+                .into(),
+        );
+    };
+    let mut out = String::from("Recordings, newest first:\n");
+    for p in all.iter().take(20) {
+        out.push_str(&format!(
+            "- {}\n",
+            p.file_name()
+                .map(|f| f.to_string_lossy())
+                .unwrap_or_default()
+        ));
+    }
+    out.push('\n');
+    out.push_str(
+        &drivelog::summarize_file(newest)
+            .unwrap_or_else(|e| format!("The newest could not be read: {e}")),
+    );
+    Ok(out)
 }
 
 /// The saved learning sessions, newest first: (file, which vehicle). Reads only (no folder is made).
@@ -322,6 +361,7 @@ fn call(name: &str, args: &Value) -> Result<String, String> {
             ))
         }
         "vehicle_check" => vehicle_check(),
+        "drive_logs" => drive_logs(args["file"].as_str()),
         "vehicle_modules" => vehicle_modules(),
         "learning_sessions" => learning_sessions(s("file").as_deref()),
         "tires_gears" => {
@@ -416,6 +456,7 @@ mod tests {
         "vehicle_check",
         "vehicle_modules",
         "learning_sessions",
+        "drive_logs",
         "tires_gears",
     ];
 
