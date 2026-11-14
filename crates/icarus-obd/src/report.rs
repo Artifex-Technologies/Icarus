@@ -41,6 +41,9 @@ pub struct Diagnosis {
     pub snapshot: Vec<(u8, f64)>,
     /// On-board test results (service 06; CAN vehicles).
     pub selftests: Vec<crate::mode06::TestResult>,
+    /// Each module's calibration IDs and verification numbers (service 09 PIDs 04 and 06): which software it runs, and
+    /// whether it has been changed (a tune changes the CVN).
+    pub calibrations: Vec<(String, Vec<String>, Vec<String>)>,
 }
 
 /// The local date and time, "2026-11-07 19:40".
@@ -97,6 +100,16 @@ pub fn collect(
                 .find(|x| x.data.len() >= 3 && x.data[..2] == [0x41, 0x03])
         })
         .map(|x| j1979::fuel_system(x.data[2]));
+    let cvns = j1979::cvns(elm).unwrap_or_default();
+    d.calibrations = j1979::calibration_ids(elm)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(from, module, ids)| {
+            // every CVN from that module (older buses send each in its own message)
+            let cvn = cvns.iter().filter(|c| c.0 == from).flat_map(|c| c.1.iter().cloned()).collect();
+            (format!("{module} ({from})"), ids, cvn)
+        })
+        .collect();
     for (kind, label) in [
         (DtcKind::Stored, "stored"),
         (DtcKind::Pending, "pending"),
@@ -206,6 +219,10 @@ pub fn markdown(d: &Diagnosis) -> String {
     }
     if let Some(f) = d.fuel_system {
         let _ = writeln!(o, "| Fuel system | {f} |");
+    }
+    for (module, ids, cvn) in &d.calibrations {
+        let cvn = if cvn.is_empty() { String::new() } else { format!(" (CVN {})", cvn.join(", ")) };
+        let _ = writeln!(o, "| Calibration, {module} | {}{cvn} |", ids.join(", "));
     }
     if let Some(v) = &d.vehicle {
         if let Some(url) = lookup::parts_catalog(v) {
@@ -420,6 +437,10 @@ mod tests {
         let mut elm = Elm::connect(Box::new(SimCar::new())).unwrap();
         let d = collect(&mut elm, &vehicles::builtin(), true).unwrap();
         let md = markdown(&d);
+        assert!(
+            md.contains("| Calibration, engine (ECM/PCM) (7E8) | ICARUS-SIM-CAL01 (CVN 1CA50F3E) |"),
+            "the calibration ID and CVN are in the report"
+        );
         for want in [
             "## Vehicle",
             "5TFICARUSSIM00001",

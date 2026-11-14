@@ -1263,7 +1263,22 @@ impl App {
                                 &mut links,
                             );
                         }
-                        if !codes.is_empty() && ui.button("Clear this module's codes...").clicked()
+                        // airbag modules: never cleared by Icarus (clear::refused); say so where the button would be
+                        let airbag =
+                            icarus_obd::clear::refused(m.addr.tx, m.addr.rx(), &m.addr.name).is_some();
+                        if !codes.is_empty() && airbag {
+                            ui.label(
+                                RichText::new(
+                                    "Airbag codes are never cleared by Icarus: a dealer or an airbag specialist \
+                                     clears them after the repair.",
+                                )
+                                .small()
+                                .color(pal.dim),
+                            );
+                        }
+                        if !codes.is_empty()
+                            && !airbag
+                            && ui.button("Clear this module's codes...").clicked()
                         {
                             ask_clear = Some((
                                 m.addr.tx,

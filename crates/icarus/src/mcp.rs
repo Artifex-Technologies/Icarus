@@ -161,6 +161,13 @@ fn learning_sessions(file: Option<&str>) -> Result<String, String> {
 }
 
 fn connect() -> Result<Elm, String> {
+    // a drive being recorded has the adapter (one Bluetooth connection): taking it would end the recording
+    if let Some(p) = icarus_obd::drivelog::recording_now() {
+        return Err(format!(
+            "the adapter is busy recording a drive ({}); drive_logs reads recordings, the one being written included",
+            p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()
+        ));
+    }
     // the adapter named in this server's definition, else the one the window last connected to (~/.config/icarus/adapter),
     // so a definition need not carry a Bluetooth address
     let spec = std::env::var("ICARUS_ADAPTER").ok().filter(|a| !a.trim().is_empty()).or_else(remembered_adapter).ok_or_else(|| {

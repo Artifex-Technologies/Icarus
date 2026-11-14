@@ -50,8 +50,6 @@ fn parked() -> Vec<Condition> {
     vec![Condition::EngineOff, Condition::Stationary]
 }
 
-/// Airbag and occupant-detection request IDs in the built-in profiles (the same list the actuator tests refuse).
-const SRS_IDS: &[u16] = &[0x780, 0x781, 0x737, 0x715, 0x7D2];
 /// Below this the module may not finish writing its memory.
 const MIN_VOLTS: f64 = 12.0;
 /// A setting is short: longer data is not a setting.
@@ -65,18 +63,11 @@ impl SettingDef {
     /// Why this definition is refused, whatever it says.
     pub fn refused(&self) -> Option<String> {
         let words = format!("{} {}", self.name, self.note).to_lowercase();
-        if SRS_IDS.contains(&self.module)
-            || [
-                "airbag",
-                "srs",
-                "restraint",
-                "occupant",
-                "pretension",
-                "squib",
-            ]
-            .iter()
-            .any(|w| words.contains(w))
-        {
+        if let Some(why) = crate::actuator::not_one_module(self.module) {
+            return Some(why);
+        }
+        // the one airbag check (actuator::is_airbag), by request ID, answer ID and name
+        if crate::actuator::is_airbag(self.module, &words) || crate::actuator::is_airbag(self.rx(), "") {
             return Some("airbag and occupant-detection modules are never changed".into());
         }
         if [

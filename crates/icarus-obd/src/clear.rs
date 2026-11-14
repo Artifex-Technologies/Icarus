@@ -51,8 +51,31 @@ pub fn clear_obd(elm: &mut dyn Link) -> Result<Vec<String>, String> {
     Ok(ok)
 }
 
-/// All of one module's codes (UDS or KWP2000, as the module spoke when its codes were read).
+/// Why Icarus will not clear one module's codes, whatever asks: airbag and occupant-detection modules never (their codes
+/// stay for a dealer or an airbag specialist, after the repair). By ID, and by name where the caller knows it.
+pub fn refused(tx: u16, rx: u16, name: &str) -> Option<String> {
+    if let Some(why) = crate::actuator::not_one_module(tx) {
+        return Some(why);
+    }
+    let hit = if crate::actuator::is_airbag(tx, name) {
+        tx
+    } else if crate::actuator::is_airbag(rx, "") {
+        rx
+    } else {
+        return None;
+    };
+    Some(format!(
+        "refused: {hit:03X} is an airbag or occupant-detection module, and Icarus never clears its codes \
+         (a dealer or an airbag specialist does, after the repair)"
+    ))
+}
+
+/// All of one module's codes (UDS or KWP2000, as the module spoke when its codes were read). Never an airbag module.
 pub fn clear_module(elm: &mut dyn Link, tx: u16, rx: u16, dialect: Dialect) -> Result<(), String> {
+    if let Some(why) = refused(tx, rx, "") {
+        crate::audit::log(&format!("clear {tx:03X} refused: an airbag module"));
+        return Err(why);
+    }
     conditions_hold(elm, &[Condition::EngineOff])?;
     let _awake = crate::power_guard::Inhibit::take("Clearing trouble codes").ok();
     let req: &[u8] = match dialect {
@@ -109,6 +132,24 @@ mod tests {
         ] {
             assert!(check(bad).is_err(), "{bad:02X?}");
         }
+    }
+
+    #[test]
+    fn airbag_modules_are_never_cleared() {
+        // refused before anything is sent, by request ID, answer ID or name
+        let mut elm = Elm::connect(Box::new(SimCar::engine_off())).unwrap();
+        for (tx, rx) in [(0x780, 0x788), (0x781, 0x789)] {
+            assert!(clear_module(&mut elm, tx, rx, Dialect::Uds)
+                .unwrap_err()
+                .contains("airbag"));
+        }
+        assert!(refused(0x7A0, 0x788, "").is_some(), "by its answer ID");
+        assert!(refused(0x7A0, 0x7A8, "Front airbag sensor").is_some(), "by name");
+        assert!(refused(0x7B0, 0x7B8, "ABS / VSC / TRC (skid control)").is_none());
+        assert!(refused(0x7E0, 0x7E8, "engine").is_none());
+        assert!(refused(0x7DF, 0x7E8, "").unwrap().contains("broadcast"), "the broadcast reaches the airbag module too");
+        assert!(refused(0x123, 0x12B, "").is_some(), "not a module ID");
+        assert!(refused(0x7A0, 0x788, "").unwrap().contains("788"), "names the ID that matched");
     }
 
     #[test]

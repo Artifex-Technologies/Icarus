@@ -162,13 +162,9 @@ fn changed(p: &std::path::Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(p).and_then(|m| m.modified()).ok()
 }
 
-/// A recording being written right now (its file changed in the last few seconds), as by `icarus obd live --csv` in the
-/// background: it has the adapter (a Bluetooth adapter takes one connection), so the window doesn't try for it meanwhile.
-pub fn recording_now() -> Option<PathBuf> {
-    let newest = drivelog::list(&drivelog::folders()).into_iter().next()?;
-    let age = changed(&newest)?.elapsed().ok()?;
-    (age < std::time::Duration::from_secs(5)).then_some(newest)
-}
+/// A recording being written right now (`icarus obd live --csv` in the background, say): it has the adapter, so the window
+/// doesn't try for it meanwhile.
+pub use icarus_obd::drivelog::recording_now;
 
 impl Logs {
     pub fn refresh(&mut self) {

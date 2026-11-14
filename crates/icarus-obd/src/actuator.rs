@@ -115,19 +115,10 @@ impl TestDef {
 
     /// Why this definition is refused, whatever it says.
     pub fn refused(&self) -> Option<String> {
-        let words = self.name.to_lowercase();
-        if SRS_IDS.contains(&self.module)
-            || [
-                "airbag",
-                "srs",
-                "restraint",
-                "occupant",
-                "pretension",
-                "squib",
-            ]
-            .iter()
-            .any(|w| words.contains(w))
-        {
+        if let Some(why) = not_one_module(self.module) {
+            return Some(why);
+        }
+        if is_airbag(self.module, &self.name) || is_airbag(self.rx(), "") {
             return Some("airbag and occupant-detection modules are never tested".into());
         }
         if self.protocol == Protocol::Kwp && self.id > 0xFF {
@@ -177,6 +168,28 @@ impl TestDef {
 }
 
 pub const MAX_SECONDS: u32 = 30;
+
+/// Why an ID is not one module's request ID: 7DF is the broadcast every module hears (an action sent there reaches the
+/// airbag module too), and module request IDs are 700-7F7 on 11-bit CAN.
+pub fn not_one_module(id: u16) -> Option<String> {
+    if id == 0x7DF {
+        Some("refused: 7DF is the broadcast every module hears, not one module".into())
+    } else if !(0x700..=0x7F7).contains(&id) {
+        Some(format!("refused: {id:03X} is not a module request ID (700-7F7)"))
+    } else {
+        None
+    }
+}
+
+/// Airbag and occupant-detection modules, by ID (a request ID in the built-in profiles, or its answer ID) or by name: Icarus
+/// never tests them, clears their codes or writes to them ("the airbag modules never"). One check for every path that acts.
+pub fn is_airbag(id: u16, name: &str) -> bool {
+    let words = name.to_lowercase();
+    SRS_IDS.iter().any(|&s| id == s || id == s + 8)
+        || ["airbag", "srs", "restraint", "occupant", "pretension", "squib"]
+            .iter()
+            .any(|w| words.contains(w))
+}
 /// Airbag and occupant-detection request IDs in the built-in profiles (Toyota/Subaru/Mazda 780 and 781, Ford RCM 737, VW 715,
 /// Hyundai/Kia 7D2).
 const SRS_IDS: &[u16] = &[0x780, 0x781, 0x737, 0x715, 0x7D2];

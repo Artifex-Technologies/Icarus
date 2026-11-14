@@ -113,6 +113,14 @@ impl Series {
     }
 }
 
+/// A recording being written right now (the newest drive file changed in the last few seconds): its writer has the adapter
+/// (a Bluetooth adapter takes one connection), so nothing else should try for it meanwhile.
+pub fn recording_now() -> Option<PathBuf> {
+    let newest = list(&folders()).into_iter().next()?;
+    let age = std::fs::metadata(&newest).and_then(|m| m.modified()).ok()?.elapsed().ok()?;
+    (age < std::time::Duration::from_secs(5)).then_some(newest)
+}
+
 pub fn series(text: &str) -> Result<Series, String> {
     let mut lines = text.lines();
     let header = split(lines.next().ok_or("the file is empty")?);

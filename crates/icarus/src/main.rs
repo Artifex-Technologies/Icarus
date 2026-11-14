@@ -1327,7 +1327,21 @@ fn obd_clear(elm: &mut Elm, args: &Args) -> Result<(), String> {
                     .map_err(|_| format!("{s} is not a module ID in hex"))
             };
             let tx = hex(t)?;
+            if let Some(why) = actuator::not_one_module(tx) {
+                return Err(why);
+            }
             let rx = r.map(hex).transpose()?.unwrap_or(tx + 8);
+            // never an airbag module: by ID, and by the name this vehicle's profile gives it
+            let ps = profiles();
+            let name = j1979::vin(elm)
+                .ok()
+                .flatten()
+                .and_then(|v| icarus_obd::vehicles::for_vin(&ps, &v).cloned())
+                .and_then(|p| p.modules.into_iter().find(|m| m.tx == tx).map(|m| m.name))
+                .unwrap_or_default();
+            if let Some(why) = clear::refused(tx, rx, &name) {
+                return Err(why);
+            }
             let Some((d, codes)) = uds::module_dtcs(elm, tx, rx).map_err(e)? else {
                 return Err(format!("{tx:03X} did not give its codes"));
             };
