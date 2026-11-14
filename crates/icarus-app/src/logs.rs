@@ -11,14 +11,78 @@ use std::io::Write;
 use std::path::PathBuf;
 use yggdrasil_ui::theme;
 
-/// Recording the live values to a CSV, one row per sweep of the chosen values.
+/// The values read every sweep while recording a drive, when the vehicle offers them: what fuel trims, timing, air flow,
+/// the throttle and the mixture are read from. Engine speed comes first: a row is written each time it comes round.
+pub const DRIVE_FAST: &[u8] = &[
+    0x0C, 0x0D, 0x04, 0x06, 0x07, 0x08, 0x09, 0x0E, 0x10, 0x11, 0x49, 0x15, 0x19, 0x44, 0x24, 0x28, 0x34, 0x38,
+];
+
+/// A drive's values from what the vehicle offers: (read every sweep, the rest read in turn).
+pub fn drive_set(offered: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let fast: Vec<u8> = DRIVE_FAST.iter().copied().filter(|p| offered.contains(p)).collect();
+    let rest = offered.iter().copied().filter(|p| !fast.contains(p)).collect();
+    (fast, rest)
+}
+
+/// Whether miles per hour, °F and psi are the custom here (the locale's measurement: en_US and the few like it).
+pub fn us_units() -> bool {
+    static US: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *US.get_or_init(|| {
+        let loc = ["LC_ALL", "LC_MEASUREMENT", "LANG"]
+            .iter()
+            .filter_map(|k| std::env::var(k).ok())
+            .find(|v| !v.is_empty())
+            .unwrap_or_default();
+        ["en_US", "es_US", "en_LR", "my_MM"].iter().any(|p| loc.starts_with(p))
+    })
+}
+
+/// A value as shown: in the customary units where those are used (us_units), else as the vehicle gives it.
+pub fn shown(unit: &str, v: f64) -> (f64, &str) {
+    if us_units() {
+        match unit {
+            "km/h" => return (v * 0.621371, "mph"),
+            "km" => return (v * 0.621371, "mi"),
+            "°C" => return (v * 1.8 + 32.0, "°F"),
+            "kPa" => return (v * 0.145038, "psi"),
+            "L/h" => return (v * 0.264172, "gal/h"),
+            "Nm" => return (v * 0.737562, "lb-ft"),
+            _ => {}
+        }
+    }
+    (v, unit)
+}
+
+/// The unit in a recording's column name (`"Vehicle speed [km/h]"`).
+fn unit_of(name: &str) -> &str {
+    name.rsplit_once(" [").map(|(_, u)| u.trim_end_matches(']')).unwrap_or("")
+}
+
+/// Recording the live values to a CSV, one row per sweep.
 pub struct Recorder {
     pub path: PathBuf,
     file: std::fs::File,
+    /// Read every sweep, and the rest read in turn (two a sweep).
+    pub fast: Vec<u8>,
+    pub rest: Vec<u8>,
     pids: Vec<u8>,
     row: HashMap<u8, f64>,
     t0: Option<f64>,
     pub rows: usize,
+    /// `systemd-inhibit ... cat` reading from a pipe of ours: the laptop doesn't sleep (closing the lid included) while a
+    /// drive is recorded, until the recording stops or the window ends however it ends (the pipe closes, cat and the
+    /// inhibitor end with it).
+    awake: Option<std::process::Child>,
+}
+
+impl Drop for Recorder {
+    fn drop(&mut self) {
+        if let Some(mut c) = self.awake.take() {
+            drop(c.stdin.take());
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
 }
 
 /// `drive-YYYY-MM-DD_HHMMSS.csv` from the local time.
@@ -34,8 +98,9 @@ fn file_name() -> String {
 }
 
 impl Recorder {
-    /// Starts a recording of `pids` in ~/Documents/Icarus/logs.
-    pub fn start(pids: &[u8]) -> Result<Recorder, String> {
+    /// Starts a recording in ~/Documents/Icarus/logs: `fast` read every sweep, `rest` in turn.
+    pub fn start(fast: &[u8], rest: &[u8]) -> Result<Recorder, String> {
+        let pids: Vec<u8> = fast.iter().chain(rest).copied().filter(|p| j1979::pid(*p).is_some()).collect();
         let dir = drivelog::folders().into_iter().next().ok_or("no home folder")?;
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let path = dir.join(file_name());
@@ -43,7 +108,24 @@ impl Recorder {
         let names: Vec<String> =
             pids.iter().filter_map(|p| j1979::pid(*p)).map(|d| format!("{} [{}]", d.name, d.unit)).collect();
         writeln!(file, "{}", drivelog::csv_header(&names)).map_err(|e| e.to_string())?;
-        Ok(Recorder { path, file, pids: pids.iter().copied().filter(|p| j1979::pid(*p).is_some()).collect(), row: HashMap::new(), t0: None, rows: 0 })
+        let awake = std::process::Command::new("systemd-inhibit")
+            .args(["--what=sleep:idle:handle-lid-switch", "--who=Icarus", "--why=Recording a drive", "cat"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok();
+        Ok(Recorder {
+            path,
+            file,
+            fast: fast.to_vec(),
+            rest: rest.to_vec(),
+            pids,
+            row: HashMap::new(),
+            t0: None,
+            rows: 0,
+            awake,
+        })
     }
 
     /// One reading: when the first value of a sweep comes round again, the sweep before it becomes a row.
@@ -70,6 +152,22 @@ pub struct Logs {
     loaded: Option<(Result<Summary, String>, Result<Series, String>)>,
     /// The time under the pointer, across the charts.
     hover: Option<f64>,
+    /// When the chosen file was last changed (as read), and when that was last looked at: a recording still being written
+    /// (the background `icarus obd live --csv`, or Record here) is read again every couple of seconds.
+    stamp: Option<std::time::SystemTime>,
+    checked: Option<std::time::Instant>,
+}
+
+fn changed(p: &std::path::Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(p).and_then(|m| m.modified()).ok()
+}
+
+/// A recording being written right now (its file changed in the last few seconds), as by `icarus obd live --csv` in the
+/// background: it has the adapter (a Bluetooth adapter takes one connection), so the window doesn't try for it meanwhile.
+pub fn recording_now() -> Option<PathBuf> {
+    let newest = drivelog::list(&drivelog::folders()).into_iter().next()?;
+    let age = changed(&newest)?.elapsed().ok()?;
+    (age < std::time::Duration::from_secs(5)).then_some(newest)
 }
 
 impl Logs {
@@ -86,6 +184,7 @@ impl Logs {
             return;
         }
         if let Some(p) = &self.chosen {
+            self.stamp = changed(p);
             let text = std::fs::read_to_string(p).map_err(|e| e.to_string());
             self.loaded = Some(match text {
                 Ok(t) => (drivelog::summarize(&t), drivelog::series(&t)),
@@ -97,6 +196,27 @@ impl Logs {
     pub fn page(&mut self, ui: &mut egui::Ui, pal: &theme::Palette) {
         if self.list.is_empty() {
             self.refresh();
+        }
+        // a recording still being written: read again every couple of seconds
+        let tick = std::time::Duration::from_secs(2);
+        if self.checked.is_none_or(|c| c.elapsed() >= tick) {
+            self.checked = Some(std::time::Instant::now());
+            let newest_before = self.list.first().cloned();
+            self.list = drivelog::list(&drivelog::folders());
+            // following the newest recording when it was the one shown and a newer one started
+            if self.chosen.is_none() || (self.chosen == newest_before && self.list.first() != newest_before.as_ref()) {
+                self.chosen = self.list.first().cloned();
+                self.loaded = None;
+            }
+            if let Some(p) = &self.chosen {
+                if changed(p) != self.stamp {
+                    self.loaded = None;
+                }
+            }
+        }
+        let live = self.chosen.as_ref().and_then(|p| changed(p)).and_then(|t| t.elapsed().ok()).is_some_and(|a| a.as_secs() < 5);
+        if live {
+            ui.ctx().request_repaint_after(tick);
         }
         ui.horizontal(|ui| {
             ui.label("Recording");
@@ -120,6 +240,9 @@ impl Logs {
             if ui.button("Refresh").clicked() {
                 self.refresh();
                 self.loaded = None;
+            }
+            if live {
+                ui.label(RichText::new("● recording now, updating every 2 s").color(pal.red));
             }
         });
         if self.list.is_empty() {
@@ -199,20 +322,33 @@ fn colors(pal: &theme::Palette) -> [Color32; 4] {
     [pal.accent, Color32::from_rgb(236, 152, 64), pal.green, Color32::from_rgb(90, 160, 236)]
 }
 
-/// The charts, top to bottom: (title, the columns by the words in their names, a zero line).
+/// The charts, top to bottom: (title, the columns by the words in their names, a zero line). A chart shows only the
+/// columns a recording has; one with none of them is left out.
 const CHARTS: &[(&str, &[&[&str]], bool)] = &[
     (
-        "Fuel trims (%)",
+        "Fuel trims",
         &[&["short-term", "bank 1"], &["long-term", "bank 1"], &["short-term", "bank 2"], &["long-term", "bank 2"]],
         true,
     ),
-    ("Engine speed (rpm)", &[&["engine speed"]], false),
-    ("Speed (km/h)", &[&["vehicle speed"]], false),
-    ("Throttle (%)", &[&["throttle position"]], false),
-    ("Rear oxygen sensors (V)", &[&["bank 1 sensor 2"], &["bank 2 sensor 2"]], false),
-    ("Timing (° before TDC)", &[&["timing advance"]], false),
-    ("Air flow (g/s)", &[&["mass air flow"]], false),
-    ("Coolant (°C)", &[&["coolant"]], false),
+    (
+        "Air/fuel: aimed for, and measured by each bank's front sensor",
+        &[&["commanded lambda"], &["wide-band", "bank 1"], &["wide-band", "bank 2"]],
+        false,
+    ),
+    ("Engine speed", &[&["engine speed"]], false),
+    ("Speed", &[&["vehicle speed"]], false),
+    ("Pedal and throttle", &[&["accelerator pedal"], &["throttle position"], &["commanded throttle"]], false),
+    ("Load", &[&["engine load"], &["absolute load"]], false),
+    ("Timing", &[&["timing advance"]], false),
+    ("Air flow", &[&["mass air flow"]], false),
+    ("Rear oxygen sensors", &[&["o2 sensor", "bank 1 sensor 2"], &["o2 sensor", "bank 2 sensor 2"]], false),
+    ("Temperatures", &[&["coolant"], &["intake air"], &["ambient"], &["oil temperature"]], false),
+    ("Catalysts", &[&["catalyst", "bank 1 sensor 1"], &["catalyst", "bank 2 sensor 1"]], false),
+    ("Fuel rail pressure", &[&["fuel rail"]], false),
+    ("Engine torque", &[&["demand torque"], &["actual engine torque"]], false),
+    ("Fuel used", &[&["fuel rate"]], false),
+    ("Battery and charging", &[&["module voltage"]], false),
+    ("Fuel level", &[&["fuel level"]], false),
 ];
 
 fn charts(ui: &mut egui::Ui, pal: &theme::Palette, s: &Series, hover: &mut Option<f64>) {
@@ -224,18 +360,20 @@ fn charts(ui: &mut egui::Ui, pal: &theme::Palette, s: &Series, hover: &mut Optio
             continue;
         }
         // the title, and each line's name and its value under the pointer
+        let unit = unit_of(&s.names[idx[0]]);
+        let conv = |v: f64| shown(unit, v).0;
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new(*title).strong());
+            ui.label(RichText::new(format!("{title} ({})", shown(unit, 0.0).1)).strong());
             for (k, &i) in idx.iter().enumerate() {
                 let short = s.names[i].split(" [").next().unwrap_or("").replace("fuel trim, ", "");
-                let at = hover.and_then(|h| value_at(s, i, h)).map(|v| format!(" {v:.2}")).unwrap_or_default();
+                let at = hover.and_then(|h| value_at(s, i, h)).map(|v| format!(" {:.2}", conv(v))).unwrap_or_default();
                 ui.label(RichText::new(format!("● {short}{at}")).color(colors(pal)[k % 4]).small());
             }
         });
         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 120.0), Sense::hover());
         let p = ui.painter_at(rect);
         p.rect_filled(rect, CornerRadius::same(4), pal.field);
-        let vals = idx.iter().flat_map(|&i| s.cols[i].iter().flatten().copied());
+        let vals = idx.iter().flat_map(|&i| s.cols[i].iter().flatten().map(|v| conv(*v)));
         let (mut lo, mut hi) = vals.fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), v| (a.min(v), b.max(v)));
         if *zero {
             lo = lo.min(0.0);
@@ -251,21 +389,30 @@ fn charts(ui: &mut egui::Ui, pal: &theme::Palette, s: &Series, hover: &mut Optio
             p.line_segment([egui::pos2(rect.left(), y(0.0)), egui::pos2(rect.right(), y(0.0))], Stroke::new(1.0, pal.border));
         }
         for (k, &i) in idx.iter().enumerate() {
-            // one line per stretch of values (a gap where the vehicle gave none)
+            // one line through the values read (a value read in turn is there every few seconds), broken where none came for
+            // a while (the adapter dropped, the engine was off)
+            let stroke = Stroke::new(1.4, colors(pal)[k % 4]);
             let mut pts: Vec<egui::Pos2> = vec![];
+            let mut last = f64::NEG_INFINITY;
             for (t, v) in s.t.iter().zip(&s.cols[i]) {
-                match v {
-                    Some(v) => pts.push(egui::pos2(x(*t), y(*v))),
-                    None => {
-                        if pts.len() > 1 {
-                            p.add(egui::Shape::line(std::mem::take(&mut pts), Stroke::new(1.4, colors(pal)[k % 4])));
-                        }
-                        pts.clear();
+                let Some(v) = v else { continue };
+                if t - last > 30.0 {
+                    if pts.len() > 1 {
+                        p.add(egui::Shape::line(std::mem::take(&mut pts), stroke));
                     }
+                    pts.clear();
                 }
+                pts.push(egui::pos2(x(*t), y(conv(*v))));
+                last = *t;
             }
-            if pts.len() > 1 {
-                p.add(egui::Shape::line(pts, Stroke::new(1.4, colors(pal)[k % 4])));
+            match pts.len() {
+                0 => {}
+                1 => {
+                    p.circle_filled(pts[0], 2.0, stroke.color);
+                }
+                _ => {
+                    p.add(egui::Shape::line(pts, stroke));
+                }
             }
         }
         p.text(rect.left_top() + vec2(4.0, 2.0), egui::Align2::LEFT_TOP, format!("{hi:.1}"), egui::FontId::proportional(10.0), pal.dim);
@@ -307,7 +454,17 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("r.csv");
         let file = std::fs::File::create(&path).unwrap();
-        let mut r = Recorder { path: path.clone(), file, pids: vec![0x0C, 0x06], row: HashMap::new(), t0: None, rows: 0 };
+        let mut r = Recorder {
+            path: path.clone(),
+            file,
+            fast: vec![0x0C, 0x06],
+            rest: vec![],
+            pids: vec![0x0C, 0x06],
+            row: HashMap::new(),
+            t0: None,
+            rows: 0,
+            awake: None,
+        };
         r.add(0x0C, 650.0, 10.0);
         r.add(0x06, -1.5, 10.2);
         r.add(0x0C, 660.0, 10.5);
@@ -319,6 +476,9 @@ mod tests {
         let s = Series { t: vec![0.0, 1.0, 2.0], names: vec!["a".into()], cols: vec![vec![Some(1.0), None, Some(3.0)]] };
         assert_eq!(value_at(&s, 0, 1.9), Some(3.0));
         assert_eq!(value_at(&s, 0, 0.4), None);
+        let (fast, rest) = drive_set(&[0x05, 0x06, 0x0C, 0x2F, 0x34]);
+        assert_eq!((fast, rest), (vec![0x0C, 0x06, 0x34], vec![0x05, 0x2F]), "engine speed first, the rest in turn");
+        assert_eq!(unit_of("Vehicle speed [km/h]"), "km/h");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

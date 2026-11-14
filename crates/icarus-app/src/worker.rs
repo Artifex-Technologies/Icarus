@@ -21,8 +21,11 @@ pub enum Cmd {
         profile: Option<String>,
         sweep: bool,
     },
-    /// Poll these live values (empty stops).
+    /// Poll these live values (empty stops); any rotation (LiveRotate) ends with it.
     Live(Vec<u8>),
+    /// Also poll these, two of them after each sweep of the live values in turn (a recording: every value the vehicle
+    /// offers, with the ones that change fast read every sweep and the rest every few seconds).
+    LiveRotate(Vec<u8>),
     /// Read everything again and save a report (with every module when true).
     Report(bool),
     /// Start an actuator test (value for percent tests); it runs while TestHold keeps coming (at least every 0.5 s).
@@ -186,6 +189,8 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
     let mut spec = String::new();
     let mut vin: Option<String> = None;
     let mut live: Vec<u8> = Vec::new();
+    let mut rotate: Vec<u8> = Vec::new();
+    let mut rotate_at = 0usize;
     let mut test: Option<actuator::Running> = None;
     let mut last_hold = Instant::now();
     let mut last_watch = Instant::now();
@@ -270,7 +275,14 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
                     send(Event::Failed(m));
                 }
             }
-            Some(Cmd::Live(pids)) => live = pids,
+            Some(Cmd::Live(pids)) => {
+                rotate.clear();
+                live = pids;
+            }
+            Some(Cmd::LiveRotate(pids)) => {
+                rotate = pids;
+                rotate_at = 0;
+            }
             Some(Cmd::Report(scan)) => {
                 let Some(e) = elm.as_mut() else { continue };
                 live.clear();
@@ -500,7 +512,12 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
             }
             None => {
                 let Some(e) = elm.as_mut() else { continue };
-                for &pid in &live {
+                let mut sweep = live.clone();
+                for _ in 0..rotate.len().min(2) {
+                    sweep.push(rotate[rotate_at % rotate.len()]);
+                    rotate_at += 1;
+                }
+                for &pid in &sweep {
                     match j1979::read(e, pid) {
                         Ok(r) => {
                             if let Some(x) = r.iter().find(|x| x.from == "7E8").or(r.first()) {

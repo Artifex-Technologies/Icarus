@@ -111,6 +111,8 @@ struct Start {
     page: Option<Page>,
     scan: bool,
     live: bool,
+    /// `--record`: record a drive (every value the vehicle offers) once connected.
+    record: bool,
     bus: bool,
     learn: bool,
     mark: Option<String>,
@@ -130,6 +132,7 @@ impl Start {
                 "--connect" => s.connect = true,
                 "--scan" => s.scan = true,
                 "--live" => s.live = true,
+                "--record" => s.record = true,
                 "--bus" => s.bus = true,
                 "--learn" => s.learn = true,
                 "--mark" => {
@@ -422,12 +425,64 @@ impl App {
     }
 
     /// While a known adapter does not answer (asleep with the engine off), try again every few seconds.
+    /// What is polled: the chosen values, and while recording the recording's too (its rest in turn).
+    fn send_live(&self) {
+        let mut fast: Vec<u8> = self.recorder.as_ref().map(|r| r.fast.clone()).unwrap_or_default();
+        for p in &self.chosen {
+            if !fast.contains(p) {
+                fast.push(*p);
+            }
+        }
+        let _ = self.tx.send(Cmd::Live(fast));
+        if let Some(r) = &self.recorder {
+            let rest: Vec<u8> = r.rest.iter().copied().filter(|p| !self.chosen.contains(p)).collect();
+            let _ = self.tx.send(Cmd::LiveRotate(rest));
+        }
+    }
+
+    /// Records a drive: every value the vehicle offers (logs::drive_set), live data started for it.
+    fn start_recording(&mut self) {
+        let Some(info) = &self.info else {
+            self.status = "Connect first: a recording starts once the vehicle answers.".into();
+            return;
+        };
+        let (fast, rest) = logs::drive_set(&info.live);
+        match logs::Recorder::start(&fast, &rest) {
+            Ok(r) => {
+                self.status = format!(
+                    "Recording {} values to {} (the Logs page shows it as it comes in).",
+                    fast.len() + rest.len(),
+                    r.path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()
+                );
+                self.recorder = Some(r);
+                self.live_on = true;
+                self.send_live();
+            }
+            Err(e) => self.status = format!("Could not record: {e}"),
+        }
+    }
+
+    fn stop_recording(&mut self) {
+        if let Some(r) = self.recorder.take() {
+            self.status = format!("Saved {} rows to {} (see the Logs page).", r.rows, r.path.display());
+            if self.live_on {
+                self.send_live();
+            }
+        }
+    }
+
     fn keep_trying(&mut self, ctx: &egui::Context) {
         if !self.auto || self.user_off || self.link != Link::Off {
             return;
         }
         if self.last_try.elapsed() >= autoconn::RETRY {
             self.last_try = std::time::Instant::now();
+            // a recording in the background has the adapter: show it (Logs follows it) rather than try for the adapter
+            if let Some(p) = logs::recording_now().filter(|_| self.recorder.is_none()) {
+                let name = p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+                self.status = format!("The adapter is recording in the background ({name}): the Logs page shows it as it comes in.");
+                return;
+            }
             self.link = Link::Busy;
             let _ = self.tx.send(Cmd::Connect(self.adapter.trim().to_string()));
         }
@@ -438,6 +493,13 @@ impl App {
     fn take_handed(&mut self, ctx: &egui::Context) {
         while let Ok(args) = self.handed.try_recv() {
             if let Ok(st) = Start::parse(&args) {
+                if st.record {
+                    if self.link == Link::On && self.recorder.is_none() {
+                        self.start_recording();
+                    } else {
+                        self.start.record = true;
+                    }
+                }
                 if let Some(p) = st.page {
                     self.page = p;
                 }
@@ -557,9 +619,15 @@ impl App {
                     }
                     if std::mem::take(&mut self.start.live) && !self.chosen.is_empty() {
                         self.live_on = true;
-                        let _ = self
-                            .tx
-                            .send(Cmd::Live(self.chosen.iter().copied().collect()));
+                        self.send_live();
+                    }
+                    // a recording goes on where it was (the adapter dropped and came back), or starts when asked
+                    if self.recorder.is_some() {
+                        self.live_on = true;
+                        self.send_live();
+                        self.status = "Connected again: recording goes on.".into();
+                    } else if std::mem::take(&mut self.start.record) {
+                        self.start_recording();
                     }
                 }
                 Event::Failed(m) => {
@@ -1231,6 +1299,7 @@ impl App {
             if self.live_on {
                 if ui.button("Stop").clicked() {
                     self.live_on = false;
+                    self.stop_recording();
                     let _ = self.tx.send(Cmd::Live(vec![]));
                 }
                 ui.spinner();
@@ -1242,34 +1311,22 @@ impl App {
                 .clicked()
             {
                 self.live_on = true;
-                let _ = self
-                    .tx
-                    .send(Cmd::Live(self.chosen.iter().copied().collect()));
+                self.send_live();
             }
-            if let Some((rows, path)) = self.recorder.as_ref().map(|r| (r.rows, r.path.clone())) {
+            if let Some((rows, n)) = self.recorder.as_ref().map(|r| (r.rows, r.fast.len() + r.rest.len())) {
                 if ui.button("Stop recording").clicked() {
-                    self.status = format!("Saved {rows} rows to {}", path.display());
-                    self.recorder = None;
-                    self.logs.chosen = None;
-                    self.logs.refresh();
+                    self.stop_recording();
                 }
-                ui.label(RichText::new(format!("● recording, {rows} rows")).color(pal.red));
+                ui.label(RichText::new(format!("● recording {n} values, {rows} rows")).color(pal.red));
             } else if ui
-                .add_enabled(!self.chosen.is_empty(), egui::Button::new("Record"))
-                .on_hover_text("Save the chosen values to a recording (see the Logs page); starts live data too")
+                .add_enabled(!self.scanning, egui::Button::new("Record drive"))
+                .on_hover_text(
+                    "Record every value the vehicle offers (fuel trims, timing, air flow, throttle and mixture every sweep, \
+                     the rest every few seconds) until stopped, keeping the laptop awake; see it on the Logs page",
+                )
                 .clicked()
             {
-                let pids: Vec<u8> = self.chosen.iter().copied().collect();
-                match logs::Recorder::start(&pids) {
-                    Ok(r) => {
-                        self.recorder = Some(r);
-                        if !self.live_on {
-                            self.live_on = true;
-                            let _ = self.tx.send(Cmd::Live(pids));
-                        }
-                    }
-                    Err(e) => self.status = format!("Could not record: {e}"),
-                }
+                self.start_recording();
             }
             ui.label(
                 RichText::new(format!(
@@ -1299,9 +1356,7 @@ impl App {
                                 self.chosen.remove(p);
                             }
                             if self.live_on {
-                                let _ = self
-                                    .tx
-                                    .send(Cmd::Live(self.chosen.iter().copied().collect()));
+                                self.send_live();
                             }
                         }
                     }
@@ -1316,13 +1371,13 @@ impl App {
                         card(ui, pal, d.name, |ui| {
                             ui.horizontal(|ui| {
                                 ui.label(
-                                    RichText::new(
-                                        last.map_or("-".to_string(), |v| format!("{v:.2}")),
-                                    )
+                                    RichText::new(last.map_or("-".to_string(), |v| {
+                                        format!("{:.2}", logs::shown(d.unit, v).0)
+                                    }))
                                     .size(24.0)
                                     .strong(),
                                 );
-                                ui.label(d.unit);
+                                ui.label(logs::shown(d.unit, 0.0).1);
                             });
                             if let Some(h) = h {
                                 graph(ui, pal, h);
@@ -3208,7 +3263,7 @@ fn main() -> eframe::Result {
     let start = match Start::parse(&args) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("icarus-app: {e}\nusage: icarus-app [--connect] [--adapter A] [--page vehicle|modules|live|tests|settings|learning|bus|maps|garage|tools] [--scan] [--live] [--learn [--mark TEXT] [--learn-seconds N]] [--maps DEF.xdf IMAGE.bin [SECOND.bin]] [--map NAME [--cell R,C]]");
+            eprintln!("icarus-app: {e}\nusage: icarus-app [--connect] [--adapter A] [--page vehicle|modules|live|logs|tests|settings|learning|bus|maps|garage|tools] [--scan] [--live] [--record] [--learn [--mark TEXT] [--learn-seconds N]] [--maps DEF.xdf IMAGE.bin [SECOND.bin]] [--map NAME [--cell R,C]]");
             std::process::exit(2);
         }
     };
