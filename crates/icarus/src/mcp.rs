@@ -4,7 +4,7 @@
 //! **Read-only, always.** The tools here only read: identity, codes with their meanings, the freeze frame, live values,
 //! every module's codes, the tires/gears arithmetic, and the learning sessions Icarus saved while watching another tool. Clearing codes, actuator tests and anything else that changes a
 //! vehicle are never offered to a model (a test checks the tool list), as Sarina's own rules keep launching agents
-//! CLI-only. The adapter is the one named by ICARUS_ADAPTER in the server's environment.
+//! CLI-only. The adapter is the one named by ICARUS_ADAPTER in the server's environment, else the one the window last used.
 
 use icarus_obd::elm::Elm;
 use icarus_obd::port::Target;
@@ -61,6 +61,18 @@ fn tool_list() -> Value {
             }, "required": ["stock", "new"]}
         }
     ])
+}
+
+/// The adapter the window last connected to (icarus-app writes ~/.config/icarus/adapter).
+fn remembered_adapter() -> Option<String> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config"))
+        })?;
+    let t = std::fs::read_to_string(base.join("icarus/adapter")).ok()?;
+    let a = t.lines().next()?.trim().to_string();
+    (!a.is_empty()).then_some(a)
 }
 
 /// The recorded drives: the list (newest first, at most 20) and the newest one's summary, or the named one's.
@@ -149,9 +161,10 @@ fn learning_sessions(file: Option<&str>) -> Result<String, String> {
 }
 
 fn connect() -> Result<Elm, String> {
-    let spec = std::env::var("ICARUS_ADAPTER").map_err(|_| {
-        "no adapter: set ICARUS_ADAPTER in this server's definition (e.g. bt:AA:BB:CC:DD:EE:FF)"
-            .to_string()
+    // the adapter named in this server's definition, else the one the window last connected to (~/.config/icarus/adapter),
+    // so a definition need not carry a Bluetooth address
+    let spec = std::env::var("ICARUS_ADAPTER").ok().filter(|a| !a.trim().is_empty()).or_else(remembered_adapter).ok_or_else(|| {
+        "no adapter: set ICARUS_ADAPTER in this server's definition (e.g. bt:AA:BB:CC:DD:EE:FF), or connect once in the window".to_string()
     })?;
     let port = Target::parse(&spec)?
         .open()
