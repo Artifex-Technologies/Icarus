@@ -3,6 +3,7 @@
 //! bus, and maps from an image and a definition (with what a tune changed). Yggdrasil's look (yggdrasil-ui).
 
 mod autoconn;
+mod logs;
 mod single;
 mod worker;
 
@@ -32,12 +33,14 @@ enum Page {
     Maps,
     Garage,
     Tools,
+    Logs,
 }
 
-const PAGES: [(Page, &str); 10] = [
+const PAGES: [(Page, &str); 11] = [
     (Page::Vehicle, "Vehicle"),
     (Page::Modules, "Modules"),
     (Page::Live, "Live data"),
+    (Page::Logs, "Logs"),
     (Page::Tests, "Tests"),
     (Page::Settings, "Settings"),
     (Page::Learn, "Learning"),
@@ -271,6 +274,8 @@ struct App {
     live_on: bool,
     chosen: BTreeSet<u8>,
     history: HashMap<u8, VecDeque<(f64, f64)>>,
+    recorder: Option<logs::Recorder>,
+    logs: logs::Logs,
     maps: Maps,
 }
 
@@ -361,6 +366,8 @@ impl App {
             live_on: false,
             chosen: [0x0C, 0x05, 0x06, 0x07, 0x44].into_iter().collect(),
             history: HashMap::new(),
+            recorder: None,
+            logs: logs::Logs::default(),
             maps: Maps {
                 def_path: String::new(),
                 bin_path: String::new(),
@@ -646,6 +653,9 @@ impl App {
                     self.last_report = Some(p);
                 }
                 Event::Reading { pid, value, at } => {
+                    if let Some(r) = self.recorder.as_mut() {
+                        r.add(pid, value, at);
+                    }
                     let h = self.history.entry(pid).or_default();
                     h.push_back((at, value));
                     while h.len() > 300 {
@@ -1235,6 +1245,31 @@ impl App {
                 let _ = self
                     .tx
                     .send(Cmd::Live(self.chosen.iter().copied().collect()));
+            }
+            if let Some((rows, path)) = self.recorder.as_ref().map(|r| (r.rows, r.path.clone())) {
+                if ui.button("Stop recording").clicked() {
+                    self.status = format!("Saved {rows} rows to {}", path.display());
+                    self.recorder = None;
+                    self.logs.chosen = None;
+                    self.logs.refresh();
+                }
+                ui.label(RichText::new(format!("● recording, {rows} rows")).color(pal.red));
+            } else if ui
+                .add_enabled(!self.chosen.is_empty(), egui::Button::new("Record"))
+                .on_hover_text("Save the chosen values to a recording (see the Logs page); starts live data too")
+                .clicked()
+            {
+                let pids: Vec<u8> = self.chosen.iter().copied().collect();
+                match logs::Recorder::start(&pids) {
+                    Ok(r) => {
+                        self.recorder = Some(r);
+                        if !self.live_on {
+                            self.live_on = true;
+                            let _ = self.tx.send(Cmd::Live(pids));
+                        }
+                    }
+                    Err(e) => self.status = format!("Could not record: {e}"),
+                }
             }
             ui.label(
                 RichText::new(format!(
@@ -3002,6 +3037,7 @@ impl eframe::App for App {
                                 Page::Bus => self.page_bus(ui, &pal),
                                 Page::Garage => self.page_garage(ui, &pal),
                                 Page::Tools => self.page_tools(ui, &pal),
+                                Page::Logs => self.logs.page(ui, &pal),
                                 _ => self.page_live(ui, &pal),
                             });
                     }

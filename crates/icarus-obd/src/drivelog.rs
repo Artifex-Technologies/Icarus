@@ -97,6 +97,72 @@ fn mean(v: &[f64]) -> Option<f64> {
     (!v.is_empty()).then(|| v.iter().sum::<f64>() / v.len() as f64)
 }
 
+/// A recording as columns over time, for charts: the times (seconds), and each column's name and values (None where the
+/// vehicle gave none).
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Series {
+    pub t: Vec<f64>,
+    pub names: Vec<String>,
+    pub cols: Vec<Vec<Option<f64>>>,
+}
+
+impl Series {
+    /// The column whose name holds every one of `words` (lowercase), e.g. ["short-term", "bank 1"].
+    pub fn find(&self, words: &[&str]) -> Option<usize> {
+        find(&self.names, words)
+    }
+}
+
+pub fn series(text: &str) -> Result<Series, String> {
+    let mut lines = text.lines();
+    let header = split(lines.next().ok_or("the file is empty")?);
+    let names: Vec<String> = header
+        .iter()
+        .skip(1)
+        .map(|h| h.trim().to_string())
+        .collect();
+    let mut s = Series {
+        names: names.clone(),
+        cols: vec![vec![]; names.len()],
+        ..Default::default()
+    };
+    for l in lines {
+        let f = split(l);
+        let Some(t) = f.first().and_then(|x| x.trim().parse::<f64>().ok()) else {
+            continue;
+        };
+        s.t.push(t);
+        for (i, c) in s.cols.iter_mut().enumerate() {
+            c.push(f.get(i + 1).and_then(|x| x.trim().parse::<f64>().ok()));
+        }
+    }
+    if s.t.is_empty() {
+        return Err("no readings in this log".into());
+    }
+    Ok(s)
+}
+
+/// A CSV header for these column names, as `icarus obd live --csv` writes it.
+pub fn csv_header(names: &[String]) -> String {
+    format!(
+        "time_s,{}",
+        names
+            .iter()
+            .map(|n| format!("\"{n}\""))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+/// A CSV row: the time, then each value (empty where there is none).
+pub fn csv_row(t: f64, values: &[Option<f64>]) -> String {
+    let v: Vec<String> = values
+        .iter()
+        .map(|x| x.map(|x| format!("{x:.2}")).unwrap_or_default())
+        .collect();
+    format!("{t:.2},{}", v.join(","))
+}
+
 pub fn summarize(text: &str) -> Result<Summary, String> {
     let mut lines = text.lines();
     let header = split(lines.next().ok_or("the file is empty")?);
@@ -364,6 +430,26 @@ mod tests {
             summarize("time_s,\"Engine speed [rpm]\"\n0,700\n").is_err(),
             "no trims, no summary"
         );
+    }
+
+    #[test]
+    fn a_recording_as_columns_and_back() {
+        let names = vec![
+            "Engine speed [rpm]".to_string(),
+            "Short-term fuel trim, bank 1 [%]".to_string(),
+        ];
+        let text = format!(
+            "{}\n{}\n{}\n",
+            csv_header(&names),
+            csv_row(0.5, &[Some(650.0), Some(-1.56)]),
+            csv_row(1.0, &[Some(660.0), None])
+        );
+        let s = series(&text).unwrap();
+        assert_eq!(s.t, [0.5, 1.0]);
+        assert_eq!(s.names, names);
+        assert_eq!(s.cols[1], [Some(-1.56), None]);
+        assert_eq!(s.find(&["short-term", "bank 1"]), Some(1));
+        assert!(series("time_s,\"x\"\n").is_err());
     }
 
     #[test]
