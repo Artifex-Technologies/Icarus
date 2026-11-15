@@ -75,24 +75,121 @@ pub fn nrc(code: u8) -> &'static str {
     }
 }
 
-/// One module's answer to a request, pending responses (7F xx 78) waited out.
-fn ask(elm: &mut dyn Link, tx: u16, rx: u16, data: &[u8]) -> Result<Option<Answer>, ObdError> {
+/// The wait before a request is sent again after "response pending" (7F xx 78) or "busy" (7F xx 21).
+pub const PENDING_WAIT: Duration = Duration::from_millis(300);
+/// Sends of one request window at most: the first and three more after a pending or busy answer.
+pub const WINDOW_SENDS: usize = 4;
+/// The wait before `read_data` asks a second window, after a first that held only a late answer to another identifier: at
+/// least module data's least gap between requests (`moddata::MIN_GAP`, 50 ms), so the resend is paced like any request.
+pub const RESEND_WAIT: Duration = Duration::from_millis(50);
+
+/// Every answer in one request's window, pending responses (7F xx 78) and "busy" (7F xx 21) waited out: when the window
+/// ends with one of them, the request is sent again after 300 ms (a read is harmless to repeat), up to three times.
+fn ask_window(elm: &mut dyn Link, tx: u16, rx: u16, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
+    ask_window_with(elm, tx, rx, data, &mut sleep)
+}
+
+/// `ask_window`, waiting with `nap` (module data passes its pacer's clock, so the waits are the pacer's and tests check
+/// them without sleeping).
+fn ask_window_with(
+    elm: &mut dyn Link,
+    tx: u16,
+    rx: u16,
+    data: &[u8],
+    nap: &mut dyn FnMut(Duration),
+) -> Result<Vec<Answer>, ObdError> {
     check_read_only(data)?;
-    for attempt in 0..4 {
+    for attempt in 0..WINDOW_SENDS {
         let answers = match elm.request_to(tx, rx, data) {
             Ok(a) => a,
-            Err(ObdError::NoData) => return Ok(None),
+            Err(ObdError::NoData) => return Ok(vec![]),
             Err(e) => return Err(e),
         };
-        let Some(a) = answers.into_iter().last() else {
-            return Ok(None);
-        };
-        match a.refusal() {
-            Some((_, 0x78)) | Some((_, 0x21)) if attempt < 3 => sleep(Duration::from_millis(300)),
-            _ => return Ok(Some(a)),
+        match answers.last().and_then(|a| a.refusal()) {
+            Some((_, 0x78)) | Some((_, 0x21)) if attempt + 1 < WINDOW_SENDS => nap(PENDING_WAIT),
+            _ => return Ok(answers),
         }
     }
-    Ok(None)
+    Ok(vec![])
+}
+
+/// One module's answer to a request, pending responses (7F xx 78) waited out.
+fn ask(elm: &mut dyn Link, tx: u16, rx: u16, data: &[u8]) -> Result<Option<Answer>, ObdError> {
+    Ok(ask_window(elm, tx, rx, data)?.into_iter().last())
+}
+
+/// A module's answer to a data request (`read_data`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DataAnswer {
+    /// The bytes after the service byte and the identifier's echo.
+    Data(Vec<u8>),
+    /// `7F <service> <code>`.
+    Refused(u8),
+    /// No answer, or none to this identifier.
+    Silent,
+}
+
+/// Reads one data identifier: `22 hi lo` (UDS), `21 id` (KWP2000 local identifier) or `1A id` (KWP2000 identification),
+/// nothing else. The answer must be the positive one with the identifier echoed (`62 hi lo ...`); a positive answer to
+/// another identifier is a late answer to an earlier request: it is dropped and the request sent once more, and if that
+/// does not match either, the module counts as silent.
+///
+/// The most it sends for one call is two windows of `WINDOW_SENDS`, 8 sends, and no two are closer than 50 ms: 300 ms
+/// (`PENDING_WAIT`) within a window, `RESEND_WAIT` before the second.
+pub fn read_data(
+    elm: &mut dyn Link,
+    tx: u16,
+    rx: u16,
+    service: u8,
+    ident: u16,
+) -> Result<DataAnswer, ObdError> {
+    read_data_with(elm, tx, rx, service, ident, &mut sleep)
+}
+
+/// `read_data`, waiting with `nap` (the pacer's clock).
+pub fn read_data_with(
+    elm: &mut dyn Link,
+    tx: u16,
+    rx: u16,
+    service: u8,
+    ident: u16,
+    nap: &mut dyn FnMut(Duration),
+) -> Result<DataAnswer, ObdError> {
+    let req = match service {
+        0x22 => vec![0x22, (ident >> 8) as u8, ident as u8],
+        0x21 | 0x1A if ident <= 0xFF => vec![service, ident as u8],
+        _ => {
+            return Err(ObdError::Adapter(format!(
+                "a data read is 21, 22 or 1A with its identifier, not {service:02X} {ident:X}"
+            )))
+        }
+    };
+    for second in [false, true] {
+        if second {
+            nap(RESEND_WAIT);
+        }
+        let window = ask_window_with(elm, tx, rx, &req, nap)?;
+        if let Some(a) = window.iter().find(|a| {
+            a.data.first() == Some(&(service + 0x40)) && a.data.get(1..req.len()) == Some(&req[1..])
+        }) {
+            return Ok(DataAnswer::Data(a.data[req.len()..].to_vec()));
+        }
+        if let Some((_, code)) = window
+            .iter()
+            .rev()
+            .filter_map(|a| a.refusal())
+            .find(|(s, _)| *s == service)
+        {
+            return Ok(DataAnswer::Refused(code));
+        }
+        if !window
+            .iter()
+            .any(|a| a.data.first() == Some(&(service + 0x40)))
+        {
+            return Ok(DataAnswer::Silent);
+        }
+    }
+    Ok(DataAnswer::Silent)
 }
 
 /// A module trouble code with its status, as UDS and KWP2000 report them.
@@ -416,7 +513,7 @@ mod tests {
                 found.push(m.tx);
             }
         }
-        assert_eq!(found, vec![0x780, 0x7B0, 0x7C0, 0x7E0, 0x7E1]);
+        assert_eq!(found, vec![0x700, 0x701, 0x780, 0x7B0, 0x7C0, 0x7E0, 0x7E1]);
         let sent_on = sent_on(&sent.lock().unwrap());
         assert!(
             sent_on.is_disjoint(&skip),
@@ -444,10 +541,10 @@ mod tests {
     #[test]
     fn the_sweep_never_sends_on_the_answer_id_of_a_module_it_found() {
         use crate::sim::recording::Recorder;
-        // with no profile loaded, only 7DF and 7E8-7EF are known answer IDs: 788, 7B8 and 7C8 (where the simulated 780, 7B0
-        // and 7C0 answer from) are in the list, and only what the sweep finds can keep it off them
+        // with no profile loaded, only 7DF and 7E8-7EF are known answer IDs: 708, 709, 788, 7B8 and 7C8 (where the simulated
+        // 700, 701, 780, 7B0 and 7C0 answer from) are in the list, and only what the sweep finds can keep it off them
         let list = sweep(&[]);
-        for id in [0x788, 0x7B8, 0x7C8] {
+        for id in [0x708, 0x709, 0x788, 0x7B8, 0x7C8] {
             assert!(list.iter().any(|m| m.tx == id), "{id:03X}");
         }
         let (port, sent) = Recorder::new(SimCar::new());
@@ -460,8 +557,10 @@ mod tests {
                 found.push(m.tx);
             }
         }
-        assert_eq!(found, vec![0x780, 0x7B0, 0x7C0, 0x7E0, 0x7E1]);
+        assert_eq!(found, vec![0x700, 0x701, 0x780, 0x7B0, 0x7C0, 0x7E0, 0x7E1]);
         for (rx, tx) in [
+            (0x708, 0x700),
+            (0x709, 0x701),
             (0x788, 0x780),
             (0x7B8, 0x7B0),
             (0x7C8, 0x7C0),
@@ -470,7 +569,7 @@ mod tests {
             assert_eq!(guard.answer_of(rx), Some(tx), "{rx:03X}");
         }
         let on = sent_on(&sent.lock().unwrap());
-        for id in [0x788, 0x7B8, 0x7C8] {
+        for id in [0x708, 0x709, 0x788, 0x7B8, 0x7C8] {
             assert!(!on.contains(&id), "a request went out on {id:03X}");
         }
         // the IDs around them were still asked
@@ -492,7 +591,7 @@ mod tests {
             .filter(|m| present(&mut elm, m.tx, m.rx()).unwrap())
             .map(|m| m.tx)
             .collect();
-        assert_eq!(found, vec![0x7E0, 0x7E1, 0x7B0, 0x780, 0x7C0]);
+        assert_eq!(found, vec![0x7E0, 0x7E1, 0x700, 0x701, 0x7B0, 0x780, 0x7C0]);
         let id = module_identity(&mut elm, 0x7E0, 0x7E0 + 8).unwrap();
         assert!(
             id.contains(&("part number", "89661-ICARUS".to_string())),

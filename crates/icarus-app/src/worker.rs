@@ -146,6 +146,8 @@ pub struct ModuleView {
 
 pub enum Event {
     Status(String),
+    /// A module's answer to a request to every module was left out (it did not add up); the others' were kept.
+    Dropped(String),
     Connected(Box<Info>),
     Failed(String),
     Disconnected,
@@ -199,6 +201,10 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
     // a command that arrived while the bus was watched, handled next
     let mut queued: Option<Cmd> = None;
     loop {
+        // a module left out of a broadcast's answers is shown, never lost silently (each once a connection)
+        for n in elm.as_mut().map(Elm::take_dropped).unwrap_or_default() {
+            send(Event::Dropped(n));
+        }
         let busy = test.is_some() || (!live.is_empty() && elm.is_some());
         let cmd = if let Some(c) = queued.take() {
             Some(c)

@@ -1,0 +1,47 @@
+format = 1
+
+[module]
+name = "transmission (UDS)"
+tx = 0x701
+dialect = "uds"
+kind = "transmission"
+
+[[request]]
+service = 0x22
+ident = 0x1F11
+every = 1.0
+unverified = [[2025, 2025]]
+
+  [[request.value]]
+  id = "SIM_ATF"
+  name = "transmission fluid temperature"
+  path = "Transmission.Temperatures"
+  byte = 0
+  bits = 8
+  add = -40.0
+  unit = "°C"
+
+  [[request.value]]
+  id = "SIM_OUT"
+  name = "output shaft speed"
+  path = "Transmission"
+  byte = 1
+  bits = 16
+  unit = "rpm"
+
+  [[request.value]]
+  id = "SIM_GEAR"
+  name = "gear"
+  path = "Transmission"
+  byte = 3
+  bits = 8
+
+  [[request.value]]
+  id = "SIM_LOCKUP"
+  name = "torque converter lock-up"
+  path = "Transmission"
+  byte = 4
+  bit = 7
+  bits = 1
+  kind = "state"
+  states = { "0" = "off", "1" = "on" }

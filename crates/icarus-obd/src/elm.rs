@@ -167,6 +167,13 @@ pub struct Elm {
     /// CAN auto-formatting is off (`ATCAF0`, for watching the bus): it goes back on (`ATCAF1`) before the next request,
     /// which needs the adapter to add and strip ISO-TP's length bytes.
     raw_frames: bool,
+    /// The senders left out of the last broadcast's answers, with why (a message that did not add up): the others' answers
+    /// were kept (`parse_broadcast`).
+    pub dropped: Vec<(String, String)>,
+    /// Every sender left out of a broadcast on this connection, as a note, not yet taken (`take_dropped`): each (sender,
+    /// why) once, so a loop of broadcasts does not repeat it.
+    unseen: Vec<String>,
+    seen: std::collections::BTreeSet<(String, String)>,
 }
 
 const LINE_ERRORS: [&str; 12] = [
@@ -195,6 +202,9 @@ impl Elm {
             voltage: None,
             target: None,
             raw_frames: false,
+            dropped: Vec::new(),
+            unseen: Vec::new(),
+            seen: Default::default(),
         };
         let reset = elm.command("ATZ", Duration::from_secs(4))?;
         elm.id = reset
@@ -275,14 +285,41 @@ impl Elm {
         self.command(hex, timeout)
     }
 
-    /// Sends an OBD request (e.g. `[0x01, 0x0C]`, engine speed) to every module and returns each one's answer.
+    /// Sends an OBD request (e.g. `[0x01, 0x0C]`, engine speed) to every module and returns each one's answer. A sender
+    /// whose message does not add up is left out and named in `dropped` (and once a connection in `take_dropped`'s notes);
+    /// the other senders' answers are kept.
     pub fn request(&mut self, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
         self.format_frames()?;
         if self.target.is_some() {
             self.ok_commands(&["ATSH7DF", "ATCRA", "ATFCSM0"])?;
             self.target = None;
         }
-        self.send_request(data)
+        self.dropped.clear();
+        let lines = self.request_lines(data)?;
+        let (answers, dropped) = parse_broadcast(&lines, self.protocol)?;
+        self.keep_dropped(data, dropped);
+        Ok(answers)
+    }
+
+    /// Notes the senders a broadcast of `data` left out: in `dropped`, and once each in the notes `take_dropped` gives.
+    fn keep_dropped(&mut self, data: &[u8], dropped: Vec<(String, String)>) {
+        for (from, why) in &dropped {
+            if self.seen.insert((from.clone(), why.clone())) {
+                let req: Vec<String> = data.iter().map(|b| format!("{b:02X}")).collect();
+                self.unseen.push(format!(
+                    "{from}'s answer to {} (asked of every module) was left out: {why}; the other modules' answers \
+                     were kept",
+                    req.join(" ")
+                ));
+            }
+        }
+        self.dropped = dropped;
+    }
+
+    /// The notes on senders left out of broadcasts since the last call, each once a connection: whoever shows a
+    /// broadcast's answers shows these too, so a module is never lost silently.
+    pub fn take_dropped(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.unseen)
     }
 
     /// Sends a request to one module on 11-bit CAN: to request ID `tx`, listening only to answer ID `rx` (usually tx + 8).
@@ -445,10 +482,15 @@ impl Elm {
     }
 
     fn send_request(&mut self, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
+        let lines = self.request_lines(data)?;
+        parse_lines(&lines, self.protocol)
+    }
+
+    fn request_lines(&mut self, data: &[u8]) -> Result<Vec<String>, ObdError> {
         let hex: String = data.iter().map(|b| format!("{b:02X}")).collect();
         let lines = self.raw_request(&hex, Duration::from_secs(5))?;
         check_errors(&lines)?;
-        parse_lines(&lines, self.protocol)
+        Ok(lines)
     }
 }
 
@@ -477,7 +519,34 @@ fn check_errors(lines: &[String]) -> Result<(), ObdError> {
 }
 
 /// Lines with headers turned into answers: CAN frames put back together per sender, other protocols one answer per line.
+/// Any message that does not add up is an error: a request to one module reads live values from these bytes.
 pub fn parse_lines(lines: &[String], protocol: Protocol) -> Result<Vec<Answer>, ObdError> {
+    let (answers, bad) = parse_each(lines, protocol)?;
+    match bad.into_iter().next() {
+        Some((_, why)) => Err(ObdError::Garbled(why)),
+        None => Ok(answers),
+    }
+}
+
+/// Every sender's answers, and (sender, why) for each sender left out because its message did not add up.
+pub type Parsed = (Vec<Answer>, Vec<(String, String)>);
+
+/// `parse_lines` for a broadcast (7DF), which many modules answer: a sender whose message does not add up is left out and
+/// named, with why, in the second part, and every other sender's answer is kept (one module's lost frame does not lose the
+/// engine's VIN). An error only when a line cannot be read at all, or no sender's answer adds up.
+pub fn parse_broadcast(lines: &[String], protocol: Protocol) -> Result<Parsed, ObdError> {
+    let (answers, bad) = parse_each(lines, protocol)?;
+    if answers.is_empty() {
+        if let Some((_, why)) = bad.first() {
+            return Err(ObdError::Garbled(why.clone()));
+        }
+    }
+    Ok((answers, bad))
+}
+
+/// Every sender's answers, and (sender, why) for each sender whose message did not add up (its answers left out, in the
+/// order the problems were found). Err only for a line that is not a frame at all.
+fn parse_each(lines: &[String], protocol: Protocol) -> Result<Parsed, ObdError> {
     let hc = protocol.header_chars();
     let mut frames: Vec<(String, Vec<u8>)> = Vec::new();
     for l in lines {
@@ -494,77 +563,148 @@ pub fn parse_lines(lines: &[String], protocol: Protocol) -> Result<Vec<Answer>, 
             .collect();
         frames.push((hex[..hc].to_uppercase(), bytes));
     }
+    let mut bad: Vec<(String, String)> = Vec::new();
     if !protocol.is_can() {
         // header (priority, target, sender) then data then a checksum byte
-        return frames
-            .into_iter()
-            .map(|(h, b)| {
-                if b.len() < 2 {
-                    return Err(ObdError::Garbled(h));
-                }
-                Ok(Answer {
+        let mut out = Vec::new();
+        for (h, b) in frames {
+            if b.len() < 2 {
+                bad.push((h.clone(), h));
+            } else {
+                out.push(Answer {
                     from: h,
                     data: b[..b.len() - 1].to_vec(),
-                })
-            })
-            .collect();
+                });
+            }
+        }
+        let gone: Vec<String> = bad.iter().map(|b| b.0.clone()).collect();
+        out.retain(|a| !gone.contains(&a.from));
+        return Ok((out, bad));
     }
-    // ISO-TP: single frames (0x0L), first frames (0x1L LL) and consecutive frames (0x2N), per sender
-    let mut out: Vec<(Answer, usize)> = Vec::new();
+    // ISO-TP: single frames (0x0L), first frames (0x1L LL) and consecutive frames (0x2N), per sender. A message that does
+    // not add up (a frame lost or repeated, one missing at the end, lengths classic CAN cannot carry) is an error for that
+    // sender, never a short or wrong answer: live values are read from these bytes.
+    struct Message {
+        a: Answer,
+        len: usize,
+        /// The sequence number the next consecutive frame must carry: 1 after the first frame, then 2..15, 0, 1...
+        next: u8,
+    }
+    let mut out: Vec<Message> = Vec::new();
     for (from, b) in frames {
+        if bad.iter().any(|x| x.0 == from) {
+            continue; // the rest of a sender whose message already did not add up
+        }
         let Some(&pci) = b.first() else { continue };
-        match pci >> 4 {
+        let open = |out: &Vec<Message>| {
+            out.iter()
+                .any(|m| m.a.from == from && m.a.data.len() < m.len)
+        };
+        let problem = match pci >> 4 {
             0 => {
                 let len = (pci & 0x0F) as usize;
-                if len == 0 || b.len() < 1 + len {
-                    return Err(ObdError::Garbled(format!(
-                        "{from} single frame of {len} bytes"
-                    )));
+                if len == 0 || len > 7 || b.len() < 1 + len {
+                    Some(format!("{from} single frame of {len} bytes"))
+                } else {
+                    out.push(Message {
+                        a: Answer {
+                            from: from.clone(),
+                            data: b[1..1 + len].to_vec(),
+                        },
+                        len,
+                        next: 0,
+                    });
+                    None
                 }
-                out.push((
-                    Answer {
-                        from,
-                        data: b[1..1 + len].to_vec(),
-                    },
-                    len,
-                ));
             }
             1 => {
-                if b.len() < 2 {
-                    return Err(ObdError::Garbled(from));
-                }
-                let len = (((pci & 0x0F) as usize) << 8) | b[1] as usize;
-                out.push((
-                    Answer {
-                        from,
-                        data: b[2..].to_vec(),
-                    },
-                    len,
-                ));
-            }
-            2 => {
-                let Some((a, len)) = out
-                    .iter_mut()
-                    .rev()
-                    .find(|(a, len)| a.from == from && a.data.len() < *len)
-                else {
-                    return Err(ObdError::Garbled(format!(
-                        "{from} continued a message that never started"
-                    )));
+                let len = if b.len() >= 2 {
+                    (((pci & 0x0F) as usize) << 8) | b[1] as usize
+                } else {
+                    0
                 };
-                let take = (*len - a.data.len()).min(b.len() - 1);
-                a.data.extend_from_slice(&b[1..1 + take]);
+                if b.len() < 8 {
+                    Some(format!("{from} first frame without its 6 data bytes"))
+                } else if len == 0 {
+                    Some(format!("{from} message longer than classic ISO-TP carries"))
+                } else if len <= 7 {
+                    Some(format!(
+                        "{from} first frame of a {len}-byte message (that is a single frame's)"
+                    ))
+                } else if open(&out) {
+                    Some(format!(
+                        "{from} started a new message before the last one ended"
+                    ))
+                } else {
+                    out.push(Message {
+                        a: Answer {
+                            from: from.clone(),
+                            data: b[2..8].to_vec(),
+                        },
+                        len,
+                        next: 1,
+                    });
+                    None
+                }
             }
-            _ => {} // flow control: the adapter's business
+            2 => match out
+                .iter_mut()
+                .rev()
+                .find(|m| m.a.from == from && m.a.data.len() < m.len)
+            {
+                None => Some(format!("{from} continued a message that never started")),
+                Some(m) => {
+                    let seq = pci & 0x0F;
+                    if seq != m.next {
+                        Some(format!(
+                            "{from} frame {seq} came after frame {}: a frame was lost or repeated",
+                            (m.next + 15) & 0x0F
+                        ))
+                    } else {
+                        m.next = (m.next + 1) & 0x0F;
+                        let take = (m.len - m.a.data.len()).min(b.len() - 1);
+                        m.a.data.extend_from_slice(&b[1..1 + take]);
+                        None
+                    }
+                }
+            },
+            _ => None, // flow control: the adapter's business
+        };
+        if let Some(why) = problem {
+            out.retain(|m| m.a.from != from);
+            bad.push((from, why));
         }
     }
-    Ok(out
-        .into_iter()
-        .map(|(mut a, len)| {
-            a.data.truncate(len);
-            a
+    let unfinished: Vec<(String, String)> = out
+        .iter()
+        .filter(|m| m.a.data.len() < m.len)
+        .map(|m| {
+            (
+                m.a.from.clone(),
+                format!(
+                    "{} message of {} bytes ended after {}",
+                    m.a.from,
+                    m.len,
+                    m.a.data.len()
+                ),
+            )
         })
-        .collect())
+        .collect();
+    for (from, why) in unfinished {
+        if !bad.iter().any(|b| b.0 == from) {
+            out.retain(|m| m.a.from != from);
+            bad.push((from, why));
+        }
+    }
+    Ok((
+        out.into_iter()
+            .map(|mut m| {
+                m.a.data.truncate(m.len);
+                m.a
+            })
+            .collect(),
+        bad,
+    ))
 }
 
 #[cfg(test)]
@@ -609,6 +749,156 @@ mod tests {
             (a[0].from.as_str(), a[0].data.clone(), a[0].module()),
             ("18DAF110", vec![0x41, 0x10, 0xAB], "engine (ECM/PCM)")
         );
+    }
+
+    /// CAN lines from 7E8 carrying `payload` as ISO-TP frames (sequence numbers as given by `seq`, or the right ones).
+    fn isotp(payload: &[u8], seq: Option<&[u8]>) -> Vec<String> {
+        let hex = |b: &[u8]| {
+            b.iter()
+                .map(|x| format!("{x:02X}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let mut out = vec![format!(
+            "7E8 {:02X} {:02X} {}",
+            0x10 | (payload.len() >> 8) as u8,
+            payload.len() as u8,
+            hex(&payload[..6])
+        )];
+        for (i, c) in payload[6..].chunks(7).enumerate() {
+            let n = seq.map_or(((i + 1) & 0x0F) as u8, |s| s[i]);
+            let mut f = c.to_vec();
+            f.resize(7, 0xAA);
+            out.push(format!("7E8 {:02X} {}", 0x20 | n, hex(&f)));
+        }
+        out
+    }
+
+    #[test]
+    fn long_answers_come_back_whole_or_not_at_all() {
+        let p40: Vec<u8> = (0..40).collect();
+        let a = parse_lines(&isotp(&p40, None), Protocol::Can11At500).unwrap();
+        assert_eq!(a[0].data, p40, "40 bytes over 6 frames, padding dropped");
+        let p120: Vec<u8> = (0..120).collect();
+        let lines = isotp(&p120, None);
+        assert!(lines.len() > 16, "the sequence wraps past 15");
+        assert_eq!(
+            parse_lines(&lines, Protocol::Can11At500).unwrap()[0].data,
+            p120
+        );
+        let err = |l: Vec<String>| {
+            parse_lines(&l, Protocol::Can11At500)
+                .unwrap_err()
+                .to_string()
+        };
+        // a lost frame, a repeated one, the last one missing
+        let mut lost = isotp(&p40, None);
+        lost.remove(2);
+        assert!(err(lost).contains("frame was lost"));
+        assert!(err(isotp(&p40, Some(&[1, 1, 2, 3, 4]))).contains("lost or repeated"));
+        let mut short = isotp(&p40, None);
+        short.pop();
+        assert!(err(short).contains("message of 40 bytes ended after 34"));
+        // lengths classic CAN cannot carry
+        assert!(err(lines_of(&["7E8 10 00 62 1F 01 00 00 00"])).contains("longer than classic"));
+        assert!(err(lines_of(&["7E8 10 05 62 1F 01 00 00 00"])).contains("single frame's"));
+        assert!(err(lines_of(&["7E8 09 62 1F 01 00 00 00 00"])).contains("single frame of 9"));
+        assert!(err(lines_of(&["7E8 10 14 49 02"])).contains("6 data bytes"));
+        // two first frames from one sender
+        let mut two = isotp(&p40, None);
+        two.insert(2, two[0].clone());
+        assert!(err(two).contains("before the last one ended"));
+        // two senders interleaved are still fine
+        let mut both = isotp(&p40, None);
+        let other: Vec<String> = both.iter().map(|l| l.replacen("7E8", "7E9", 1)).collect();
+        both = both
+            .into_iter()
+            .zip(other)
+            .flat_map(|(a, b)| [a, b])
+            .collect();
+        let a = parse_lines(&both, Protocol::Can11At500).unwrap();
+        assert_eq!((a.len(), &a[0].data, &a[1].data), (2, &p40, &p40));
+    }
+
+    fn lines_of(s: &[&str]) -> Vec<String> {
+        lines(s)
+    }
+
+    #[test]
+    fn a_broadcast_drops_only_the_sender_whose_message_does_not_add_up() {
+        // 7E8's VIN whole, 7E9's missing a consecutive frame (a cheap adapter dropped it)
+        let vin: Vec<u8> = [0x49, 0x02, 0x01]
+            .into_iter()
+            .chain(b"1ABCDEFGHJKLMNPRS".iter().copied())
+            .collect();
+        let good = isotp(&vin, None);
+        let mut broken: Vec<String> = good.iter().map(|l| l.replacen("7E8", "7E9", 1)).collect();
+        broken.remove(1);
+        // interleaved as they come off the bus: 7E8's first frame, 7E9's, then the rest
+        let mut window = vec![good[0].clone(), broken[0].clone()];
+        window.extend(good[1..].iter().cloned());
+        window.extend(broken[1..].iter().cloned());
+        window.push("7EA 03 41 0D 00".into());
+        // asked of one module, any message that does not add up is an error
+        assert!(parse_lines(&window, Protocol::Can11At500).is_err());
+        // a broadcast keeps the others' answers, and names the one left out
+        let (answers, dropped) = parse_broadcast(&window, Protocol::Can11At500).unwrap();
+        let from: Vec<&str> = answers.iter().map(|a| a.from.as_str()).collect();
+        assert_eq!(from, vec!["7E8", "7EA"]);
+        assert_eq!(answers[0].data, vin);
+        assert_eq!(dropped.len(), 1);
+        assert_eq!(dropped[0].0, "7E9");
+        assert!(dropped[0].1.contains("frame was lost"), "{dropped:?}");
+        // a restarted message, and one that ends early, are left out the same way
+        let mut restart = isotp(&vin, None);
+        restart.insert(1, "7E9 10 14 49 02 01 31 41 42".into());
+        restart.insert(2, "7E9 10 14 49 02 01 31 41 42".into());
+        let (a, d) = parse_broadcast(&restart, Protocol::Can11At500).unwrap();
+        assert_eq!((a.len(), d[0].0.as_str()), (1, "7E9"));
+        assert!(d[0].1.contains("before the last one ended"));
+        let mut early = isotp(&vin, None);
+        early.push("7E9 10 14 49 02 01 31 41 42".into());
+        let (a, d) = parse_broadcast(&early, Protocol::Can11At500).unwrap();
+        assert_eq!(
+            (a.len(), d[0].1.as_str()),
+            (1, "7E9 message of 20 bytes ended after 6")
+        );
+        // nothing whole at all is still an error, and a line that is not a frame fails the window
+        assert!(parse_broadcast(&lines_of(&["7E9 21 00 00"]), Protocol::Can11At500).is_err());
+        assert!(parse_broadcast(
+            &lines_of(&["7E8 06 41 00 BE 3E B8 13", "hello"]),
+            Protocol::Can11At500
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn a_sender_left_out_is_noted_once_a_connection() {
+        let mut elm = Elm::connect(Box::new(SimCar::new())).unwrap();
+        assert!(
+            elm.take_dropped().is_empty(),
+            "a whole broadcast drops no one"
+        );
+        let lost = || vec![("7E9".to_string(), "a frame was lost".to_string())];
+        elm.keep_dropped(&[0x01, 0x0C], lost());
+        // a loop of broadcasts (live values): the same sender for the same reason is noted once
+        elm.keep_dropped(&[0x01, 0x0C], lost());
+        assert_eq!(elm.dropped, lost(), "the last broadcast's");
+        let notes = elm.take_dropped();
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(
+            notes[0].starts_with("7E9's answer to 01 0C") && notes[0].contains("a frame was lost"),
+            "{}",
+            notes[0]
+        );
+        assert!(elm.take_dropped().is_empty(), "taken");
+        elm.keep_dropped(&[0x01, 0x0C], lost());
+        assert!(elm.take_dropped().is_empty(), "noted already");
+        // another reason is another note; a whole broadcast clears `dropped` but not the notes
+        elm.keep_dropped(&[0x09, 0x02], vec![("7E9".into(), "ended early".into())]);
+        elm.request(&[0x01, 0x0C]).unwrap();
+        assert!(elm.dropped.is_empty());
+        assert_eq!(elm.take_dropped().len(), 1);
     }
 
     #[test]

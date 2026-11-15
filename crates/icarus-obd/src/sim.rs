@@ -23,6 +23,8 @@ pub struct SimCar {
     filter: Option<u16>,
     /// The instrument cluster answers its first trouble-code request with "response pending" (7F 19 78).
     meter_busy: bool,
+    /// The engine's UDS side (700) answers its first `22 1F02` with "response pending" (7F 22 78).
+    data_busy: bool,
     /// The engine runs (`sim`), or the ignition is on with the engine off (`sim:off`).
     engine_on: bool,
     /// Modules in the extended diagnostic session (10 03), which UDS output control needs.
@@ -75,6 +77,7 @@ impl SimCar {
             header: 0x7DF,
             filter: None,
             meter_busy: true,
+            data_busy: true,
             engine_on: true,
             extended: Default::default(),
             driven: Default::default(),
@@ -422,6 +425,9 @@ impl SimCar {
         let (part, uds, codes): (&[u8], bool, &[u8]) = match tx {
             0x7E0 => (b"89661-ICARUS", true, &[0x01, 0x71, 0x00, 0x09]),
             0x7E1 => (b"35010-ICARUS", true, &[]),
+            // the engine and transmission computers' own diagnostic addresses (UDS), beside OBD-II's 7E0/7E1
+            0x700 => (b"89663-ICARUS", true, &[]),
+            0x701 => (b"89535-ICARUS", true, &[]),
             0x7B0 => (b"89540-ICARUS", false, &[0x52, 0x41, 0x60]),
             0x780 => (b"89170-ICARUS", true, &[]),
             0x7C0 => (b"83800-ICARUS", true, &[]),
@@ -524,6 +530,39 @@ impl SimCar {
                 }
                 self.settings.insert((tx, 0x20), v.to_vec());
                 Some(vec![0x7B, 0x20])
+            }
+            // module data (`moddata`, the built-in set in data/sim): made-up identifiers
+            ([0x22, 0x1F, 0x01], true) if tx == 0x700 => {
+                let rpm = if self.engine_on { 700u16 * 4 } else { 0 };
+                let mut d = vec![0x62, 0x1F, 0x01];
+                // coolant 90 °C, intake air 30 °C (+40), engine speed (x4), road speed 0 km/h, knock correction -2.0°
+                // (signed, x2), battery 14.1 V (x10), then a calibration tag and padding the definition leaves unnamed
+                d.extend([130, 70]);
+                d.extend(rpm.to_be_bytes());
+                d.extend([0, (-4i8) as u8, if self.engine_on { 141 } else { 125 }]);
+                d.extend(b"ICARUS");
+                d.extend([0u8; 7]);
+                Some(d)
+            }
+            ([0x22, 0x1F, 0x02], true) if tx == 0x700 => {
+                if self.data_busy {
+                    self.data_busy = false;
+                    return refuse(0x78);
+                }
+                // short-term and long-term fuel trim, bank 1 ((x - 128) / 1.28 %)
+                Some(vec![0x62, 0x1F, 0x02, 131, 115])
+            }
+            ([0x22, 0x1F, 0x11], true) if tx == 0x701 => {
+                // fluid temperature 82 °C (+40), output shaft 1000 rpm, gear 3, lock-up on (bit 0 of the last byte)
+                Some(vec![0x62, 0x1F, 0x11, 122, 0x03, 0xE8, 3, 0x01])
+            }
+            ([0x22, 0x1F, 0x21], true) if tx == 0x780 => {
+                // a data answer at the airbag module, which the module-data gates must never let a request reach
+                Some(vec![0x62, 0x1F, 0x21, 0x00])
+            }
+            ([0x21, 0xA7], true) if tx == 0x7E0 => {
+                // a KWP2000-style local identifier on the OBD-II address: idle speed control 30 % (x2), a status byte
+                Some(vec![0x61, 0xA7, 60, 0x80])
             }
             ([0x22, 0xF1, 0x87], true) => Some([&[0x62, 0xF1, 0x87][..], part].concat()),
             ([0x22, 0xF1, 0x88], true) => {
@@ -818,6 +857,17 @@ mod tests {
         let ltft = j1979::read(&mut elm, 0x07).unwrap();
         assert!((ltft[0].value - 11.71875).abs() < 1e-9);
     }
+}
+
+/// The simulated vehicle's module data (made-up identifiers, `crates/icarus-obd/data/sim`): applied only to the simulated
+/// vehicle, like `tests()` and `settings()`. (file name, text) for each file of the set.
+pub fn data() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("set.toml", include_str!("../data/sim/set.toml")),
+        ("700.toml", include_str!("../data/sim/700.toml")),
+        ("701.toml", include_str!("../data/sim/701.toml")),
+        ("7E0.toml", include_str!("../data/sim/7E0.toml")),
+    ]
 }
 
 /// The simulated vehicle's settings. Like its tests, their identifiers (A001 on the cluster, 20 on the ABS module) exist only

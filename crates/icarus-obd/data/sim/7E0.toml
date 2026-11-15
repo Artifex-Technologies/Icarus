@@ -1,0 +1,28 @@
+format = 1
+
+[module]
+name = "engine (OBD-II address, local identifiers)"
+tx = 0x7E0
+kind = "engine"
+
+[[request]]
+service = 0x21
+ident = 0xA7
+
+  [[request.value]]
+  id = "SIM_ISC"
+  name = "idle speed control"
+  path = "Engine.Idle"
+  byte = 0
+  bits = 8
+  div = 2.0
+  unit = "%"
+
+  [[request.value]]
+  id = "SIM_IDLE"
+  name = "closed throttle"
+  path = "Engine.Idle"
+  byte = 1
+  bits = 1
+  kind = "state"
+  states = { "0" = "no", "1" = "yes" }

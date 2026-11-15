@@ -227,6 +227,7 @@ fn vehicle_check() -> Result<String, String> {
     let all = vehicles::load(vehicles::user_dir().as_deref()).0;
     let d = report::collect(&mut elm, &all, false).map_err(|e| e.to_string())?;
     let mut o = String::new();
+    o += &dropped_notes(&mut elm);
     o += &format!("Vehicle: VIN {}", d.vin.as_deref().unwrap_or("not given"));
     if let Some(v) = &d.vin_info {
         o += &format!(
@@ -359,7 +360,16 @@ fn vehicle_modules() -> Result<String, String> {
     if o.is_empty() {
         o = "No module answered.".into();
     }
+    o += &dropped_notes(&mut elm);
     Ok(o)
+}
+
+/// The notes on modules left out of a broadcast's answers (`Elm::take_dropped`), one line each, so none is lost silently.
+fn dropped_notes(elm: &mut Elm) -> String {
+    elm.take_dropped()
+        .iter()
+        .map(|n| format!("Note: {n}.\n"))
+        .collect()
 }
 
 fn call(name: &str, args: &Value) -> Result<String, String> {

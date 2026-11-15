@@ -5,6 +5,7 @@ pub mod checksum;
 pub mod def;
 pub mod edit;
 pub mod expr;
+pub mod moddata;
 pub mod rom;
 pub mod tires;
 pub mod xdf;

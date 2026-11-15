@@ -322,7 +322,7 @@ mod tests {
             "the pending answer is waited out, not returned: {m:?}"
         );
         assert!(matches!(
-            l.request_to(0x700, 0x708, &[0x3E, 0x00]),
+            l.request_to(0x702, 0x70A, &[0x3E, 0x00]),
             Err(ObdError::NoData)
         ));
         assert!(

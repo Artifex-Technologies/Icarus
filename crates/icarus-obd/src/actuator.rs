@@ -183,13 +183,38 @@ pub fn not_one_module(id: u16) -> Option<String> {
 
 /// Airbag and occupant-detection modules, by ID (a request ID in the built-in profiles, or its answer ID) or by name: Icarus
 /// never tests them, clears their codes or writes to them ("the airbag modules never"). One check for every path that acts.
+///
+/// By name: the words anywhere ("airbags", "restraints", "occupant classification", "pretensioner", "squib", "SRS"), and
+/// the makers' acronyms as whole words only, so "ODS" matches but "methods" does not: ORC (occupant restraint controller),
+/// ACU (airbag control unit), SDM (sensing and diagnostic module), SIR, OCS/ODS/OCM (occupant classification and
+/// detection), RCM (restraints control module), ACSM and MRS (BMW), and "air bag" written as two words.
 pub fn is_airbag(id: u16, name: &str) -> bool {
-    let words = name.to_lowercase();
+    let lower = name.to_lowercase();
+    let words: Vec<&str> = lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
     SRS_IDS.iter().any(|&s| id == s || id == s + 8)
-        || ["airbag", "srs", "restraint", "occupant", "pretension", "squib"]
-            .iter()
-            .any(|w| words.contains(w))
+        || AIRBAG_WORDS.iter().any(|w| lower.contains(w))
+        || words.iter().any(|w| AIRBAG_ACRONYMS.contains(w))
+        || words
+            .windows(2)
+            .any(|p| p[0] == "air" && p[1].starts_with("bag"))
 }
+
+/// Airbag and occupant-module words, matched anywhere in a name.
+const AIRBAG_WORDS: &[&str] = &[
+    "airbag",
+    "srs",
+    "restraint",
+    "occupant",
+    "pretension",
+    "squib",
+];
+/// Airbag and occupant-module acronyms, matched as whole words.
+const AIRBAG_ACRONYMS: &[&str] = &[
+    "orc", "acu", "sdm", "sir", "ocs", "ods", "ocm", "rcm", "acsm", "mrs",
+];
 /// Airbag and occupant-detection request IDs in the built-in profiles (Toyota/Subaru/Mazda 780 and 781, Ford RCM 737, VW 715,
 /// Hyundai/Kia 7D2).
 const SRS_IDS: &[u16] = &[0x780, 0x781, 0x737, 0x715, 0x7D2];
@@ -453,6 +478,38 @@ mod tests {
         let mut t = crate::sim::tests().remove(0);
         t.max_seconds = 120;
         assert!(t.refused().is_some());
+    }
+
+    #[test]
+    fn airbag_names_by_their_acronyms_as_whole_words() {
+        for name in [
+            "ORC",
+            "module ACU (7A2)",
+            "SDM",
+            "SIR",
+            "OCS",
+            "ods",
+            "RCM (airbags)",
+            "ACSM",
+            "air bag control",
+            "Air-Bags",
+            "SRS",
+            "occupant classification",
+        ] {
+            assert!(is_airbag(0x7A2, name), "{name}");
+        }
+        for name in [
+            "methods",
+            "accumulator",
+            "body (BCM)",
+            "ACM (audio)",
+            "orchestra",
+            "sirius radio",
+            "airflow",
+            "",
+        ] {
+            assert!(!is_airbag(0x7A2, name), "{name}");
+        }
     }
 
     #[test]

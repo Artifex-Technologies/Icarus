@@ -11,6 +11,7 @@ use icarus_obd::{
     actuator, bus, charging, clear, dtc, garage, lookup, mode06, nhtsa, report, settings, sim,
     socketcan, uds, vehicles, vin,
 };
+mod data;
 mod mcp;
 
 use std::io::Write;
@@ -42,6 +43,32 @@ Vehicle, through an OBD adapter (read-only: nothing is cleared or written):
                                              vehicles); --sweep tries every request ID from 700 to 7F7 (slower;
                                              never 7DF or a known answer ID such as 7E8-7EF)
   icarus obd module ID[/ANSWER] --adapter A  one module (request ID in hex, e.g. 7B0, or 713/77D): identity and codes
+  icarus obd data [MODULE...] --adapter A [--set SET] [--year YYYY] [--find TEXT] [--every MS --count N] [--csv FILE]
+                  [--all-years] [--all] [--refused]
+                                             each module's own values (a dealer tool's data list: transmission fluid
+                                             temperature, knock correction...) from a module-data set (icarus data), in
+                                             US units where those are the custom (ICARUS_UNITS=us|metric). Read-only:
+                                             services 21 and 22 only, paced, never 7DF or an answer ID, airbag modules
+                                             identity only; requests that need a session are listed, never sent. --all
+                                             asks again what the vehicle refused before. The set is chosen by the
+                                             VIN's make, the model year and the model (icarus garage); with one of them
+                                             unknown, none is guessed: --set. Ctrl+C ends --every, keeping what was
+                                             learned
+  icarus obd data --check MODULE VALUE_ID [--note TEXT] --adapter A
+                                             mark a value as checked on this vehicle (it read right against a gauge)
+
+Module data (definition files; nothing is sent to a vehicle):
+  icarus import obdb FILE.json [--name SET] [--make NAME] [--dry-run] [--replace]
+                                             import a vehicle's OBDb signal set you downloaded (github.com/OBDb, e.g.
+                                             Toyota-Tacoma/signalsets/v3/default.json) into ~/.config/icarus/data/SET.
+                                             OBDb's data is CC BY-SA 4.0: Icarus ships none of it, and shows its
+                                             attribution wherever its values appear
+  icarus import ddt ECU.xml                  DDT2000 files: not built yet (build 3); it says so and imports nothing
+  icarus data [SET] [--module ID] [--find TEXT] [--sample] [--refused]
+                                             the sets, or one set's modules, requests and values (--sample decodes the
+                                             sample answers a file carries)
+  icarus data check FILE.toml [--make NAME]  whether a hand-written module file is right, and what Icarus would send
+                                             (with the make's profile, as on the vehicle)
 
 Bus (watching only: nothing is sent onto the bus):
   icarus bus watch (--adapter A | --can can0) [--seconds N] [--raw]
@@ -123,6 +150,8 @@ fn main() -> ExitCode {
         Some("learn") => cmd_learn(&args[1..]),
         Some("tires") => cmd_tires(&args[1..]),
         Some("recalls") => cmd_recalls(&args[1..]),
+        Some("import") => data::cmd_import(&args[1..]),
+        Some("data") => data::cmd_data(&args[1..]),
         Some("mcp") => mcp::serve(),
         Some("devices") => cmd_devices(),
         Some("-h" | "--help" | "help") | None => {
@@ -153,7 +182,20 @@ fn parse_args(a: &[String], with_value: &[&str]) -> Result<Args, String> {
     };
     let mut i = 0;
     while i < a.len() {
-        if a[i] == "--sweep" || a[i] == "--scan" || a[i] == "--yes" {
+        if [
+            "--sweep",
+            "--scan",
+            "--yes",
+            "--dry-run",
+            "--replace",
+            "--sample",
+            "--refused",
+            "--all-years",
+            "--all",
+            "--check",
+        ]
+        .contains(&a[i].as_str())
+        {
             out.opts.push((a[i][2..].to_string(), "yes".into()));
             i += 1;
             continue;
@@ -568,32 +610,48 @@ fn connect(args: &Args) -> Result<Elm, String> {
     Elm::connect(port).map_err(|e| e.to_string())
 }
 
+/// Prints the notes on modules left out of broadcasts' answers (`Elm::take_dropped`): every command that shows a broadcast's
+/// answers calls it, so a module is never lost silently.
+pub(crate) fn note_dropped(elm: &mut Elm) {
+    for n in elm.take_dropped() {
+        eprintln!("note: {n}");
+    }
+}
+
 fn cmd_obd(a: &[String]) -> Result<(), String> {
     let args = parse_args(
         a.get(1..).unwrap_or(&[]),
         &[
             "adapter", "every", "count", "csv", "make", "out", "value", "seconds", "module",
-            "battery",
+            "battery", "set", "year", "find", "note",
         ],
     )?;
+    // connected, run, and the senders any broadcast left out noted however it ended
+    let with = |f: &dyn Fn(&mut Elm) -> Result<(), String>| {
+        let mut elm = connect(&args)?;
+        let r = f(&mut elm);
+        note_dropped(&mut elm);
+        r
+    };
     match a.first().map(String::as_str) {
-        Some("info") => obd_info(&mut connect(&args)?),
-        Some("codes") => obd_codes(&mut connect(&args)?),
-        Some("pids") => obd_pids(&mut connect(&args)?),
-        Some("live") => obd_live(&mut connect(&args)?, &args),
-        Some("scan") => obd_scan(&mut connect(&args)?, &args),
-        Some("module") => obd_module(&mut connect(&args)?, &args),
-        Some("report") => obd_report(&mut connect(&args)?, &args),
-        Some("tests") => obd_tests(&mut connect(&args)?),
-        Some("clear") => obd_clear(&mut connect(&args)?, &args),
-        Some("selftests") => obd_selftests(&mut connect(&args)?),
-        Some("charging") => obd_charging(&mut connect(&args)?, &args),
-        Some("test") => obd_test(&mut connect(&args)?, &args),
-        Some("settings") => obd_settings(&mut connect(&args)?),
+        Some("info") => with(&obd_info),
+        Some("codes") => with(&obd_codes),
+        Some("pids") => with(&obd_pids),
+        Some("live") => with(&|e| obd_live(e, &args)),
+        Some("scan") => with(&|e| obd_scan(e, &args)),
+        Some("module") => with(&|e| obd_module(e, &args)),
+        Some("data") => data::obd_data(&args),
+        Some("report") => with(&|e| obd_report(e, &args)),
+        Some("tests") => with(&obd_tests),
+        Some("clear") => with(&|e| obd_clear(e, &args)),
+        Some("selftests") => with(&obd_selftests),
+        Some("charging") => with(&|e| obd_charging(e, &args)),
+        Some("test") => with(&|e| obd_test(e, &args)),
+        Some("settings") => with(&obd_settings),
         Some("setting") => obd_setting(&args, false),
         Some("setting-undo") => obd_setting(&args, true),
         _ => Err(
-            "usage: icarus obd info|codes|pids|live|scan|module --adapter A (see icarus --help)"
+            "usage: icarus obd info|codes|pids|live|scan|module|data --adapter A (see icarus --help)"
                 .into(),
         ),
     }
@@ -719,8 +777,8 @@ fn obd_module(elm: &mut Elm, args: &Args) -> Result<(), String> {
     };
     let tx = hex(t)?;
     let rx = r.map(hex).transpose()?;
-    if !(0x700..=0x7F7).contains(&tx) || tx == 0x7DF {
-        return Err("module request IDs are 700-7F7 (7DF is the broadcast)".into());
+    if let Some(why) = vehicles::request_id_refused(tx, &profiles()) {
+        return Err(format!("{why} (module request IDs are 700-7F7)"));
     }
     let m = vehicles::ModuleAddr {
         tx,
@@ -1191,6 +1249,7 @@ fn obd_setting(args: &Args, undo: bool) -> Result<(), String> {
     }
     let mut elm = connect(args)?;
     let (vin, list) = vehicle_settings(&mut elm)?;
+    note_dropped(&mut elm);
     let n = name.to_lowercase();
     let hits: Vec<&settings::SettingDef> = match list.iter().find(|s| s.name.to_lowercase() == n) {
         Some(s) => vec![s],
@@ -1595,6 +1654,7 @@ fn cmd_learn(a: &[String]) -> Result<(), String> {
     } else {
         let mut elm = connect(&args)?;
         let vin = j1979::vin(&mut elm).map_err(e)?;
+        note_dropped(&mut elm);
         let vehicle = match vin.as_deref() {
             Some(v) if v == sim::VIN => "the simulated vehicle".to_string(),
             Some(v) => garage::get(v)
@@ -1860,6 +1920,8 @@ fn obd_live(elm: &mut Elm, args: &Args) -> Result<(), String> {
         }
         let t = format!("{:.2}", start.elapsed().as_secs_f64());
         println!("{t}, {}", row.join(", "));
+        // a module left out of a value's answer is said as it happens (once), not only when the watch ends
+        note_dropped(elm);
         if let Some(f) = csv.as_mut() {
             writeln!(f, "{t},{}", row.join(",")).map_err(|e| e.to_string())?;
         }

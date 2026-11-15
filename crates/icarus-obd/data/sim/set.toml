@@ -1,0 +1,10 @@
+# The simulated vehicle's module data (`--adapter sim`). Every identifier here is made up and exists only in Icarus's
+# simulation (crates/icarus-obd/src/sim.rs); it is applied only to the simulated vehicle's VIN.
+format = 1
+name = "sim"
+make = "toyota"
+
+[source]
+from = "Icarus"
+license = "MPL-2.0"
+attribution = "Icarus's simulated vehicle (made-up identifiers)"

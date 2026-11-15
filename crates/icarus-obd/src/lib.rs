@@ -2,7 +2,8 @@
 //! ELM327/STN adapter's language and `passthru` a J2534 device's; either is a `link::Link`, and the services above it (`j1979`
 //! the standard OBD-II services, `uds` the modules') ask through that. Most of this crate only reads (values, codes, the
 //! vehicle's identity); writes live in their own modules, each with its own allow-list and safeguards: `actuator` (output
-//! tests), `clear` (clearing codes) and `settings` (module settings).
+//! tests), `clear` (clearing codes) and `settings` (module settings). `moddata` reads each module's own live values from
+//! definition files, with read-only requests only.
 
 pub mod actuator;
 pub mod audit;
@@ -18,6 +19,7 @@ pub mod j1979;
 pub mod learning;
 pub mod link;
 pub mod lookup;
+pub mod moddata;
 pub mod mode06;
 pub mod nhtsa;
 pub mod passthru;

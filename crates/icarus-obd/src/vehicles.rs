@@ -326,6 +326,22 @@ pub fn settings_for(
     v
 }
 
+/// Why `tx` may not be used as one module's request ID, if it may not: 7DF and IDs outside 700-7F7
+/// (`actuator::not_one_module`), and any answer ID the profiles know (7E8-7EF and every module's `rx`, `uds::sweep_skips`):
+/// a request sent there would look like that module's own answer. `obd module`, `obd data` and the module-data loader all
+/// ask here.
+pub fn request_id_refused(tx: u16, profiles: &[Profile]) -> Option<String> {
+    if let Some(why) = crate::actuator::not_one_module(tx) {
+        return Some(why);
+    }
+    if crate::uds::sweep_skips(profiles).contains(&tx) {
+        return Some(format!(
+            "refused: {tx:03X} is a module's answer ID; a request sent there would look like that module's own answer"
+        ));
+    }
+    None
+}
+
 /// Where to look: the OBD-II range, then the profile's own modules (a profile entry for an OBD ID renames it).
 pub fn candidates(p: &Profile) -> Vec<ModuleAddr> {
     let mut v: Vec<ModuleAddr> = (0..8u16)
@@ -391,6 +407,17 @@ mod tests {
         assert_eq!(find(&all, "toyota").unwrap().id, "toyota");
         assert_eq!(find(&all, "Lexus").unwrap().id, "toyota");
         assert!(find(&all, "zeppelin").is_err());
+    }
+
+    #[test]
+    fn answer_ids_and_the_broadcast_are_never_request_ids() {
+        let all = builtin();
+        for id in [0x7DF, 0x7E8, 0x7EF, 0x788, 0x758, 0x6FF, 0x7F8] {
+            assert!(request_id_refused(id, &all).is_some(), "{id:03X}");
+        }
+        for id in [0x7E0, 0x700, 0x701, 0x7B0] {
+            assert_eq!(request_id_refused(id, &all), None, "{id:03X}");
+        }
     }
 
     #[test]

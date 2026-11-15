@@ -266,6 +266,8 @@ struct App {
     adapter: String,
     link: Link,
     status: String,
+    /// Modules left out of a broadcast's answers on this connection (`Event::Dropped`), shown under the status line.
+    dropped: Vec<String>,
     error: Option<String>,
     info: Option<Info>,
     profile_choice: String,
@@ -358,6 +360,7 @@ impl App {
             handed: handed_rx,
             link: Link::Off,
             status: "Not connected.".into(),
+            dropped: Vec::new(),
             error: None,
             info: None,
             profile_choice: String::new(),
@@ -563,8 +566,10 @@ impl App {
         while let Ok(ev) = self.rx.try_recv() {
             match ev {
                 Event::Status(s) => self.status = s,
+                Event::Dropped(n) => self.dropped.push(n),
                 Event::Connected(info) => {
                     self.link = Link::On;
+                    self.dropped.clear();
                     // the adapter to start with next time, and to come back to when it answers again
                     autoconn::remember(self.adapter.trim());
                     self.auto = self.adapter.trim() != "sim";
@@ -3090,6 +3095,9 @@ impl eframe::App for App {
                     chrome::window_controls(ui, &pal);
                 });
                 ui.label(RichText::new(&self.status).weak());
+                for n in &self.dropped {
+                    ui.colored_label(pal.amber, n);
+                }
                 if let Some(e) = &self.error {
                     ui.colored_label(pal.red, e);
                 }

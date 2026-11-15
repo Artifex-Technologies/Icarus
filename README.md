@@ -203,6 +203,41 @@ extended session, conditions). None are in the built-in profiles: each maker's a
 model and year, so they come from watching a tool on my own vehicle. `sim:off` has two to try: the cluster's seat belt chime
 (UDS) and the ABS module's buzzer (KWP2000).
 
+## Module data (each module's own values)
+
+What a dealer tool shows as a module's data list (Techstream, DDT2000): transmission fluid temperature, knock correction,
+wheel speeds... values the standard OBD-II list does not have. Icarus reads them, for any make, from definition files: each
+says which read-only request to send a module and what the bytes of its answer mean. Icarus ships no third-party data; you
+import a file you downloaded:
+
+```sh
+icarus import obdb ~/Downloads/Toyota-Tacoma/signalsets/v3/default.json   # an OBDb signal set (github.com/OBDb)
+icarus data                                     # the sets you have; icarus data SET --module 701 lists one module's values
+icarus obd data 701 --adapter A                 # the transmission's values now (US units where those are the custom)
+icarus obd data 700 701 --adapter A --every 1000 --csv drive.csv   # watch them, paced, into a CSV
+icarus obd data --check 701 VALUE_ID --note "matched the gauge" --adapter A   # mark a value as right on this vehicle
+```
+
+An import goes to `~/.config/icarus/data/SET/` (a `set.toml` and one TOML file per module, which can also be written by hand
+and checked with `icarus data check FILE.toml`). The set is chosen by the VIN's make, the model year and the model (the
+vehicle's name from `icarus garage`; a set's model, such as OBDb's "F 150", must appear in it as whole words), or `--set`:
+when one of them is not known, no set is guessed. What each request did on a vehicle (answered, refused as not there, too
+short) and the values checked on it are kept in its folder, `Definitions/module-data.toml`; a vehicle whose VIN could not
+be read keeps them for the run only.
+
+OBDb's signal sets are CC BY-SA 4.0: Icarus reads your copy and shows "signal data: OBDb (github.com/OBDb), CC BY-SA 4.0"
+wherever those values appear; none of OBDb's data is in this repository. DDT2000 files (Renault, Dacia, Nissan) and DBC bus
+files come in later builds (`icarus import ddt` is there, and says it is not built yet).
+
+The fence is in code (`crates/icarus-obd/src/moddata.rs`), checked when a set is loaded and again before every request:
+services 21 and 22 only, built by Icarus from the identifier (files carry no raw bytes; a file may also name `1A`,
+identification, which is kept for a later build and never sent today); never on 7DF or any answer ID; airbag and occupant
+modules identity only, and on a make whose profile names no airbag module, a module of unknown kind gets nothing either;
+nothing that needs a diagnostic session is sent (Icarus opens none); at least 50 ms between any two sends, a busy module
+slowed, a refused request, one that keeps failing or a silent module dropped. Modules behind an extended
+address (Toyota's 750 body and TPMS), on 29-bit IDs or K-line are listed as not reachable yet. `--adapter sim` has a set of
+its own (made-up identifiers on 700, 701 and 7E0) to try it on.
+
 ## Editing maps and checksums
 
 ```sh
@@ -320,7 +355,7 @@ Rust (stable), Linux. Dependencies: `roxmltree` (XML) and `libc`.
 
 | Crate | What |
 | --- | --- |
-| `crates/icarus-core` | ROM images (original + edited, diff), definitions (tables, values, switches), formulas, the TunerPro `.xdf` reader |
+| `crates/icarus-core` | ROM images (original + edited, diff), definitions (tables, values, switches), formulas, the TunerPro `.xdf` reader; module-data definitions, their decoder and the OBDb importer |
 | `crates/icarus-obd` | adapters (USB, Bluetooth, Wi-Fi, simulated), the ELM327/STN language, the standard OBD-II services |
 | `crates/icarus` | the `icarus` command |
 | `crates/icarus-app` | the window (egui, Yggdrasil's look from yggdrasil-ui); a worker thread owns the adapter |

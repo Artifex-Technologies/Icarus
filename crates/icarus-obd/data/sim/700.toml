@@ -1,0 +1,144 @@
+format = 1
+
+[module]
+name = "engine (UDS)"
+tx = 0x700
+dialect = "uds"
+kind = "engine"
+
+# a long answer (several CAN frames)
+[[request]]
+service = 0x22
+ident = 0x1F01
+every = 1.0
+min_len = 20
+sample = "62 1F 01 82 46 0A F0 00 FC 8D 49 43 41 52 55 53 00 00 00 00 00 00 00"
+
+  [[request.value]]
+  id = "SIM_ECT"
+  name = "coolant temperature"
+  path = "Engine.Temperatures"
+  byte = 0
+  bits = 8
+  add = -40.0
+  unit = "°C"
+  min = -40.0
+  max = 215.0
+
+  [[request.value]]
+  id = "SIM_IAT"
+  name = "intake air temperature"
+  path = "Engine.Temperatures"
+  byte = 1
+  bits = 8
+  add = -40.0
+  unit = "°C"
+
+  [[request.value]]
+  id = "SIM_RPM"
+  name = "engine speed"
+  path = "Engine"
+  byte = 2
+  bits = 16
+  div = 4.0
+  unit = "rpm"
+
+  [[request.value]]
+  id = "SIM_VSS"
+  name = "vehicle speed"
+  path = "Engine"
+  byte = 4
+  bits = 8
+  unit = "km/h"
+
+  [[request.value]]
+  id = "SIM_KNOCK"
+  name = "knock correction"
+  path = "Engine.Ignition"
+  byte = 5
+  bits = 8
+  signed = true
+  div = 2.0
+  decimals = 1
+  unit = "°"
+
+  [[request.value]]
+  id = "SIM_BATT"
+  name = "battery voltage"
+  path = "Engine"
+  byte = 6
+  bits = 8
+  div = 10.0
+  decimals = 1
+  unit = "V"
+
+  [[request.value]]
+  id = "SIM_TAG"
+  name = "calibration tag"
+  path = "Engine"
+  byte = 7
+  bits = 48
+  kind = "text"
+
+# answers "response pending" (7F 22 78) first, then the values
+[[request]]
+service = 0x22
+ident = 0x1F02
+every = 0.5
+
+  [[request.value]]
+  id = "SIM_STFT"
+  name = "short-term fuel trim, bank 1"
+  path = "Engine.Fuel"
+  byte = 0
+  bits = 8
+  bias = -128.0
+  div = 1.28
+  decimals = 1
+  unit = "%"
+
+  [[request.value]]
+  id = "SIM_LTFT"
+  name = "long-term fuel trim, bank 1"
+  path = "Engine.Fuel"
+  byte = 1
+  bits = 8
+  bias = -128.0
+  div = 1.28
+  decimals = 1
+  unit = "%"
+
+# not on this vehicle: the module answers 7F 22 31
+[[request]]
+service = 0x22
+ident = 0x1F03
+
+  [[request.value]]
+  id = "SIM_GONE"
+  name = "a value this vehicle does not have"
+  byte = 0
+  bits = 8
+
+# for earlier model years only: skipped
+[[request]]
+service = 0x22
+ident = 0x1F04
+years = [[2005, 2010]]
+
+  [[request.value]]
+  id = "SIM_OLD"
+  name = "an older model's value"
+  byte = 0
+  bits = 8
+
+# the source says it needs a diagnostic session: never sent
+[[request]]
+service = 0x22
+ident = 0x1F05
+needs_session = "10 03"
+
+  [[request.value]]
+  id = "SIM_SESSION"
+  name = "a value behind a session"
+  byte = 0
+  bits = 8
