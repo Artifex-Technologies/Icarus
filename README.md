@@ -22,7 +22,7 @@ On the simulated truck (`sim`) and a made-up demo engine; nothing from a real ve
 
 Maps shows, compares and edits tables (fuel, spark, limits): click a cell, type a value or step it, and save the result as a
 new file (never over the original), its checksums corrected where they are known. Writing an image to an ECU comes only after
-the rules in docs/PLAN.md, on a bench ECU first.
+the rules in [docs/DESIGN.md](docs/DESIGN.md), on a bench ECU first.
 
 ## Install
 
@@ -345,10 +345,9 @@ Rust (stable), Linux. Dependencies: `roxmltree` (XML) and `libc`.
 | `crates/icarus` | the `icarus` command |
 | `crates/icarus-app` | the window (egui, Yggdrasil's look from yggdrasil-ui); a worker thread owns the adapter |
 
-## Where it is going
+## Design and limits
 
-See [docs/PLAN.md](docs/PLAN.md): reading a factory ECU's memory, editing maps with checks, flashing with a verified backup,
-transmission modules, a CAN bus view, and a desktop app.
+What Icarus is built to do, the rules every write follows, and its known limitations: [docs/DESIGN.md](docs/DESIGN.md).
 
 ## What Icarus will not do
 

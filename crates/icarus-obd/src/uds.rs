@@ -4,7 +4,7 @@
 //!
 //! **Read-only.** Every request passes `check_read_only`, which allows only services that read (identification, data,
 //! trouble codes, tester present). Clearing codes, writing data, routines, security access and programming are refused here
-//! until Icarus has the safety steps of docs/PLAN.md section 4.
+//! until Icarus has the safety steps of docs/DESIGN.md ("Writing a module (flash): the conditions").
 
 use crate::elm::{Answer, ObdError};
 use crate::j1979::dtc;

@@ -15,7 +15,7 @@ name = "transmission (ECT)"
 
 # The engine and transmission computers' own diagnostic addresses (UDS), beside OBD-II's 7E0/7E1: where their own values
 # (a dealer tool's data list) are read. Public addresses (OBDb's Toyota signal sets list them); seen answering on a 2017
-# Tacoma, left unchecked until the owner decides (docs/PLAN.md, module data).
+# Tacoma, left unchecked until the owner decides (docs/plans/, private).
 [[module]]
 tx = 0x700
 name = "engine (UDS)"

@@ -48,7 +48,7 @@ The udev rule `packaging/70-icarus-tuners.rules` lets the person at the computer
 `icarus devices` lists what of this is plugged in and whether this user may open it (the udev rule in
 `packaging/70-icarus-tuners.rules` gives the person at the seat each of these; the icarus-git package installs it, and
 `bash scripts/install-local.sh --udev` does for a checkout). It
-sends nothing to any device. Speaking each device's own protocol is the next step, device by device.
+sends nothing to any device: Icarus does not speak these devices' own protocols yet.
 
 ## SCT X4 (7015) — Ford
 

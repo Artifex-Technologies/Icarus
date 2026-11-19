@@ -6,7 +6,7 @@
 //! The safety rule: a description is trusted only if it matches the image as it was read (the stock image's stored numbers
 //! must equal what the description computes). A description that does not is reported and never used to "fix" anything,
 //! since it would write wrong numbers into the image. No description at all means the checksums are unknown: the image can
-//! be edited and saved as a file, never written to a module (docs/PLAN.md, "Never brick a module", rule 3).
+//! be edited and saved as a file, never written to a module (docs/DESIGN.md, "Never brick a module", rule 3).
 //!
 //! ```toml
 //! [[checksum]]

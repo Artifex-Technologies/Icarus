@@ -1065,7 +1065,7 @@ fn vehicle_tests(elm: &mut Elm) -> Result<Vec<actuator::TestDef>, String> {
 fn obd_tests(elm: &mut Elm) -> Result<(), String> {
     let tests = vehicle_tests(elm)?;
     if tests.is_empty() {
-        println!("No actuator tests are known for this vehicle yet: their IDs are the maker's own. They go in the vehicle's profile as [[test]] entries (docs/PLAN.md).");
+        println!("No actuator tests are known for this vehicle yet: their IDs are the maker's own. They go in the vehicle's profile as [[test]] entries (docs/DESIGN.md).");
     }
     for t in &tests {
         let conds: Vec<&str> = t.conditions.iter().map(|c| c.describe()).collect();
@@ -1191,7 +1191,7 @@ fn vehicle_settings(elm: &mut Elm) -> Result<(Option<String>, Vec<settings::Sett
 fn obd_settings(elm: &mut Elm) -> Result<(), String> {
     let (_, list) = vehicle_settings(elm)?;
     if list.is_empty() {
-        println!("No module settings are known for this vehicle yet: their IDs are the maker's own. Watch a dealer tool change one (icarus bus), then add what it learned to the vehicle's profile as a [[setting]] entry (docs/PLAN.md).");
+        println!("No module settings are known for this vehicle yet: their IDs are the maker's own. Watch a dealer tool change one (icarus bus), then add what it learned to the vehicle's profile as a [[setting]] entry (docs/DESIGN.md).");
     }
     for s in &list {
         let now = match settings::read(elm, s) {

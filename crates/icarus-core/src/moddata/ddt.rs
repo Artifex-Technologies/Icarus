@@ -1,5 +1,5 @@
-//! DDT2000 ECU files (`ecus/<name>.xml`, Renault, Dacia, Nissan): **not built yet** (build 3 of the module-data plan in
-//! `docs/PLAN.md`). DDT2000's databases are Renault's material: Icarus will only read a file the user gives, never ship one
+//! DDT2000 ECU files (`ecus/<name>.xml`, Renault, Dacia, Nissan): **not built yet** (module data from DDT2000 files; see
+//! `docs/DESIGN.md`). DDT2000's databases are Renault's material: Icarus will only read a file the user gives, never ship one
 //! or use one in its tests (tests use tiny XML written for them).
 //!
 //! What the importer will do, from the file format (ideas and format facts only, as with every reference project):
@@ -19,7 +19,7 @@ use super::Imported;
 
 /// Reads a DDT2000 ECU file. Not built yet: always refuses, saying so.
 pub fn parse(_text: &str) -> Result<Imported, String> {
-    Err("DDT2000 files are not read yet (a later build of module data; see docs/PLAN.md)".into())
+    Err("DDT2000 files are not read yet (see docs/DESIGN.md, Known limitations)".into())
 }
 
 #[cfg(test)]
