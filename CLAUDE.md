@@ -4,6 +4,9 @@ Push every commit as you make it; don't ask me first. Before pushing, check the 
 SSID, MAC or Bluetooth address, and **no VIN, ECU image, calibration or log from a real vehicle** (they stay outside the
 repository; `.gitignore` keeps `*.bin` and `/private` out).
 
+Plans, owner steps and other internal notes go in `docs/plans/` (private and git-ignored; ask the owner), never in the
+public docs.
+
 - This repository is **public** (github.com/Artifex-Technologies/Icarus). Icarus is packaged as `icarus-git` (the recipe is in
   Labyrinth_OS `packages/pkgbuilds/icarus-git`, with the store's copy in `profile/airootfs/usr/share/labyrinth/pkgbuilds`),
   published in Labyrinth's `[labyrinth]` package repository and listed in Agora's catalog, so it updates through Agora and
