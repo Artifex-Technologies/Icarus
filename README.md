@@ -223,6 +223,30 @@ slowed, a refused request, one that keeps failing or a silent module dropped. Mo
 address (Toyota's 750 body and TPMS), on 29-bit IDs or K-line are listed as not reachable yet. `--adapter sim` has a set of
 its own (made-up identifiers on 700, 701 and 7E0) to try it on.
 
+## Learning module data from a capture
+
+Another tool that already knows the vehicle shows which identifiers each module answers. Icarus reads a recording of it
+at work: a phone's Bluetooth log of an app talking to its adapter (`idevicebtlogger` on Linux, with Apple's Bluetooth
+logging profile on the iPhone), or a bus log taken through a Y-splitter (`icarus bus watch --raw`, `candump`):
+
+```sh
+idevicebtlogger -f pcap obdlink.pcap                     # while the app runs on the vehicle; Ctrl+C stops
+icarus import btlog obdlink.pcap --make toyota --transcript obdlink.csv
+icarus import buslog drive.log --make toyota             # a bus log; either name reads either kind of file
+icarus data obdlink --sample                             # each identifier and the answers seen
+```
+
+It gives a transcript (CSV: time, module, request, answer, to match against a screen recording of the app) and a
+module-data set: every identifier a module answered on a data read (`22`, `21`) becomes a request with one unnamed
+placeholder value over its answer's bytes, not verified, with the answers seen as samples. Identity reads (`1A`) are
+listed as seen, not imported (identity comes in a later build). Writes, tests, routines,
+clearing and security access the tool did are listed as seen, never imported; the gates of `icarus obd data` apply (airbag
+modules identity only, never 7DF or an answer ID). **Privacy:** only the OBD conversation is kept. Bluetooth addresses,
+device names, link keys and every other Bluetooth channel are never written to any output, adapter commands are counted
+but not kept, and VINs (in answers and in requests, also split over several messages) are masked in the transcript and
+the set unless `--keep-vin`. How to capture, what is read and how
+to name a value afterwards: [docs/CAPTURES.md](docs/CAPTURES.md).
+
 ## Editing maps and checksums
 
 ```sh
@@ -340,7 +364,7 @@ Rust (stable), Linux. Dependencies: `roxmltree` (XML) and `libc`.
 
 | Crate | What |
 | --- | --- |
-| `crates/icarus-core` | ROM images (original + edited, diff), definitions (tables, values, switches), formulas, the TunerPro `.xdf` reader; module-data definitions, their decoder and the OBDb importer |
+| `crates/icarus-core` | ROM images (original + edited, diff), definitions (tables, values, switches), formulas, the TunerPro `.xdf` reader; module-data definitions, their decoder, the OBDb importer and the capture importers (Bluetooth logs, bus logs); ISO-TP |
 | `crates/icarus-obd` | adapters (USB, Bluetooth, Wi-Fi, simulated), the ELM327/STN language, the standard OBD-II services |
 | `crates/icarus` | the `icarus` command |
 | `crates/icarus-app` | the window (egui, Yggdrasil's look from yggdrasil-ui); a worker thread owns the adapter |

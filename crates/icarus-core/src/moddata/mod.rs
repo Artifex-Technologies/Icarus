@@ -18,6 +18,7 @@
 //! Files carry no raw request bytes: Icarus builds every request itself from `service` and `ident` (`22 hi lo`, `21 id`,
 //! `1A id`), and refuses any other service when the file is read.
 
+pub mod capture;
 pub mod ddt;
 pub mod decode;
 pub mod obdb;
@@ -221,6 +222,9 @@ pub struct RequestDef {
     /// A sample positive answer in hex (`62 1F 01 ...`), decoded offline by `icarus data --sample`.
     #[serde(default)]
     pub sample: Option<String>,
+    /// More sample answers (a capture keeps the different answers it saw), decoded by `--sample` too.
+    #[serde(default)]
+    pub samples: Vec<String>,
     #[serde(default, rename = "value")]
     pub values: Vec<ValueDef>,
 }
@@ -258,6 +262,20 @@ impl RequestDef {
         let Some(s) = &self.sample else {
             return Ok(None);
         };
+        self.answer_data(s).map(Some)
+    }
+
+    /// The data bytes after the echo of every sample answer (`sample`, then `samples`).
+    pub fn samples_data(&self) -> Result<Vec<Vec<u8>>, String> {
+        self.sample
+            .iter()
+            .chain(&self.samples)
+            .map(|s| self.answer_data(s))
+            .collect()
+    }
+
+    /// The data bytes after the echo of an answer in hex, when it is this request's positive answer.
+    fn answer_data(&self, s: &str) -> Result<Vec<u8>, String> {
         let b = parse_hex(s)?;
         let head = self.bytes();
         if b.first() != Some(&(self.service + 0x40)) || b.get(1..head.len()) != Some(&head[1..]) {
@@ -266,7 +284,7 @@ impl RequestDef {
                 self.label()
             ));
         }
-        Ok(Some(b[head.len()..].to_vec()))
+        Ok(b[head.len()..].to_vec())
     }
 }
 
@@ -557,7 +575,7 @@ pub fn validate(m: &mut ModuleDef) -> Result<(), String> {
         }
         check_years(&r.years, &what)?;
         check_years(&r.unverified, &what)?;
-        r.sample_data().map_err(|e| format!("{what}: {e}"))?;
+        r.samples_data().map_err(|e| format!("{what}: {e}"))?;
         let mut need = 0;
         for v in &r.values {
             check_value(v).map_err(|e| format!("{what}, value {}: {e}", v.id))?;
@@ -806,6 +824,16 @@ pub fn module_to_toml(m: &ModuleDef) -> String {
         if let Some(s) = &r.sample {
             o += &format!("sample = {}\n", q(s));
         }
+        if !r.samples.is_empty() {
+            o += &format!(
+                "samples = [{}]\n",
+                r.samples
+                    .iter()
+                    .map(|s| q(s))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
         for v in &r.values {
             o += &value_to_toml(v);
         }
@@ -1032,6 +1060,13 @@ ident = 0x04
         assert_eq!(r.min_len, Some(4), "filled in from the values");
         assert_eq!(m.requests[1].bytes(), vec![0x21, 0x04]);
         assert_eq!(r.sample_data().unwrap(), Some(vec![0x6E, 0x00, 0xC8, 0x01]));
+        let mut more = m.clone();
+        more.requests[0].samples = vec!["62 1F 11 6F 00 C9 00".into()];
+        assert_eq!(
+            more.requests[0].samples_data().unwrap(),
+            vec![vec![0x6E, 0x00, 0xC8, 0x01], vec![0x6F, 0x00, 0xC9, 0x00]]
+        );
+        assert_eq!(parse_module(&module_to_toml(&more), "again").unwrap(), more);
         let text = module_to_toml(&m);
         assert!(
             text.contains("tx = 0x701") && text.contains("ident = 0x1F11"),
@@ -1064,6 +1099,11 @@ ident = 0x04
         assert!(bad("every = 1.0", "every = 1.0\nmin_len = 2").contains("shorter"));
         assert!(bad("every = 1.0", "every = 1.0\nsent = \"2E 1F 11 00\"").contains("unknown field"));
         assert!(bad("sample = \"62 1F 11", "sample = \"62 1F 12").contains("not a positive answer"));
+        assert!(bad(
+            "sample = \"62 1F 11 6E 00 C8 01\"",
+            "sample = \"62 1F 11 6E 00 C8 01\"\nsamples = [\"62 1F 11 6F\", \"7F 22 31\"]"
+        )
+        .contains("not a positive answer"));
         assert!(bad("tx = 0x701", "tx = 0x901").contains("not a can11 ID"));
         assert!(bad("tx = 0x701", "tx = 0x701\nrx = 0x801").contains("not can11 IDs"));
         // the same request twice is fine only for different years

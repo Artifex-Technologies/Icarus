@@ -3,6 +3,7 @@
 
 pub mod checksum;
 pub mod def;
+pub mod diag;
 pub mod edit;
 pub mod expr;
 pub mod moddata;

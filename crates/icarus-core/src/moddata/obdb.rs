@@ -565,6 +565,7 @@ pub fn parse(text: &str, opts: &Options) -> Result<Imported, String> {
                 .and_then(|d| d.as_str())
                 .map(|d| format!("10 {d}")),
             sample: None,
+            samples: vec![],
             values,
         };
         if c.get("fcm1").and_then(|f| f.as_bool()).unwrap_or(false) {

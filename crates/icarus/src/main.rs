@@ -63,6 +63,21 @@ Module data (definition files; nothing is sent to a vehicle):
                                              Toyota-Tacoma/signalsets/v3/default.json) into ~/.config/icarus/data/SET.
                                              OBDb's data is CC BY-SA 4.0: Icarus ships none of it, and shows its
                                              attribution wherever its values appear
+  icarus import btlog FILE [--name SET] [--make NAME] [--transcript OUT.csv] [--keep-vin] [--dry-run] [--replace]
+                                             learn from another app at work: a phone's Bluetooth log (idevicebtlogger,
+                                             pcap or PacketLogger .pklg) of an app talking to its ELM327/STN adapter.
+                                             Each identifier a module answered on a data read (21, 22) becomes a
+                                             request with one unnamed placeholder value, not verified, its answers kept
+                                             as samples (icarus data SET --sample); everything else the app sent
+                                             (identity reads 1A, writes, tests, routines, clearing, security access) is
+                                             listed, never imported. --transcript writes the timed requests and answers
+                                             as CSV (- for stdout, the summary then on stderr), to match against a
+                                             screen recording. Kept: only the OBD conversation; Bluetooth addresses,
+                                             device names, link keys and other channels are never written; VINs are
+                                             masked unless --keep-vin
+  icarus import buslog FILE [the same options]
+                                             the same from a bus log: icarus bus watch --raw (through a Y-splitter, while
+                                             another tool works) or candump; either name reads either kind of file
   icarus import ddt ECU.xml                  DDT2000 files: not built yet (build 3); it says so and imports nothing
   icarus data [SET] [--module ID] [--find TEXT] [--sample] [--refused]
                                              the sets, or one set's modules, requests and values (--sample decodes the
@@ -193,6 +208,7 @@ fn parse_args(a: &[String], with_value: &[&str]) -> Result<Args, String> {
             "--all-years",
             "--all",
             "--check",
+            "--keep-vin",
         ]
         .contains(&a[i].as_str())
         {

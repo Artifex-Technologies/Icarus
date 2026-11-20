@@ -78,42 +78,9 @@ impl IdStats {
     }
 }
 
-/// Service names for what a diagnostic message asks.
+/// Service names for what a diagnostic message asks (shared with the capture importers).
 fn service(sid: u8) -> &'static str {
-    match sid {
-        0x01 => "current data",
-        0x02 => "freeze frame",
-        0x03 => "stored codes",
-        0x04 => "clear codes (OBD-II)",
-        0x06 => "on-board test results",
-        0x07 => "pending codes",
-        0x09 => "vehicle information",
-        0x0A => "permanent codes",
-        0x10 => "diagnostic session",
-        0x11 => "module reset",
-        0x14 => "clear codes",
-        0x18 => "read codes (KWP2000)",
-        0x19 => "read codes",
-        0x1A => "read identification (KWP2000)",
-        0x21 => "read data (KWP2000 local ID)",
-        0x22 => "read data by identifier",
-        0x23 => "read memory",
-        0x27 => "security access",
-        0x28 => "communication control",
-        0x2E => "write data by identifier",
-        0x2F => "output control",
-        0x30 => "output control (KWP2000)",
-        0x31 => "routine",
-        0x34 => "request download (programming)",
-        0x35 => "request upload",
-        0x36 => "transfer data",
-        0x37 => "end of transfer",
-        0x3B => "write data (KWP2000)",
-        0x3D => "write memory",
-        0x3E => "tester present",
-        0x85 => "trouble code setting",
-        _ => "another service",
-    }
+    icarus_core::diag::service_name(sid)
 }
 
 fn hex(b: &[u8]) -> String {
@@ -200,8 +167,8 @@ pub fn describe(msg: &[u8]) -> String {
 #[derive(Default)]
 pub struct Analyzer {
     pub ids: BTreeMap<u32, IdStats>,
-    /// ISO-TP messages being put together, per ID: (bytes, expected length).
-    partial: HashMap<u32, (Vec<u8>, usize)>,
+    /// ISO-TP messages being put together, per ID (`icarus_core::diag`, shared with the capture importers).
+    partial: icarus_core::diag::Reassembler<u32>,
     /// What the diagnostic messages said, newest last (at most 500).
     pub log: VecDeque<String>,
     /// Actuator tests seen run by another tool.
@@ -278,28 +245,9 @@ impl Analyzer {
     }
 
     fn isotp(&mut self, f: &Frame) -> Option<Vec<u8>> {
-        let &pci = f.data.first()?;
-        match pci >> 4 {
-            0 => {
-                let n = (pci & 0x0F) as usize;
-                (n > 0 && f.data.len() > n).then(|| f.data[1..1 + n].to_vec())
-            }
-            1 if f.data.len() >= 2 => {
-                let n = (((pci & 0x0F) as usize) << 8) | f.data[1] as usize;
-                self.partial.insert(f.id, (f.data[2..].to_vec(), n));
-                None
-            }
-            2 => {
-                let (buf, n) = self.partial.get_mut(&f.id)?;
-                let take = (*n - buf.len()).min(f.data.len() - 1);
-                buf.extend_from_slice(&f.data[1..1 + take]);
-                if buf.len() >= *n {
-                    let (b, _) = self.partial.remove(&f.id)?;
-                    return Some(b);
-                }
-                None
-            }
-            _ => None, // flow control
+        match self.partial.feed(f.id, &f.data) {
+            icarus_core::diag::Fed::Message(m) => Some(m),
+            _ => None, // part of a message, flow control, or a frame that does not fit
         }
     }
 

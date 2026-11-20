@@ -1,11 +1,12 @@
-//! Module data on the command line: `icarus import obdb`, `icarus data` (offline) and `icarus obd data` (on the vehicle,
+//! Module data on the command line: `icarus import obdb`, `icarus import btlog|buslog` (a capture of another tool at
+//! work), `icarus data` (offline) and `icarus obd data` (on the vehicle,
 //! read-only: services 21 and 22 only, paced, never on 7DF or an answer ID, airbag modules identity only).
 
 use super::{connect, e, parse_args, profiles, Args};
-use icarus_core::moddata::{self as md, obdb, units, ModuleDef, Shown, ValueDef};
+use icarus_core::moddata::{self as md, capture, obdb, units, ModuleDef, Shown, ValueDef};
 use icarus_obd::link::Link;
 use icarus_obd::moddata::{self, Loaded, Outcome, Pacer, Scope, State};
-use icarus_obd::{actuator, garage, j1979, report, vehicles, vin};
+use icarus_obd::{actuator, garage, j1979, report, uds, vehicles, vin};
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::time::{Duration, Instant};
@@ -19,11 +20,16 @@ fn hex_id(s: &str) -> Result<u32, String> {
         .map_err(|_| format!("{s} is not a module ID in hex"))
 }
 
-/// `icarus import obdb FILE.json [--name SET] [--make NAME] [--dry-run] [--replace]`
+const CAPTURE_USAGE: &str =
+    "usage: icarus import btlog|buslog FILE [--name SET] [--make NAME] [--transcript OUT.csv] \
+                             [--keep-vin] [--dry-run] [--replace]";
+
+/// `icarus import obdb FILE.json [--name SET] [--make NAME] [--dry-run] [--replace]`, `icarus import btlog|buslog FILE ...`
 pub fn cmd_import(a: &[String]) -> Result<(), String> {
-    let args = parse_args(a.get(1..).unwrap_or(&[]), &["name", "make"])?;
+    let args = parse_args(a.get(1..).unwrap_or(&[]), &["name", "make", "transcript"])?;
     match a.first().map(String::as_str) {
         Some("obdb") => import_obdb(&args),
+        Some("btlog" | "buslog") => import_capture(&args),
         Some("ddt") => {
             let [path] = args.pos.as_slice() else {
                 return Err("usage: icarus import ddt ECU.xml".into());
@@ -31,7 +37,33 @@ pub fn cmd_import(a: &[String]) -> Result<(), String> {
             let text = std::fs::read_to_string(path).map_err(|x| format!("{path}: {x}"))?;
             md::ddt::parse(&text).map(|_| ())
         }
-        _ => Err("usage: icarus import obdb FILE.json [--name SET] [--make NAME] [--dry-run] [--replace]".into()),
+        _ => Err(format!(
+            "usage: icarus import obdb FILE.json [--name SET] [--make NAME] [--dry-run] [--replace]\n{CAPTURE_USAGE}"
+        )),
+    }
+}
+
+/// A module the source names only by its address takes the make's profile's name for it.
+fn name_from_profile(imp: &mut moddata::Imported, all: &[vehicles::Profile]) {
+    let Some(p) = imp
+        .set
+        .as_ref()
+        .and_then(|s| all.iter().find(|p| p.id == s.make))
+    else {
+        return;
+    };
+    for m in imp
+        .modules
+        .iter_mut()
+        .filter(|m| m.module.kind.is_empty() && m.module.ext.is_none())
+    {
+        if let Some(a) = p
+            .modules
+            .iter()
+            .find(|a| u32::from(a.tx) == m.module.tx && a.ext.is_none())
+        {
+            m.module.name = a.name.clone();
+        }
     }
 }
 
@@ -59,26 +91,7 @@ fn import_obdb(args: &Args) -> Result<(), String> {
             ),
         }
     }
-    // a module the source names only by its address takes the profile's name for it
-    if let Some(p) = imp
-        .set
-        .as_ref()
-        .and_then(|s| all.iter().find(|p| p.id == s.make))
-    {
-        for m in imp
-            .modules
-            .iter_mut()
-            .filter(|m| m.module.kind.is_empty() && m.module.ext.is_none())
-        {
-            if let Some(a) = p
-                .modules
-                .iter()
-                .find(|a| u32::from(a.tx) == m.module.tx && a.ext.is_none())
-            {
-                m.module.name = a.name.clone();
-            }
-        }
-    }
+    name_from_profile(&mut imp, &all);
     moddata::gate_imported(&mut imp, &all);
     let set = imp.set.clone().ok_or("no set")?;
     println!(
@@ -140,6 +153,252 @@ fn import_obdb(args: &Args) -> Result<(), String> {
     Ok(())
 }
 
+/// The largest capture read: a phone's Bluetooth log of an hour is far smaller, and a bus log is held whole in memory
+/// as frames (several times its size).
+const MAX_CAPTURE: u64 = 256 << 20;
+
+/// What a capture gave: what was read (VINs masked unless kept), the set (gates applied), and where its make came from.
+struct Learned {
+    read: capture::Read,
+    imp: moddata::Imported,
+    masked: usize,
+    make_from: &'static str,
+}
+
+/// A capture's bytes as a transcript and a module-data set for `all`'s vehicles (no file written here).
+fn learn(
+    bytes: &[u8],
+    file_name: &str,
+    name: Option<&str>,
+    make: Option<&str>,
+    keep_vin: bool,
+    all: &[vehicles::Profile],
+) -> Result<Learned, String> {
+    let mut read = capture::read(bytes)?;
+    // the VIN (never written or shown) says the make and the model year when --make does not
+    let vin = capture::find_vin(&read.exchanges);
+    let masked = if keep_vin {
+        0
+    } else {
+        capture::mask_vins(&mut read.exchanges)
+    };
+    let years: Vec<[u16; 2]> = vin
+        .as_deref()
+        .and_then(|v| vin::decode(v).ok())
+        .and_then(|i| i.year)
+        .map(|y| vec![[y, y]])
+        .unwrap_or_default();
+    let (make, make_from) = match make {
+        Some(m) => match vehicles::find(all, m) {
+            Ok(p) => (p.id.clone(), "--make"),
+            Err(_) => (m.to_lowercase(), "--make (no vehicle profile of that name)"),
+        },
+        None => match vin.as_deref().and_then(|v| vehicles::for_vin(all, v)) {
+            Some(p) => (p.id.clone(), "the VIN in the capture"),
+            None => (String::new(), ""),
+        },
+    };
+    let mut imp = capture::build(
+        &read.exchanges,
+        &capture::Options {
+            file_name: file_name.to_string(),
+            name: name.map(str::to_string),
+            make,
+            years,
+            today: today(),
+            from: read.from.to_string(),
+            sha256: capture::digest(bytes),
+        },
+    )?;
+    name_from_profile(&mut imp, all);
+    moddata::gate_imported(&mut imp, all);
+    // a module left with nothing (every request refused: listed in left_out) gets no file
+    imp.modules
+        .retain(|m| !m.requests.is_empty() || !m.module.identity.is_empty());
+    Ok(Learned {
+        read,
+        imp,
+        masked,
+        make_from,
+    })
+}
+
+/// `icarus import btlog|buslog FILE [--name SET] [--make NAME] [--transcript OUT.csv] [--keep-vin] [--dry-run]
+/// [--replace]`: either name reads either kind of capture (told apart by its first bytes).
+fn import_capture(args: &Args) -> Result<(), String> {
+    let [path] = args.pos.as_slice() else {
+        return Err(CAPTURE_USAGE.into());
+    };
+    let size = std::fs::metadata(path)
+        .map_err(|x| format!("{path}: {x}"))?
+        .len();
+    if size > MAX_CAPTURE {
+        return Err(format!(
+            "{path}: {size} bytes is more than Icarus reads from one capture ({MAX_CAPTURE}); capture a shorter session"
+        ));
+    }
+    let bytes = std::fs::read(path).map_err(|x| format!("{path}: {x}"))?;
+    let file_name = std::path::Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("capture")
+        .to_string();
+    let all = profiles();
+    let keep_vin = args.opt("keep-vin").is_some();
+    let l = learn(
+        &bytes,
+        &file_name,
+        args.opt("name"),
+        args.opt("make"),
+        keep_vin,
+        &all,
+    )?;
+    let set = l.imp.set.clone().ok_or("no set")?;
+    // with --transcript -, the CSV alone goes to stdout and everything else to stderr
+    let csv_out = args.opt("transcript") == Some("-");
+    macro_rules! say {
+        ($($t:tt)*) => {
+            if csv_out {
+                eprintln!($($t)*)
+            } else {
+                println!($($t)*)
+            }
+        };
+    }
+    say!("{} {path} ({})", capitalised(l.read.from), l.read.format);
+    for n in &l.read.notes {
+        say!("  {n}");
+    }
+    say!(
+        "  Kept: only the diagnostic conversation (each request and what came back). {}",
+        if l.read.from.starts_with("Bluetooth") {
+            "Bluetooth addresses, device names, link keys and every other Bluetooth channel are never read into any output; adapter commands (AT, ST) are counted, not kept."
+        } else {
+            "Every other frame on the bus is ignored."
+        }
+    );
+    if keep_vin {
+        say!("  VINs kept as they are (--keep-vin): the transcript and the set hold the vehicle's VIN");
+    } else if l.masked > 0 {
+        say!(
+            "  {} exchange(s) held a VIN (or text like one): masked in the transcript and the set (--keep-vin keeps it)",
+            l.masked
+        );
+    }
+    // what was asked, by service
+    let mut by: BTreeMap<u8, (usize, usize)> = BTreeMap::new();
+    for e in &l.read.exchanges {
+        if let Some(&s) = e.request.first() {
+            let c = by.entry(s).or_default();
+            c.0 += 1;
+            c.1 += usize::from(
+                e.replies
+                    .iter()
+                    .any(|r| r.data.first() == Some(&s.wrapping_add(0x40))),
+            );
+        }
+    }
+    say!("  {} request(s) to the vehicle:", l.read.exchanges.len());
+    for (s, (n, ok)) in &by {
+        say!(
+            "    {s:02X} {:<34} {n:>5} sent, {ok:>5} answered",
+            icarus_core::diag::service_name(*s)
+        );
+    }
+    say!(
+        "\n  set {:?} for {}{}",
+        set.name,
+        if set.make.is_empty() {
+            "no make (it is used only with --set; and on a make not known, a module of unknown kind is refused: it could be the airbag module; --make NAME)".to_string()
+        } else {
+            format!("{} (from {})", set.make, l.make_from)
+        },
+        if set.years.is_empty() {
+            String::new()
+        } else {
+            format!(", model year {}", years(&set.years))
+        }
+    );
+    let mut values = 0;
+    for m in &l.imp.modules {
+        values += m.requests.len();
+        let how = match moddata::reachable(m) {
+            Ok(()) => String::new(),
+            Err(why) => format!("  ({why})"),
+        };
+        say!(
+            "  {:<12} {:<34} {:>3} identifier(s) kept{how}",
+            m.module.label(),
+            m.module.name,
+            m.requests.len()
+        );
+    }
+    say!(
+        "  {values} identifier(s) in {} module(s), each one unnamed placeholder value, not verified",
+        l.imp.modules.len()
+    );
+    if !l.imp.left_out.is_empty() {
+        let mut why: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for (w, y) in &l.imp.left_out {
+            why.entry(y.as_str()).or_default().push(w.as_str());
+        }
+        say!("Seen, not imported ({}):", l.imp.left_out.len());
+        for (y, ws) in why {
+            let more = if ws.len() > 6 {
+                format!(" and {} more", ws.len() - 6)
+            } else {
+                String::new()
+            };
+            say!(
+                "  {:>4}  {y}  [{}{more}]",
+                ws.len(),
+                ws.iter().take(6).copied().collect::<Vec<_>>().join(", ")
+            );
+        }
+    }
+    for n in &l.imp.notes {
+        say!("Assumed: {n}");
+    }
+    say!("{}", set.source.attribution);
+    if let Some(out) = args.opt("transcript") {
+        let csv = capture::transcript_csv(&l.read.exchanges, &|c| uds::nrc(c).to_string());
+        if out == "-" {
+            print!("{csv}");
+        } else {
+            std::fs::write(out, csv).map_err(|x| format!("{out}: {x}"))?;
+            say!(
+                "Transcript: {} exchange(s) written to {out} (time_s from the start of the capture{})",
+                l.read.exchanges.len(),
+                if l.read.from.starts_with("Bluetooth") {
+                    ", clock_utc the phone's clock in UTC"
+                } else {
+                    ""
+                }
+            );
+        }
+    }
+    if args.opt("dry-run").is_some() {
+        say!("(--dry-run: no set written)");
+        return Ok(());
+    }
+    let root = moddata::user_dir().ok_or("no config folder")?;
+    let dir = moddata::write_set(&root, &l.imp, args.opt("replace").is_some())?;
+    say!(
+        "Written to {}. To name a value once you know what it is: edit its module file there (name, unit, byte, bits, \
+         mul/div/add), check it with icarus data check FILE.toml, and see it decode the samples with icarus data {} --sample",
+        dir.display(),
+        set.name
+    );
+    Ok(())
+}
+
+fn capitalised(s: &str) -> String {
+    let mut c = s.chars();
+    c.next()
+        .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+        .unwrap_or_default()
+}
+
 fn print_value(v: &ValueDef) {
     let mut how = format!("byte {}", v.byte);
     if v.bit != 0 || !v.bits.is_multiple_of(8) {
@@ -171,6 +430,7 @@ fn print_value(v: &ValueDef) {
 fn years(y: &[[u16; 2]]) -> String {
     y.iter()
         .map(|[a, b]| match (a, b) {
+            (0, 9999) => "every year".to_string(),
             (0, b) => format!("to {b}"),
             (a, 9999) => format!("{a} on"),
             (a, b) if a == b => a.to_string(),
@@ -281,11 +541,16 @@ pub fn cmd_data(a: &[String]) -> Result<(), String> {
                 print_value(v);
             }
             if args.opt("sample").is_some() {
-                if let Some(d) = r.sample_data()? {
-                    if let Outcome::Values(rs) = moddata::decode_all(r, &d, None) {
+                for (i, d) in r.samples_data()?.iter().enumerate() {
+                    if let Outcome::Values(rs) = moddata::decode_all(r, d, None) {
                         for x in rs.iter().filter(|x| vals.iter().any(|v| v.id == x.id)) {
                             println!(
-                                "      sample: {:<20} {}",
+                                "      sample{}: {:<20} {}",
+                                if i == 0 {
+                                    String::new()
+                                } else {
+                                    format!(" {}", i + 1)
+                                },
                                 x.id,
                                 x.text(units::us_customary())
                             );
@@ -1361,5 +1626,108 @@ mod tests {
             )
             .unwrap_err();
         assert!(e.contains("Ctrl+C"));
+    }
+
+    /// A bus log written for this test (made-up identifiers and a made-up VIN with Toyota's maker code).
+    const CAPTURE: &str = "   0.100       7E0  03 22 12 34 00 00 00 00
+   0.110       7E8  05 62 12 34 01 02 00 00
+   0.200       7E0  03 22 F1 90 00 00 00 00
+   0.210       7E8  10 14 62 F1 90 4A 54 58
+   0.211       7E0  30 00 00 00 00 00 00 00
+   0.220       7E8  21 58 58 58 41 30 30 48
+   0.230       7E8  22 30 30 30 30 30 30 31
+   0.300       780  03 22 01 01 00 00 00 00
+   0.310       788  04 62 01 01 05 00 00 00
+   0.400       7E0  04 2E 12 34 01 00 00 00
+   0.410       7E8  03 6E 12 34 00 00 00 00
+   0.500       7DF  02 01 0C 00 00 00 00 00
+   0.510       7E8  04 41 0C 0B B8 00 00 00
+   0.600       7B0  02 21 05 00 00 00 00 00
+   0.610       7B8  03 7F 21 12 00 00 00 00
+";
+
+    #[test]
+    fn a_capture_becomes_a_gated_set_and_a_transcript_without_the_vin() {
+        let all = vehicles::builtin();
+        let l = learn(CAPTURE.as_bytes(), "truck.log", None, None, false, &all).unwrap();
+        let set = l.imp.set.as_ref().unwrap();
+        assert_eq!((set.name.as_str(), set.make.as_str()), ("truck", "toyota"));
+        assert_eq!(l.make_from, "the VIN in the capture");
+        assert_eq!(set.years.len(), 1, "the VIN's model year");
+        assert_eq!(set.source.from, "bus capture");
+        let ecm = l.imp.modules.iter().find(|m| m.module.tx == 0x7E0).unwrap();
+        assert_eq!(ecm.module.name, "engine (ECM)", "named from the profile");
+        let labels: Vec<String> = ecm.requests.iter().map(|r| r.label()).collect();
+        assert_eq!(labels, vec!["22 1234", "22 F190"]);
+        let vin_sample = ecm.requests[1].sample.as_deref().unwrap();
+        assert!(
+            !vin_sample.contains("4A 54 58") && vin_sample.contains("2A 2A"),
+            "{vin_sample}"
+        );
+        assert_eq!(l.masked, 1);
+        assert!(
+            l.imp.modules.iter().all(|m| m.module.tx != 0x780),
+            "airbag module: identity only, so no file with nothing in it"
+        );
+        let why = |w: &str| {
+            l.imp
+                .left_out
+                .iter()
+                .find(|(x, _)| x.contains(w))
+                .map(|x| x.1.clone())
+                .unwrap_or_else(|| panic!("{w}: {:?}", l.imp.left_out))
+        };
+        assert!(why("780 22 0101").contains("airbag"));
+        assert!(why("2E 12 34").contains("seen, not imported"));
+        assert!(why("01 0C").contains("seen, not imported"));
+        assert!(why("7B0 21 05").contains("refused"));
+        let csv = capture::transcript_csv(&l.read.exchanges, &|c| uds::nrc(c).to_string());
+        assert!(
+            !csv.contains("4A 54 58") && csv.contains("[VIN masked]"),
+            "{csv}"
+        );
+        assert!(
+            csv.contains("7B0/7B8,read data (KWP2000 local ID),21 05,7F 21 12 (refused: "),
+            "{csv}"
+        );
+        // the files read back and load through the gates
+        let files = md::set_files(set, &l.imp.modules);
+        let (s2, mods, problems) = moddata::read_files(&files, "test").unwrap();
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!((s2, mods.len()), (set.clone(), l.imp.modules.len()));
+        // --keep-vin keeps it; --make names the make
+        let kept = learn(
+            CAPTURE.as_bytes(),
+            "truck.log",
+            Some("mine"),
+            Some("toyota"),
+            true,
+            &all,
+        )
+        .unwrap();
+        assert_eq!(kept.masked, 0);
+        assert_eq!(kept.make_from, "--make");
+        assert!(
+            capture::transcript_csv(&kept.read.exchanges, &|_| String::new()).contains("4A 54 58")
+        );
+        // with no make known, a module of unknown kind is refused (it could be the airbag module)
+        let unknown = learn(
+            b"0.1 7A0 03 22 12 34\n0.2 7A8 04 62 12 34 01\n",
+            "x.log",
+            None,
+            None,
+            false,
+            &all,
+        )
+        .unwrap();
+        assert!(
+            unknown.imp.modules.is_empty(),
+            "every request refused: no module file"
+        );
+        assert!(unknown
+            .imp
+            .left_out
+            .iter()
+            .any(|(_, y)| y.contains("could be the airbag module")));
     }
 }
