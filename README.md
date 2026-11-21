@@ -48,7 +48,9 @@ bash scripts/install-local.sh --remove   # takes that out again (do this before 
 
 Every code comes explained: what it means (standard codes in Icarus's own words, the maker's own codes from the vehicle
 profile's `[codes]` table), what the letter and digits say, where to start for the common ones, the parts usually involved,
-and links: a web search for the code on this vehicle, and searches for each part plus RockAuto's catalog for the vehicle.
+and, for all 9,533 standard codes, [OBDex](https://github.com/foerbsnavi/OBDex)'s depth (CC0, built in, no network):
+what the module checks and when it sets the code, the causes from likely to rare, the symptoms, whether it lights the
+check-engine lamp or can limit power, how hard the repair is, and related codes. Then links: a web search for the code on this vehicle, and searches for each part plus RockAuto's catalog for the vehicle.
 Name a vehicle once (`icarus garage VIN "2017 Toyota Tacoma 3.5L V6"`, or the field on the Vehicle page) so the links name
 the model. Searches go to DuckDuckGo unless `ICARUS_SEARCH` is a URL with `{q}`.
 

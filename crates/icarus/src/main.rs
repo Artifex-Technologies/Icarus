@@ -1010,6 +1010,9 @@ fn print_code(
             if let Some(h) = i.hint {
                 println!("{indent}    where to start: {h}");
             }
+            for (label, t) in dtc::depth(&i) {
+                println!("{indent}    {}: {t}", label.to_lowercase());
+            }
             let parts = dtc::parts(code);
             if !parts.is_empty() {
                 println!("{indent}    parts usually involved: {}", parts.join(", "));

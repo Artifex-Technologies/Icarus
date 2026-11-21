@@ -16,3 +16,5 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.9"
 # NHTSA's answers are JSON (MIT/Apache-2.0)
 serde_json = "1"
+# OBDex's trouble codes are kept compressed (pure Rust; MIT/Zlib/Apache-2.0)
+miniz_oxide = "0.8"

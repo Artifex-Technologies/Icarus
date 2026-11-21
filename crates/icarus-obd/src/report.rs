@@ -175,6 +175,11 @@ fn code_block(out: &mut String, code: &str, states: &str, d: &Diagnosis) {
     if let Some(h) = info.as_ref().ok().and_then(|i| i.hint) {
         let _ = writeln!(out, "  - Where to start: {h}");
     }
+    if let Ok(i) = &info {
+        for (label, t) in dtc::depth(i) {
+            let _ = writeln!(out, "  - {label}: {t}");
+        }
+    }
     let v = d.vehicle.as_ref();
     let mut links = vec![format!(
         "[look it up]({})",

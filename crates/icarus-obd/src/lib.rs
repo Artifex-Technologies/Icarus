@@ -23,6 +23,7 @@ pub mod lookup;
 pub mod moddata;
 pub mod mode06;
 pub mod nhtsa;
+pub mod obdex;
 pub mod passthru;
 pub mod port;
 pub mod power_guard;

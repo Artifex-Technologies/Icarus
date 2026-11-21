@@ -196,6 +196,9 @@ fn code_line(code: &str, extra: &str, profile: Option<&vehicles::Profile>) -> St
             if let Some(h) = i.hint {
                 s += &format!(" Where to start: {h}");
             }
+            for (label, t) in dtc::depth(&i) {
+                s += &format!(" {label}: {t}.");
+            }
             let p = dtc::parts(code);
             if !p.is_empty() {
                 s += &format!(" Parts usually involved: {}.", p.join(", "));

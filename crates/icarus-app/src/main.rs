@@ -2959,6 +2959,15 @@ fn code_row(
     if let Some(h) = info.as_ref().and_then(|i| i.hint) {
         ui.label(RichText::new(format!("Where to start: {h}")).small());
     }
+    if let Some(i) = info.as_ref().filter(|i| i.detail.is_some()) {
+        egui::CollapsingHeader::new(RichText::new("In depth").small())
+            .id_salt(("code-depth", code, extra))
+            .show(ui, |ui| {
+                for (label, t) in dtc::depth(i) {
+                    ui.label(RichText::new(format!("{label}: {t}")).small());
+                }
+            });
+    }
     let parts = dtc::parts(code);
     if !parts.is_empty() {
         ui.horizontal_wrapped(|ui| {

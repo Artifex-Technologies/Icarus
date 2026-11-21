@@ -4,11 +4,12 @@
 //!
 //! The standard meanings here were written for Icarus in plain words (the numbering follows SAE J2012 / ISO 15031-6); the
 //! numbered families (per cylinder, per oxygen sensor) are generated from their pattern. The maker's own codes come from the
-//! vehicle profile's `[codes]` table, which anyone can extend in `~/.config/icarus/vehicles/`.
+//! vehicle profile's `[codes]` table, which anyone can extend in `~/.config/icarus/vehicles/`. Every standard code also gets
+//! OBDex's depth where it has the code (`obdex`: what is checked, causes, symptoms, flags, the repair).
 
 use crate::vehicles::Profile;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CodeInfo {
     pub code: String,
     /// "powertrain (engine, transmission)" ...
@@ -22,6 +23,8 @@ pub struct CodeInfo {
     pub hint: Option<&'static str>,
     /// Where the text came from ("standard" or the profile's name).
     pub source: String,
+    /// OBDex's entry, for standard codes it has.
+    pub detail: Option<crate::obdex::Entry>,
 }
 
 pub fn explain(code: &str, profile: Option<&Profile>) -> Result<CodeInfo, String> {
@@ -59,12 +62,20 @@ pub fn explain(code: &str, profile: Option<&Profile>) -> Result<CodeInfo, String
         _ => "hybrid propulsion",
     });
     let from_profile = profile.and_then(|p| p.codes.get(&c).map(|t| (t.clone(), p.name.clone())));
+    let detail = if standard { crate::obdex::get(&c) } else { None };
     let (text, source) = match from_profile {
         Some((t, src)) => (Some(t), src),
-        None if standard => (standard_text(&c), "standard".to_string()),
+        None if standard => match standard_text(&c) {
+            Some(t) => (Some(t), "standard".to_string()),
+            None => match &detail {
+                Some(d) => (Some(d.title.clone()), crate::obdex::CREDIT.to_string()),
+                None => (None, "standard".to_string()),
+            },
+        },
         None => (None, String::new()),
     };
     Ok(CodeInfo {
+        detail,
         hint: if standard { hint(&c) } else { None },
         code: c,
         system,
@@ -73,6 +84,25 @@ pub fn explain(code: &str, profile: Option<&Profile>) -> Result<CodeInfo, String
         text,
         source,
     })
+}
+
+/// OBDex's depth for a code, as labelled lines ("What is checked", "Causes", "Symptoms", "Flags", "Repair", "Related codes",
+/// "Sources"),
+/// then the credit; empty when OBDex does not have the code.
+pub fn depth(i: &CodeInfo) -> Vec<(&'static str, String)> {
+    let Some(d) = &i.detail else { return Vec::new() };
+    let mut v = vec![
+        ("What is checked", d.about.clone()),
+        ("Causes", d.causes_text()),
+        ("Symptoms", d.symptoms.join("; ")),
+        ("Flags", d.flags()),
+        ("Repair", d.repair()),
+        ("Related codes", d.related.join(", ")),
+        ("Sources", d.sources.join(" ")),
+    ];
+    v.retain(|(_, t)| !t.is_empty());
+    v.push(("From", crate::obdex::CREDIT.to_string()));
+    v
 }
 
 /// The anatomy of a code in one line, for teaching.
@@ -655,11 +685,15 @@ mod tests {
             t("P0353").as_deref(),
             Some("Ignition coil C primary/secondary circuit (usually cylinder 3)")
         );
+        let p0999 = explain("P0999", None).unwrap();
         assert_eq!(
-            t("P0999"),
-            None,
-            "a standard code Icarus has no words for yet"
+            (p0999.text.as_deref(), p0999.source.as_str()),
+            (Some("Shift Solenoid F Control Circuit High"), crate::obdex::CREDIT),
+            "a standard code Icarus has no words of its own for: OBDex's title"
         );
+        assert!(depth(&p0999).iter().any(|(l, _)| *l == "What is checked"));
+        assert_eq!(t("P2FFF"), None, "a standard code nobody has words for");
+        assert!(depth(&explain("P2FFF", None).unwrap()).is_empty());
         let mut seen = std::collections::HashSet::new();
         for (c, _) in GENERIC {
             assert!(seen.insert(*c), "{c} twice");
