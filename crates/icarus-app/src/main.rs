@@ -795,9 +795,9 @@ impl App {
                         ui,
                         "Writes",
                         if info.vin.as_deref().is_some_and(|v| self.is_read_only(v)) {
-                            "none: the Read-only switch is on (Garage)"
+                            "none: Read-Only is on (Garage)"
                         } else {
-                            "allowed, each with its own checks (Read-only switch off)"
+                            "allowed, each with its own checks (Read-Only is off)"
                         },
                     );
                     if let Some(v) = &info.vin_info {
@@ -2126,8 +2126,8 @@ impl App {
             ui.label(RichText::new(format!("VIN {vin}")).weak());
             let mut locked = self.read_only.contains(&vin);
             if ui
-                .checkbox(&mut locked, "Read-only: Icarus clears, tests and changes nothing on this vehicle")
-                .on_hover_text("A safety switch: codes, live data, module values, reports and recordings still work.")
+                .checkbox(&mut locked, "Read-Only")
+                .on_hover_text("On: Icarus clears, tests and changes nothing on this vehicle. Codes, live data, module values, reports and recordings still work.")
                 .changed()
             {
                 action = Some((if locked { "lock" } else { "unlock" }, dir.clone(), std::path::PathBuf::from(&vin)));
@@ -2206,9 +2206,9 @@ impl App {
                     Ok(()) => {
                         self.read_only = icarus_obd::lock::read_only();
                         self.status = if kind == "lock" {
-                            "Read-only: nothing on this vehicle is cleared, tested or changed.".into()
+                            "Read-Only on: nothing on this vehicle is cleared, tested or changed.".into()
                         } else {
-                            "Read-only switch off.".into()
+                            "Read-Only off.".into()
                         };
                     }
                     Err(e) => self.error = Some(e),

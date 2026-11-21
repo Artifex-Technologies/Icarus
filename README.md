@@ -93,11 +93,11 @@ Every vehicle connected (with a VIN) gets a folder in `~/Documents/Icarus/Vehicl
 (the vehicle's reports go here) and **Logs**. A stock image imported as OEM is copied in read-only and never replaced: it is
 the way back.
 
-## The Read-only switch
+## The Read-Only switch
 
-Each vehicle has a Read-only switch on the Garage page (or `icarus garage read-only VIN on|off`), off by default. On, Icarus
+Each vehicle has a Read-Only switch on the Garage page (or `icarus garage read-only VIN on|off`), off by default. On, Icarus
 still reads everything (codes, live data, module values, reports, recordings) and refuses to clear codes, run actuator
-tests or change settings on that vehicle, before anything is sent: a safety switch for a friend's car. Each write reads
+tests or change settings on that vehicle, before anything is sent. Each write reads
 the VIN from the vehicle on the port at that moment, so the switch follows the vehicle; while any vehicle is switched, one
 whose VIN cannot be read is refused too. The Vehicle page's Writes line shows the connected vehicle's switch. The list is
 `~/.config/icarus/read-only.toml`, on this computer only.

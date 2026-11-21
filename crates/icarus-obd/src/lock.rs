@@ -1,4 +1,4 @@
-//! The Read-only switch: a safety switch per vehicle (the Garage page, or `icarus garage read-only VIN on|off`), kept by VIN
+//! The Read-Only switch: a safety switch per vehicle (the Garage page, or `icarus garage read-only VIN on|off`), kept by VIN
 //! in `~/.config/icarus/read-only.toml` on this computer only. With it on, Icarus reads that vehicle (codes, live data,
 //! module values, reports, recordings) and clears, tests and changes nothing on it. Off, which is every vehicle's default,
 //! the write paths work as they always have, each behind its own checks.
@@ -49,7 +49,7 @@ pub fn read_only() -> BTreeSet<String> {
     path().map(|p| list_in(&p)).unwrap_or_default()
 }
 
-/// Turns a vehicle's Read-only switch on or off.
+/// Turns a vehicle's Read-Only switch on or off.
 pub fn set_in(file: &Path, vin: &str, on: bool) -> Result<(), String> {
     let mut all = list_in(file);
     if on {
@@ -59,7 +59,7 @@ pub fn set_in(file: &Path, vin: &str, on: bool) -> Result<(), String> {
     }
     let list: Vec<String> = all.iter().map(|v| format!("  {v:?},")).collect();
     let body = format!(
-        "# Icarus: vehicles switched to read-only, by VIN (the Garage page's Read-only switch). Icarus clears, tests and\n\
+        "# Icarus: vehicles switched to read-only, by VIN (the Garage page's Read-Only switch). Icarus clears, tests and\n\
          # changes nothing on these. On this computer only.\nvins = [\n{}\n]\n",
         list.join("\n")
     );
@@ -81,7 +81,7 @@ fn tail(vin: &str) -> &str {
     &vin[vin.len().saturating_sub(6)..]
 }
 
-/// Whether the vehicle on `link` may be written to now; the reason when its Read-only switch is on.
+/// Whether the vehicle on `link` may be written to now; the reason when its Read-Only switch is on.
 pub fn writes_allowed(link: &mut dyn Link) -> Result<(), String> {
     let list = read_only();
     if list.is_empty() {
@@ -95,16 +95,16 @@ pub fn writes_allowed(link: &mut dyn Link) -> Result<(), String> {
                 tail(&v)
             ));
             Err(format!(
-                "read-only: this vehicle's Read-only switch is on (VIN ending {}), so Icarus clears, tests and changes \
+                "read-only: this vehicle's Read-Only switch is on (VIN ending {}), so Icarus clears, tests and changes \
                  nothing on it (Garage page, or icarus garage read-only VIN off)",
                 tail(&v)
             ))
         }
         Ok(None) | Err(_) => {
             crate::audit::log(
-                "write refused: the VIN could not be read to check the Read-only switch",
+                "write refused: the VIN could not be read to check the Read-Only switch",
             );
-            Err("read-only: the vehicle's VIN could not be read, so Icarus cannot tell whether its Read-only switch is \
+            Err("read-only: the vehicle's VIN could not be read, so Icarus cannot tell whether its Read-Only switch is \
                  on, and writes nothing"
                 .into())
         }
@@ -117,7 +117,7 @@ mod tests {
     use crate::elm::Elm;
     use crate::sim::SimCar;
 
-    const FRIEND: &str = "1ABCDEFGH12345678";
+    const SWITCHED: &str = "1ABCDEFGH12345678";
 
     fn switched(vins: &[&str]) {
         FOR_TEST.with(|t| *t.borrow_mut() = Some(vins.iter().map(|v| v.to_string()).collect()));
@@ -133,9 +133,9 @@ mod tests {
         set_in(&f, "2ABCDEFGH12345678", true).unwrap();
         assert_eq!(
             list_in(&f).into_iter().collect::<Vec<_>>(),
-            [FRIEND, "2ABCDEFGH12345678"]
+            [SWITCHED, "2ABCDEFGH12345678"]
         );
-        set_in(&f, FRIEND, false).unwrap();
+        set_in(&f, SWITCHED, false).unwrap();
         assert_eq!(list_in(&f).len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -143,10 +143,10 @@ mod tests {
     #[test]
     fn the_switch_follows_the_vehicle_on_the_port() {
         switched(&[]);
-        let mut friend = Elm::connect(Box::new(SimCar::new().with_vin(FRIEND))).unwrap();
-        assert!(writes_allowed(&mut friend).is_ok(), "off by default");
-        switched(&[FRIEND]);
-        let why = writes_allowed(&mut friend).unwrap_err();
+        let mut switched_car = Elm::connect(Box::new(SimCar::new().with_vin(SWITCHED))).unwrap();
+        assert!(writes_allowed(&mut switched_car).is_ok(), "off by default");
+        switched(&[SWITCHED]);
+        let why = writes_allowed(&mut switched_car).unwrap_err();
         assert!(
             why.starts_with("read-only") && why.contains("345678"),
             "{why}"
@@ -162,25 +162,25 @@ mod tests {
     /// one refuses before it sends anything that changes the vehicle.
     #[test]
     fn every_write_path_refuses_a_vehicle_switched_to_read_only() {
-        switched(&[FRIEND]);
-        let friend = || Elm::connect(Box::new(SimCar::engine_off().with_vin(FRIEND))).unwrap();
+        switched(&[SWITCHED]);
+        let car = || Elm::connect(Box::new(SimCar::engine_off().with_vin(SWITCHED))).unwrap();
         let read_only = |r: Result<(), String>| {
             let e = r.unwrap_err();
             assert!(e.starts_with("read-only"), "{e}");
         };
-        read_only(crate::clear::clear_obd(&mut friend()).map(|_| ()));
+        read_only(crate::clear::clear_obd(&mut car()).map(|_| ()));
         read_only(crate::clear::clear_module(
-            &mut friend(),
+            &mut car(),
             0x7E1,
             0x7E9,
             crate::uds::Dialect::Uds,
         ));
         let t = crate::sim::tests().remove(0);
-        read_only(crate::actuator::start(&mut friend(), &t, 30.0).map(|_| ()));
+        read_only(crate::actuator::start(&mut car(), &t, 30.0).map(|_| ()));
         let s = crate::sim::settings().remove(0);
         let v = s.values.values().next().unwrap().clone();
         let log = std::env::temp_dir().join(format!("icarus-lock-log-{}", std::process::id()));
-        read_only(crate::settings::change(&mut friend(), &s, &v, &log).map(|_| ()));
+        read_only(crate::settings::change(&mut car(), &s, &v, &log).map(|_| ()));
         assert!(!log.exists(), "nothing was logged as changed");
     }
 }

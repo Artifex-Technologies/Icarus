@@ -121,8 +121,8 @@ Vehicles:
   icarus vehicles                            the makes Icarus knows (one editable file each)
   icarus garage [VIN \"2017 Toyota Tacoma 3.5L V6\"]
                                              name a vehicle (searches and parts links use it), or list the named ones
-  icarus garage read-only VIN on|off         a vehicle's safety switch: on, Icarus clears, tests and changes nothing on
-                                             it (the Garage page has the same switch)
+  icarus garage read-only VIN on|off         a vehicle's Read-Only switch: on, Icarus clears, tests and changes nothing
+                                             on it (the same switch as on the Garage page)
 
 Trouble codes:
   icarus dtc CODE... [--vehicle \"2017 Toyota Tacoma 3.5L V6\"] [--make toyota]
@@ -1836,11 +1836,11 @@ fn cmd_garage(a: &[String]) -> Result<(), String> {
                 println!("No vehicles named yet: icarus garage VIN \"2017 Toyota Tacoma 3.5L V6\"");
             }
             for (vin, name) in &all {
-                let tag = if locked.contains(vin) { "  (read-only)" } else { "" };
+                let tag = if locked.contains(vin) { "  (Read-Only)" } else { "" };
                 println!("{vin}  {name}{tag}");
             }
             for vin in locked.iter().filter(|v| !all.contains_key(*v)) {
-                println!("{vin}  (read-only, not named)");
+                println!("{vin}  (Read-Only, not named)");
             }
             Ok(())
         }
@@ -1850,9 +1850,9 @@ fn cmd_garage(a: &[String]) -> Result<(), String> {
             println!(
                 "{}",
                 if on == "on" {
-                    format!("{} is read-only: Icarus reads it and clears, tests and changes nothing on it.", i.vin)
+                    format!("{}: Read-Only on. Icarus reads it and clears, tests and changes nothing on it.", i.vin)
                 } else {
-                    format!("{}: the Read-only switch is off (each write still has its own checks).", i.vin)
+                    format!("{}: Read-Only off (each write still has its own checks).", i.vin)
                 }
             );
             Ok(())
