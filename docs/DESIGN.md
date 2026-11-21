@@ -11,7 +11,7 @@ bidirectional shop scanner, a tuning suite and a bus analyser: on Linux, for man
 | Area | What Icarus has |
 | --- | --- |
 | Codes | every module (UDS, KWP2000), meanings, where to start, parts and look-up links, freeze frame, readiness, reports, clearing (report first), Mode 06 test results (CAN) |
-| Live data | 51 standard values with graphs; recording a drive from the window (every value the vehicle offers: the fast ones every sweep, the rest in turn; laptop kept awake; goes on after the adapter drops); the Logs page (fuel trims by driving condition, charts on one time line, following a recording as it is written); `drive_logs` for assistants |
+| Live data | 92 standard values with graphs; recording a drive from the window (every value the vehicle offers: the fast ones every sweep, the rest in turn; laptop kept awake; goes on after the adapter drops); the Logs page (fuel trims by driving condition, charts on one time line, following a recording as it is written); `drive_logs` for assistants |
 | Bidirectional | actuator tests, fenced (hold-to-run, conditions, airbag ban) |
 | Configuration | tires/gears calculator, speedometer check, battery and charging check |
 | Tuning | map viewer, tune diff (XDF) |

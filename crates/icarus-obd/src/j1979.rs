@@ -49,6 +49,10 @@ fn cat_temp(b: &[u8]) -> Option<f64> {
 fn o2_volts(b: &[u8]) -> Option<f64> {
     a(b).map(|v| v / 200.0)
 }
+/// A value after a first byte that says which sensors are fitted (PIDs 66, 67, 78, 79): from the second byte on.
+fn after_support(b: &[u8]) -> &[u8] {
+    b.get(1..).unwrap_or(&[])
+}
 
 macro_rules! pid {
     ($pid:expr, $name:expr, $unit:expr, $f:expr, $about:expr) => {
@@ -80,21 +84,40 @@ pub static PIDS: &[Pid] = &[
     pid!(0x11, "Throttle position", "%", pct, "How far the throttle plate is open (sensor reading, not the pedal)."),
     pid!(0x14, "O2 sensor bank 1 sensor 1", "V", o2_volts, "Narrow-band oxygen sensor before the catalyst: ~0.1 V lean, ~0.9 V rich, switching across 0.45 V in closed loop."),
     pid!(0x15, "O2 sensor bank 1 sensor 2", "V", o2_volts, "Oxygen sensor after the catalyst: a steady signal means the catalyst stores oxygen (is working)."),
+    pid!(0x16, "O2 sensor bank 1 sensor 3", "V", o2_volts, "A third narrow-band sensor on bank 1 (some engines have one after a second catalyst)."),
+    pid!(0x17, "O2 sensor bank 1 sensor 4", "V", o2_volts, "A fourth narrow-band sensor on bank 1."),
     pid!(0x18, "O2 sensor bank 2 sensor 1", "V", o2_volts, "Before the catalyst on bank 2."),
     pid!(0x19, "O2 sensor bank 2 sensor 2", "V", o2_volts, "After the catalyst on bank 2."),
+    pid!(0x1A, "O2 sensor bank 2 sensor 3", "V", o2_volts, "As bank 1 sensor 3, on bank 2."),
+    pid!(0x1B, "O2 sensor bank 2 sensor 4", "V", o2_volts, "As bank 1 sensor 4, on bank 2."),
     pid!(0x1F, "Run time since start", "s", ab, "Seconds since the engine started."),
     pid!(0x21, "Distance with the check-engine light on", "km", ab, "How far the vehicle went while the MIL was lit."),
+    pid!(0x22, "Fuel rail pressure (relative to the manifold)", "kPa", |b| ab(b).map(|v| v * 0.079), "Fuel pressure above the intake manifold's, on port-injected engines that report it this way."),
     pid!(0x23, "Fuel rail pressure", "kPa", |b| ab(b).map(|v| v * 10.0), "Direct-injection or diesel rail pressure."),
     pid!(0x24, "Wide-band lambda, bank 1 sensor 1", "λ", lambda, "Air/fuel ratio as lambda: 1.00 is chemically correct (14.7:1 on petrol), below 1 rich, above 1 lean."),
+    pid!(0x25, "Wide-band lambda, bank 1 sensor 2", "λ", lambda, "A wide-band sensor after the catalyst on bank 1."),
+    pid!(0x26, "Wide-band lambda, bank 1 sensor 3", "λ", lambda, "A third wide-band sensor on bank 1."),
+    pid!(0x27, "Wide-band lambda, bank 1 sensor 4", "λ", lambda, "A fourth wide-band sensor on bank 1."),
     pid!(0x28, "Wide-band lambda, bank 2 sensor 1", "λ", lambda, "As bank 1 (oxygen sensor 5: the first sensor of bank 2 on a two-bank engine)."),
+    pid!(0x29, "Wide-band lambda, bank 2 sensor 2", "λ", lambda, "A wide-band sensor after the catalyst on bank 2."),
+    pid!(0x2A, "Wide-band lambda, bank 2 sensor 3", "λ", lambda, "A third wide-band sensor on bank 2."),
+    pid!(0x2B, "Wide-band lambda, bank 2 sensor 4", "λ", lambda, "A fourth wide-band sensor on bank 2."),
     pid!(0x2C, "Commanded EGR", "%", pct, "How far the ECU opens the exhaust gas recirculation valve (cooler combustion, less NOx)."),
+    pid!(0x2D, "EGR error", "%", trim, "How far the EGR valve's actual opening is from the commanded one: + more open than asked, - less."),
     pid!(0x2E, "Commanded evaporative purge", "%", pct, "How much fuel vapour from the charcoal canister the ECU lets into the intake."),
     pid!(0x2F, "Fuel level", "%", pct, "Fuel tank level."),
     pid!(0x30, "Warm-ups since codes cleared", "", a, "Engine warm-up cycles since trouble codes were last cleared (monitors need several to finish)."),
     pid!(0x31, "Distance since codes cleared", "km", ab, "Distance since trouble codes were last cleared."),
+    pid!(0x32, "Evaporative system vapour pressure", "Pa", |b| (b.len() >= 2).then(|| i16::from_be_bytes([b[0], b[1]]) as f64 / 4.0), "Pressure in the fuel tank and its vapour lines, against the outside air: the leak tests read it."),
     pid!(0x33, "Barometric pressure", "kPa", a, "Outside air pressure: ~101 kPa at sea level, less at altitude (less air, less power)."),
     pid!(0x34, "Wide-band lambda (current), bank 1 sensor 1", "λ", lambda, "Air/fuel ratio from a current-type wide-band sensor."),
+    pid!(0x35, "Wide-band lambda (current), bank 1 sensor 2", "λ", lambda, "A current-type wide-band sensor after the catalyst on bank 1."),
+    pid!(0x36, "Wide-band lambda (current), bank 1 sensor 3", "λ", lambda, "A third current-type sensor on bank 1."),
+    pid!(0x37, "Wide-band lambda (current), bank 1 sensor 4", "λ", lambda, "A fourth current-type sensor on bank 1."),
     pid!(0x38, "Wide-band lambda (current), bank 2 sensor 1", "λ", lambda, "As bank 1 (oxygen sensor 5: the first sensor of bank 2 on a two-bank engine)."),
+    pid!(0x39, "Wide-band lambda (current), bank 2 sensor 2", "λ", lambda, "A current-type wide-band sensor after the catalyst on bank 2."),
+    pid!(0x3A, "Wide-band lambda (current), bank 2 sensor 3", "λ", lambda, "A third current-type sensor on bank 2."),
+    pid!(0x3B, "Wide-band lambda (current), bank 2 sensor 4", "λ", lambda, "A fourth current-type sensor on bank 2."),
     pid!(0x3C, "Catalyst temperature, bank 1 sensor 1", "°C", cat_temp, "Catalytic converter temperature. Too rich or misfiring makes it climb; above ~900 °C it is being damaged."),
     pid!(0x3D, "Catalyst temperature, bank 2 sensor 1", "°C", cat_temp, "As bank 1."),
     pid!(0x3E, "Catalyst temperature, bank 1 sensor 2", "°C", cat_temp, "Further down the catalyst."),
@@ -104,17 +127,39 @@ pub static PIDS: &[Pid] = &[
     pid!(0x44, "Commanded lambda", "λ", lambda, "The air/fuel ratio the ECU is aiming for: 1.00 cruising, below 1 (richer) at full load to cool the engine."),
     pid!(0x45, "Relative throttle position", "%", pct, "Throttle opening relative to its learned closed position."),
     pid!(0x46, "Ambient air temperature", "°C", temp, "Outside air temperature."),
+    pid!(0x47, "Absolute throttle position B", "%", pct, "The throttle's second position sensor (drive-by-wire throttles have two that must agree)."),
+    pid!(0x48, "Absolute throttle position C", "%", pct, "A third throttle position sensor, where fitted."),
     pid!(0x49, "Accelerator pedal position D", "%", pct, "The driver's pedal (drive-by-wire): the request, which the ECU turns into a throttle opening."),
+    pid!(0x4A, "Accelerator pedal position E", "%", pct, "The pedal's second sensor: it must track D, or the ECU limits power."),
+    pid!(0x4B, "Accelerator pedal position F", "%", pct, "A third pedal sensor, where fitted."),
     pid!(0x4C, "Commanded throttle", "%", pct, "The throttle opening the ECU asks for."),
     pid!(0x4D, "Time with the check-engine light on", "min", ab, "Minutes the engine ran with the MIL lit."),
     pid!(0x4E, "Time since codes cleared", "min", ab, "Engine minutes since trouble codes were last cleared."),
     pid!(0x52, "Ethanol content", "%", pct, "Flex-fuel sensor reading: more ethanol needs more fuel and allows more timing."),
+    pid!(0x53, "Evaporative system vapour pressure (absolute)", "kPa", |b| ab(b).map(|v| v / 200.0), "Fuel tank vapour pressure as an absolute pressure."),
+    pid!(0x54, "Evaporative system vapour pressure (wide range)", "Pa", |b| ab(b).map(|v| v - 32767.0), "Fuel tank vapour pressure against the outside air, over a wider range than PID 32."),
+    pid!(0x55, "Short-term secondary O2 trim, bank 1", "%", trim, "The correction from the sensor after the catalyst, right now."),
+    pid!(0x56, "Long-term secondary O2 trim, bank 1", "%", trim, "The learned correction from the sensor after the catalyst."),
+    pid!(0x57, "Short-term secondary O2 trim, bank 2", "%", trim, "As bank 1, on bank 2."),
+    pid!(0x58, "Long-term secondary O2 trim, bank 2", "%", trim, "As bank 1, on bank 2."),
+    pid!(0x59, "Fuel rail pressure (absolute)", "kPa", |b| ab(b).map(|v| v * 10.0), "Rail pressure as an absolute pressure (direct injection)."),
+    pid!(0x5A, "Relative accelerator pedal position", "%", pct, "The pedal relative to its learned rest position."),
+    pid!(0x5B, "Hybrid battery remaining life", "%", pct, "The high-voltage battery's state of charge, as the hybrid system reports it."),
     pid!(0x5C, "Engine oil temperature", "°C", temp, "Oil temperature: it lags coolant on warm-up and runs hotter under hard use."),
     pid!(0x5D, "Fuel injection timing", "°", |b| ab(b).map(|v| v / 128.0 - 210.0), "When fuel is injected, in crank degrees."),
     pid!(0x5E, "Engine fuel rate", "L/h", |b| ab(b).map(|v| v / 20.0), "Fuel used per hour, from the injector commands."),
     pid!(0x61, "Driver's demand torque", "%", |b| a(b).map(|v| v - 125.0), "Torque requested by the pedal, as a share of the engine's reference torque."),
     pid!(0x62, "Actual engine torque", "%", |b| a(b).map(|v| v - 125.0), "Torque the ECU calculates the engine makes."),
     pid!(0x63, "Engine reference torque", "Nm", ab, "The torque that the two percentages above are shares of."),
+    pid!(0x66, "Mass air flow, sensor A", "g/s", |b| ab(after_support(b)).map(|v| v / 32.0), "Air flow from the first MAF sensor, on engines that report it this way (a first byte says which sensors there are)."),
+    pid!(0x67, "Coolant temperature, sensor 1", "°C", |b| temp(after_support(b)), "The first of two coolant temperature sensors."),
+    pid!(0x78, "Exhaust gas temperature, bank 1 sensor 1", "°C", |b| cat_temp(after_support(b)), "Exhaust temperature at bank 1's first sensor (turbo and diesel engines): watch it under load."),
+    pid!(0x79, "Exhaust gas temperature, bank 2 sensor 1", "°C", |b| cat_temp(after_support(b)), "As bank 1."),
+    pid!(0x84, "Manifold surface temperature", "°C", temp, "The intake manifold's surface temperature."),
+    pid!(0x8E, "Engine friction torque", "%", |b| a(b).map(|v| v - 125.0), "Torque lost to friction, as a share of the reference torque."),
+    pid!(0x9D, "Engine fuel rate (mass)", "g/s", |b| ab(b).map(|v| v / 50.0), "Fuel used by the engine per second, by mass."),
+    pid!(0xA2, "Cylinder fuel rate", "mg/stroke", |b| ab(b).map(|v| v / 32.0), "Fuel injected per cylinder per stroke."),
+    pid!(0xA6, "Odometer", "km", |b| (b.len() >= 4).then(|| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as f64 / 10.0), "Total distance as the engine computer reports it (newer vehicles only); read, never changed."),
 ];
 
 pub fn pid(n: u8) -> Option<&'static Pid> {
@@ -518,8 +563,20 @@ mod tests {
             None,
             "too short is no value, not a wrong one"
         );
+        // signed: -1 Pa as two's complement is -0.25 Pa
+        assert_eq!(pid(0x32).unwrap().decode(&[0xFF, 0xFF]), Some(-0.25));
+        assert_eq!(pid(0x54).unwrap().decode(&[0x7F, 0xFF]), Some(0.0));
+        // a first byte that says which sensors are fitted, then the value
+        assert_eq!(pid(0x78).unwrap().decode(&[0x01, 0x1F, 0x40]), Some(760.0));
+        assert_eq!(pid(0x67).unwrap().decode(&[0x01, 0x7B]), Some(83.0));
+        assert_eq!(pid(0x78).unwrap().decode(&[0x01, 0x1F]), None);
+        assert_eq!(
+            pid(0xA6).unwrap().decode(&[0x00, 0x01, 0xE2, 0x40]),
+            Some(12345.6)
+        );
         let mut seen = std::collections::HashSet::new();
         assert!(PIDS.iter().all(|p| seen.insert(p.pid)), "each PID once");
+        assert!(PIDS.windows(2).all(|w| w[0].pid < w[1].pid), "in order");
     }
 
     #[test]
