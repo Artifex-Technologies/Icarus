@@ -63,6 +63,10 @@ Module data (definition files; nothing is sent to a vehicle):
                                              Toyota-Tacoma/signalsets/v3/default.json) into ~/.config/icarus/data/SET.
                                              OBDb's data is CC BY-SA 4.0: Icarus ships none of it, and shows its
                                              attribution wherever its values appear
+  icarus import abrp FILE.json [--name SET] [--make NAME] [--model WORDS] [--dry-run] [--replace]
+                                             an electric or hybrid vehicle's PID list from A Better Routeplanner
+                                             (github.com/Iternio-Planning-AB/ev-obd-pids, e.g. hkmc/Ioniq5.json):
+                                             battery charge, health, current, voltage, temperatures (Apache-2.0)
   icarus import btlog FILE [--name SET] [--make NAME] [--transcript OUT.csv] [--keep-vin] [--dry-run] [--replace]
                                              learn from another app at work: a phone's Bluetooth log (idevicebtlogger,
                                              pcap or PacketLogger .pklg) of an app talking to its ELM327/STN adapter.

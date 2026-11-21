@@ -24,11 +24,16 @@ const CAPTURE_USAGE: &str =
     "usage: icarus import btlog|buslog FILE [--name SET] [--make NAME] [--transcript OUT.csv] \
                              [--keep-vin] [--dry-run] [--replace]";
 
-/// `icarus import obdb FILE.json [--name SET] [--make NAME] [--dry-run] [--replace]`, `icarus import btlog|buslog FILE ...`
+/// `icarus import obdb FILE.json [--name SET] [--make NAME] [--dry-run] [--replace]`, `icarus import abrp FILE.json ...`,
+/// `icarus import btlog|buslog FILE ...`
 pub fn cmd_import(a: &[String]) -> Result<(), String> {
-    let args = parse_args(a.get(1..).unwrap_or(&[]), &["name", "make", "transcript"])?;
+    let args = parse_args(
+        a.get(1..).unwrap_or(&[]),
+        &["name", "make", "model", "transcript"],
+    )?;
     match a.first().map(String::as_str) {
         Some("obdb") => import_obdb(&args),
+        Some("abrp") => import_abrp(&args),
         Some("btlog" | "buslog") => import_capture(&args),
         Some("ddt") => {
             let [path] = args.pos.as_slice() else {
@@ -38,7 +43,7 @@ pub fn cmd_import(a: &[String]) -> Result<(), String> {
             md::ddt::parse(&text).map(|_| ())
         }
         _ => Err(format!(
-            "usage: icarus import obdb FILE.json [--name SET] [--make NAME] [--dry-run] [--replace]\n{CAPTURE_USAGE}"
+            "usage: icarus import obdb FILE.json [--name SET] [--make NAME] [--dry-run] [--replace]\n{ABRP_USAGE}\n{CAPTURE_USAGE}"
         )),
     }
 }
@@ -72,8 +77,7 @@ fn import_obdb(args: &Args) -> Result<(), String> {
         return Err("usage: icarus import obdb FILE.json [--name SET] [--make NAME] [--dry-run] [--replace]".into());
     };
     let text = std::fs::read_to_string(path).map_err(|x| format!("{path}: {x}"))?;
-    let all = profiles();
-    let mut imp = obdb::parse(
+    let imp = obdb::parse(
         &text,
         &obdb::Options {
             path: path.clone(),
@@ -82,6 +86,40 @@ fn import_obdb(args: &Args) -> Result<(), String> {
             today: today(),
         },
     )?;
+    finish_import("OBDb signal set", path, imp, args)
+}
+
+/// `icarus import abrp FILE.json [--name SET] [--make NAME] [--model WORDS] [--dry-run] [--replace]`: an EV PID list from
+/// A Better Routeplanner's ev-obd-pids.
+fn import_abrp(args: &Args) -> Result<(), String> {
+    let [path] = args.pos.as_slice() else {
+        return Err(ABRP_USAGE.into());
+    };
+    let text = std::fs::read_to_string(path).map_err(|x| format!("{path}: {x}"))?;
+    let imp = md::abrp::parse(
+        &text,
+        &md::abrp::Options {
+            path: path.clone(),
+            name: args.opt("name").map(str::to_string),
+            make: args.opt("make").map(str::to_string),
+            model: args.opt("model").map(str::to_string),
+            today: today(),
+        },
+    )?;
+    finish_import("ABRP PID list", path, imp, args)
+}
+
+const ABRP_USAGE: &str =
+    "usage: icarus import abrp FILE.json [--name SET] [--make NAME] [--model WORDS] [--dry-run] [--replace]";
+
+/// What an importer made, checked against the vehicle profiles and the gates, listed, and written unless --dry-run.
+fn finish_import(
+    kind: &str,
+    path: &str,
+    mut imp: moddata::Imported,
+    args: &Args,
+) -> Result<(), String> {
+    let all = profiles();
     if let Some(set) = imp.set.as_mut() {
         match vehicles::find(&all, &set.make) {
             Ok(p) => set.make = p.id.clone(),
@@ -95,7 +133,7 @@ fn import_obdb(args: &Args) -> Result<(), String> {
     moddata::gate_imported(&mut imp, &all);
     let set = imp.set.clone().ok_or("no set")?;
     println!(
-        "OBDb signal set {path}\n  set {:?} for {} {}",
+        "{kind} {path}\n  set {:?} for {} {}",
         set.name,
         set.make,
         set.models.join(" ")

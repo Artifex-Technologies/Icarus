@@ -18,6 +18,7 @@
 //! Files carry no raw request bytes: Icarus builds every request itself from `service` and `ident` (`22 hi lo`, `21 id`,
 //! `1A id`), and refuses any other service when the file is read.
 
+pub mod abrp;
 pub mod capture;
 pub mod ddt;
 pub mod decode;
@@ -77,7 +78,7 @@ pub struct SetInfo {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Source {
-    /// "OBDb", "DDT2000", "opendbc", "Icarus" (built in) or "hand".
+    /// "OBDb", "ABRP", "DDT2000", "opendbc", "Icarus" (built in) or "hand".
     pub from: String,
     #[serde(default)]
     pub file: String,

@@ -208,6 +208,7 @@ import a file you downloaded:
 
 ```sh
 icarus import obdb ~/Downloads/Toyota-Tacoma/signalsets/v3/default.json   # an OBDb signal set (github.com/OBDb)
+icarus import abrp ~/Downloads/ev-obd-pids/hkmc/Ioniq5.json --model "Ioniq 5"  # an EV's PID list (A Better Routeplanner)
 icarus data                                     # the sets you have; icarus data SET --module 701 lists one module's values
 icarus obd data 701 --adapter A                 # the transmission's values now (US units where those are the custom)
 icarus obd data 700 701 --adapter A --every 1000 --csv drive.csv   # watch them, paced, into a CSV
@@ -222,7 +223,14 @@ short) and the values checked on it are kept in its folder, `Definitions/module-
 be read keeps them for the run only.
 
 OBDb's signal sets are CC BY-SA 4.0: Icarus reads your copy and shows "signal data: OBDb (github.com/OBDb), CC BY-SA 4.0"
-wherever those values appear; none of OBDb's data is in this repository. DDT2000 files (Renault, Dacia, Nissan) and DBC bus
+wherever those values appear; none of OBDb's data is in this repository.
+
+A Better Routeplanner's EV PID lists ([ev-obd-pids](https://github.com/Iternio-Planning-AB/ev-obd-pids), Apache-2.0)
+give electric and hybrid vehicles' battery values: charge, health, current, voltage, temperatures. Their equations are in
+Torque Pro's style; Icarus works out what each one is by evaluating it (a scaled number from consecutive bytes, signed or
+not, or one bit) and keeps only those, so nothing is guessed. Yes/no tests over several values, raw CAN frames and 29-bit
+modules (VW, Renault, Honda, so far) are listed as left out with the reason. Modules at 7E0-7E7 (OBD-II's powertrain
+addresses) are read; any other address follows the airbag rule in the gates below. DDT2000 files (Renault, Dacia, Nissan) and DBC bus
 files come in later builds (`icarus import ddt` is there, and says it is not built yet).
 
 The fence is in code (`crates/icarus-obd/src/moddata.rs`), checked when a set is loaded and again before every request:
