@@ -51,6 +51,8 @@ pub struct SimCar {
     loud: bool,
     /// The adapter watched the bus while not silent: it would have acknowledged frames.
     pub acked: bool,
+    /// The VIN it answers (`VIN`, unless a test gives another vehicle's).
+    vin: String,
 }
 
 impl Default for SimCar {
@@ -92,6 +94,16 @@ impl SimCar {
             cmm: 0,
             loud: false,
             acked: false,
+            vin: VIN.to_string(),
+        }
+    }
+
+    /// The same vehicle answering another VIN: one that is not the simulated vehicle, for the read-only lock (`lock`).
+    #[cfg(test)]
+    pub(crate) fn with_vin(self, vin: &str) -> SimCar {
+        SimCar {
+            vin: vin.to_string(),
+            ..self
         }
     }
 
@@ -569,7 +581,7 @@ impl SimCar {
                 Some([&[0x62, 0xF1, 0x88][..], b"ICARUS-SW-0001"].concat())
             }
             ([0x22, 0xF1, 0x90], true) if tx == 0x7E0 => {
-                Some([&[0x62, 0xF1, 0x90][..], VIN.as_bytes()].concat())
+                Some([&[0x62, 0xF1, 0x90][..], self.vin.as_bytes()].concat())
             }
             ([0x22, ..], true) => refuse(0x31),
             _ => refuse(0x11),
@@ -626,7 +638,10 @@ impl SimCar {
             }
             [0x07] => msgs.push(("7E8", vec![0x47, 0x00])),
             [0x0A] => msgs.push(("7E8", vec![0x4A, 0x00])),
-            [0x09, 0x02] => msgs.push(("7E8", [&[0x49, 0x02, 0x01][..], VIN.as_bytes()].concat())),
+            [0x09, 0x02] => msgs.push((
+                "7E8",
+                [&[0x49, 0x02, 0x01][..], self.vin.as_bytes()].concat(),
+            )),
             [0x09, 0x04] => {
                 msgs.push((
                     "7E8",

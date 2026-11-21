@@ -91,6 +91,15 @@ Every vehicle connected (with a VIN) gets a folder in `~/Documents/Icarus/Vehicl
 (the vehicle's reports go here) and **Logs**. A stock image imported as OEM is copied in read-only and never replaced: it is
 the way back.
 
+## Someone else's vehicle: read-only
+
+Icarus writes only to vehicles I mark as mine (`icarus garage mine VIN`; `icarus garage not-mine VIN` takes it back, and
+`icarus garage` lists which are which). Every other vehicle is read-only: its codes, live data, module values, reports and
+recordings all work, and clearing codes, actuator tests and setting changes are refused before anything is sent. Each
+write reads the VIN from the vehicle on the port at that moment, so plugging into a friend's car after mine cannot carry
+my permission over, and a vehicle whose VIN cannot be read is read-only too. The list is `~/.config/icarus/mine.toml`, on
+this computer only; the simulated vehicle is always writable.
+
 ## Tires and gears
 
 ```sh

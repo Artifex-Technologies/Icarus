@@ -175,7 +175,9 @@ pub fn not_one_module(id: u16) -> Option<String> {
     if id == 0x7DF {
         Some("refused: 7DF is the broadcast every module hears, not one module".into())
     } else if !(0x700..=0x7F7).contains(&id) {
-        Some(format!("refused: {id:03X} is not a module request ID (700-7F7)"))
+        Some(format!(
+            "refused: {id:03X} is not a module request ID (700-7F7)"
+        ))
     } else {
         None
     }
@@ -359,6 +361,7 @@ pub fn start(elm: &mut dyn Link, def: &TestDef, value: f64) -> Result<Running, S
     if let Some(why) = def.refused() {
         return Err(why);
     }
+    crate::lock::writes_allowed(elm)?;
     if let Some(v) = elm.voltage() {
         if v < MIN_VOLTS {
             return Err(format!(

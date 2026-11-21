@@ -28,6 +28,7 @@ run them again. Permanent codes stay until their monitor passes. If the fault is
 
 /// OBD-II service 04 to every module: returns the modules that confirmed.
 pub fn clear_obd(elm: &mut dyn Link) -> Result<Vec<String>, String> {
+    crate::lock::writes_allowed(elm)?;
     conditions_hold(elm, &[Condition::EngineOff])?;
     let _awake = crate::power_guard::Inhibit::take("Clearing trouble codes").ok();
     check(&[0x04])?;
@@ -76,6 +77,7 @@ pub fn clear_module(elm: &mut dyn Link, tx: u16, rx: u16, dialect: Dialect) -> R
         crate::audit::log(&format!("clear {tx:03X} refused: an airbag module"));
         return Err(why);
     }
+    crate::lock::writes_allowed(elm)?;
     conditions_hold(elm, &[Condition::EngineOff])?;
     let _awake = crate::power_guard::Inhibit::take("Clearing trouble codes").ok();
     let req: &[u8] = match dialect {
@@ -144,12 +146,21 @@ mod tests {
                 .contains("airbag"));
         }
         assert!(refused(0x7A0, 0x788, "").is_some(), "by its answer ID");
-        assert!(refused(0x7A0, 0x7A8, "Front airbag sensor").is_some(), "by name");
+        assert!(
+            refused(0x7A0, 0x7A8, "Front airbag sensor").is_some(),
+            "by name"
+        );
         assert!(refused(0x7B0, 0x7B8, "ABS / VSC / TRC (skid control)").is_none());
         assert!(refused(0x7E0, 0x7E8, "engine").is_none());
-        assert!(refused(0x7DF, 0x7E8, "").unwrap().contains("broadcast"), "the broadcast reaches the airbag module too");
+        assert!(
+            refused(0x7DF, 0x7E8, "").unwrap().contains("broadcast"),
+            "the broadcast reaches the airbag module too"
+        );
         assert!(refused(0x123, 0x12B, "").is_some(), "not a module ID");
-        assert!(refused(0x7A0, 0x788, "").unwrap().contains("788"), "names the ID that matched");
+        assert!(
+            refused(0x7A0, 0x788, "").unwrap().contains("788"),
+            "names the ID that matched"
+        );
     }
 
     #[test]

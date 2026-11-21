@@ -75,6 +75,9 @@ A module is bricked when a write stops halfway or puts the wrong thing in. Icaru
 7. **Read back and compare** after writing; on any doubt, write the backup back.
 8. **Every first on the bench.** A family's first read and write happen on a spare ECU on the bench, never in the vehicle.
 9. **Logged.** Every write in the action log.
+10. **Only my own vehicles.** Every write path asks `lock::writes_allowed` first, which reads the VIN from the vehicle on
+    the port and allows the write only if that VIN is on my list (`icarus garage mine`); any other vehicle, or one whose VIN
+    cannot be read, is read-only (done: clearing, actuator tests, settings).
 
 ## Writing a module (flash): the conditions
 

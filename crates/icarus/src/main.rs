@@ -8,8 +8,8 @@ use icarus_obd::elm::Elm;
 use icarus_obd::j1979::{self, DtcKind};
 use icarus_obd::port::Target;
 use icarus_obd::{
-    actuator, bus, charging, clear, dtc, garage, lookup, mode06, nhtsa, report, settings, sim,
-    socketcan, uds, vehicles, vin,
+    actuator, bus, charging, clear, dtc, garage, lock, lookup, mode06, nhtsa, report, settings,
+    sim, socketcan, uds, vehicles, vin,
 };
 mod data;
 mod mcp;
@@ -117,6 +117,8 @@ Vehicles:
   icarus vehicles                            the makes Icarus knows (one editable file each)
   icarus garage [VIN \"2017 Toyota Tacoma 3.5L V6\"]
                                              name a vehicle (searches and parts links use it), or list the named ones
+  icarus garage mine|not-mine VIN            only my own vehicles can be written to (codes cleared, tests, settings);
+                                             every other vehicle is read-only, whatever is asked
 
 Trouble codes:
   icarus dtc CODE... [--vehicle \"2017 Toyota Tacoma 3.5L V6\"] [--make toyota]
@@ -1822,12 +1824,39 @@ fn cmd_garage(a: &[String]) -> Result<(), String> {
     match a {
         [] => {
             let all = garage::load();
-            if all.is_empty() {
+            let mine = lock::mine();
+            if all.is_empty() && mine.is_empty() {
                 println!("No vehicles named yet: icarus garage VIN \"2017 Toyota Tacoma 3.5L V6\"");
             }
-            for (vin, name) in all {
-                println!("{vin}  {name}");
+            for (vin, name) in &all {
+                let tag = if mine.contains(vin) {
+                    "mine"
+                } else {
+                    "read-only"
+                };
+                println!("{vin}  {name}  ({tag})");
             }
+            for vin in mine.iter().filter(|v| !all.contains_key(*v)) {
+                println!("{vin}  (mine, not named)");
+            }
+            println!("\nOnly vehicles marked as mine can have codes cleared, tests run or settings changed; every other one is read-only.");
+            Ok(())
+        }
+        [what, v] if what == "mine" || what == "not-mine" => {
+            let i = vin::decode(v)?;
+            let yes = what == "mine";
+            lock::set(&i.vin, yes)?;
+            println!(
+                "{}",
+                if yes {
+                    format!("{} is marked as mine: Icarus may clear, test and change things on it (each with its own checks).", i.vin)
+                } else {
+                    format!(
+                        "{} is read-only now: Icarus reads it and writes nothing to it.",
+                        i.vin
+                    )
+                }
+            );
             Ok(())
         }
         [v, name @ ..] => {

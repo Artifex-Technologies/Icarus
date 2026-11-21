@@ -67,7 +67,9 @@ impl SettingDef {
             return Some(why);
         }
         // the one airbag check (actuator::is_airbag), by request ID, answer ID and name
-        if crate::actuator::is_airbag(self.module, &words) || crate::actuator::is_airbag(self.rx(), "") {
+        if crate::actuator::is_airbag(self.module, &words)
+            || crate::actuator::is_airbag(self.rx(), "")
+        {
             return Some("airbag and occupant-detection modules are never changed".into());
         }
         if [
@@ -321,6 +323,7 @@ pub fn change(
     if let Some(why) = s.refused() {
         return Err(why);
     }
+    crate::lock::writes_allowed(link)?;
     let len = s.values.values().next().map(Vec::len).unwrap_or(0);
     if value.len() != len {
         return Err(format!("{} takes {len} byte(s)", s.name));

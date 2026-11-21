@@ -18,6 +18,7 @@ pub mod garage;
 pub mod j1979;
 pub mod learning;
 pub mod link;
+pub mod lock;
 pub mod lookup;
 pub mod moddata;
 pub mod mode06;
