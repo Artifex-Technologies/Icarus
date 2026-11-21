@@ -112,6 +112,24 @@ Taller tires: how far off the speedometer and odometer are (both cases: speed me
 transmission output, where a regear counts too), what the stock and installed axle ratios act like, and which ratios bring
 the stock feel back.
 
+## GPS
+
+Any GPS receiver that speaks NMEA 0183 (nearly all do): a USB one (`/dev/ttyACM0`, 9600 baud unless `@baud` is given), a
+Bluetooth one (`bt:MAC`), or a phone app that shares its GPS over the network (`tcp:HOST:PORT`); `sim` stands in.
+`ICARUS_GPS` sets the default.
+
+```sh
+icarus gps --gps /dev/ttyACM0                    # the fix, each satellite's signal, and what they say about the receiver
+icarus gps speed --gps /dev/ttyACM0 --adapter A  # GPS speed against the vehicle's own, once a second, then the error
+```
+
+`icarus gps` diagnoses the receiver and its antenna: no sentences (wrong device or baud rate), garbled ones (a loose cable),
+no satellites heard after a minute (the antenna disconnected, its cable damaged, or no view of the sky), only weak signals
+(under 25 dB-Hz: the antenna or its cable), a 2D fix, poor precision. `icarus gps speed` is the speedometer check without
+typing: a steady percentage off is a tire size or axle ratio change (`icarus tires` says which), and a vehicle that reports
+no speed while GPS has it moving has lost its speed signal. The window has both on the Tools page (GPS: Listen 10 s, then
+Use in the speedometer check). Positions are shown only with `--position` and are never written to a file or sent anywhere.
+
 ## The bus
 
 `icarus bus watch --adapter A` (the OBDLink's monitor mode) or `--can can0` (a Linux CAN interface such as a CANable),

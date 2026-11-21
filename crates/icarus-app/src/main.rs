@@ -57,6 +57,8 @@ enum Bg {
     Recalls(Result<Vec<icarus_obd::nhtsa::Recall>, String>),
     /// Sarina's answer about a learning session.
     Sarina(Result<String, String>),
+    /// What a GPS receiver said over some seconds.
+    Gps(Result<icarus_obd::gps::Fix, String>, f64),
 }
 
 /// What a clear removes the codes from: None = every OBD-II module, Some = one module (tx, rx, dialect).
@@ -103,7 +105,8 @@ enum MapEdit {
 
 /// What to do at start (command line): `--connect` (the adapter from ICARUS_ADAPTER, or `--adapter A`), `--page NAME`,
 /// `--scan` and `--live` once connected, `--maps DEF.xdf IMAGE.bin [SECOND.bin]`, `--learn` (a learning watch once
-/// connected; `--mark TEXT` marks at its start and `--learn-seconds N` stops it, for demonstrations and screenshots).
+/// connected; `--mark TEXT` marks at its start and `--learn-seconds N` stops it, for demonstrations and screenshots),
+/// `--gps SOURCE` (the Tools page's GPS source, listened to at start).
 #[derive(Default)]
 struct Start {
     connect: bool,
@@ -121,6 +124,7 @@ struct Start {
     /// `--map NAME`: the map to show first (with `--cell R,C`, that cell chosen for editing).
     map: Option<String>,
     cell: Option<(usize, usize)>,
+    gps: Option<String>,
 }
 
 impl Start {
@@ -146,6 +150,10 @@ impl Start {
                             .and_then(|v| v.parse().ok())
                             .ok_or("--learn-seconds needs a number")?,
                     );
+                }
+                "--gps" => {
+                    i += 1;
+                    s.gps = Some(a.get(i).ok_or("--gps needs a source")?.clone());
                 }
                 "--adapter" => {
                     i += 1;
@@ -254,6 +262,13 @@ struct App {
     t_speed: String,
     s_gauge: String,
     s_gps: String,
+    /// The GPS source (`/dev/ttyACM0`, `tcp:HOST:PORT`, `sim`...), what it said last (and over how many seconds), and
+    /// whether it is being listened to.
+    gps_src: String,
+    gps_fix: Option<(icarus_obd::gps::Fix, f64)>,
+    gps_busy: bool,
+    /// `--gps`: listen once the Tools page is drawn.
+    gps_now: bool,
     s_obd: String,
     page: Page,
     tx: Sender<Cmd>,
@@ -352,6 +367,14 @@ impl App {
             t_speed: "65".into(),
             s_gauge: String::new(),
             s_gps: String::new(),
+            gps_src: start
+                .gps
+                .clone()
+                .or_else(|| std::env::var("ICARUS_GPS").ok())
+                .unwrap_or_default(),
+            gps_fix: None,
+            gps_busy: false,
+            gps_now: start.gps.is_some(),
             s_obd: String::new(),
             page: start.page.unwrap_or(Page::Vehicle),
             tx,
@@ -541,6 +564,16 @@ impl App {
                     self.recalls = Some(r);
                 }
                 Bg::Vin(Err(e)) | Bg::Recalls(Err(e)) => self.error = Some(e),
+                Bg::Gps(r, secs) => {
+                    self.gps_busy = false;
+                    match r {
+                        Ok(fx) => {
+                            self.status = format!("GPS: {}.", fx.summary());
+                            self.gps_fix = Some((fx, secs));
+                        }
+                        Err(e) => self.error = Some(format!("GPS: {e}")),
+                    }
+                }
                 Bg::Sarina(r) => {
                     self.sarina_busy = false;
                     self.status = if r.is_ok() {
@@ -2312,6 +2345,7 @@ impl App {
                 }
             }
         });
+        self.gps_card(ui, pal);
         card(ui, pal, "Speedometer check", |ui| {
             ui.label(RichText::new("At a steady speed, note what the gauge shows, what the engine computer reports (Live data: vehicle speed) and a phone's GPS. Two different errors mean the gauge and the engine computer take speed from different places.").weak());
             egui::Grid::new("speedcheck")
@@ -2341,6 +2375,83 @@ impl App {
                 }
             }
         });
+    }
+
+    /// A GPS receiver: listen for a while, show the fix, each satellite's signal and what that says about the receiver
+    /// and its antenna, and hand its speed to the speedometer check. Positions are not shown.
+    fn gps_card(&mut self, ui: &mut egui::Ui, pal: &theme::Palette) {
+        let mut listen = std::mem::take(&mut self.gps_now);
+        card(ui, pal, "GPS", |ui| {
+            ui.label(RichText::new("A GPS receiver (USB /dev/ttyACM0, Bluetooth bt:MAC, a phone sharing its GPS at tcp:HOST:PORT, or sim): its fix, every satellite's signal, and what that says about the receiver and its antenna. Its speed goes into the speedometer check below. Positions stay on this computer and are not shown here.").weak());
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.gps_src)
+                        .hint_text("/dev/ttyACM0")
+                        .desired_width(220.0),
+                );
+                if ui
+                    .add_enabled(!self.gps_busy && !self.gps_src.trim().is_empty(), egui::Button::new("Listen 10 s"))
+                    .clicked()
+                {
+                    listen = true;
+                }
+                if self.gps_busy {
+                    ui.spinner();
+                }
+            });
+            let Some((fx, secs)) = &self.gps_fix else {
+                return;
+            };
+            ui.add_space(4.0);
+            ui.label(RichText::new(fx.summary()).strong());
+            let us = icarus_core::moddata::units::us_customary();
+            let speed = fx.speed_kmh.filter(|_| fx.valid).map(|k| if us { k / 1.609_344 } else { k });
+            if let Some(v) = speed {
+                ui.horizontal(|ui| {
+                    ui.label(format!("Speed {v:.1} {}", if us { "mph" } else { "km/h" }));
+                    if ui.small_button("Use in the speedometer check").clicked() {
+                        self.s_gps = format!("{v:.1}");
+                    }
+                });
+            }
+            let (heard, _) = fx.heard();
+            ui.label(format!("Satellites in view: {} ({heard} with a signal)", fx.sats.len()));
+            let mut sats: Vec<_> = fx.sats.values().collect();
+            sats.sort_by(|a, b| b.snr.cmp(&a.snr).then(a.prn.cmp(&b.prn)));
+            egui::Grid::new("gps-sats").num_columns(3).spacing(vec2(10.0, 2.0)).show(ui, |ui| {
+                for s in sats {
+                    ui.label(RichText::new(format!("{} {}", s.system, s.prn)).small());
+                    let snr = s.snr.unwrap_or(0);
+                    let col = match snr {
+                        0 => pal.dim,
+                        1..=24 => pal.amber,
+                        _ => pal.accent,
+                    };
+                    ui.add(
+                        egui::ProgressBar::new(snr as f32 / 50.0)
+                            .desired_width(160.0)
+                            .fill(col),
+                    );
+                    ui.label(RichText::new(s.snr.map_or("none".into(), |n| format!("{n} dB-Hz"))).small());
+                    ui.end_row();
+                }
+            });
+            for d in fx.diagnose(*secs) {
+                ui.label(d);
+            }
+        });
+        if listen {
+            self.gps_busy = true;
+            let src = self.gps_src.trim().to_string();
+            let (tx, c) = (self.bg_tx.clone(), ui.ctx().clone());
+            std::thread::spawn(move || {
+                let secs = 10.0;
+                let r = icarus_obd::gps::Source::open(&src)
+                    .and_then(|mut s| icarus_obd::gps::listen(&mut s, secs));
+                let _ = tx.send(Bg::Gps(r, secs));
+                c.request_repaint();
+            });
+        }
     }
 
     fn load_maps(&mut self) {

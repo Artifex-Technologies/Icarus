@@ -12,6 +12,7 @@ use icarus_obd::{
     sim, socketcan, uds, vehicles, vin,
 };
 mod data;
+mod gps;
 mod mcp;
 
 use std::io::Write;
@@ -106,6 +107,14 @@ Interfaces:
                                              cables...), what each is and whether Icarus can open it; nothing is sent
 
 Tools:
+  icarus gps [--gps SOURCE] [--seconds 15] [--position]
+                                             what a GPS receiver hears: the fix, each satellite's signal, and what that
+                                             says about the receiver and its antenna. SOURCE: /dev/ttyACM0[@baud] (USB,
+                                             9600 unless given), bt:MAC, tcp:HOST:PORT (a phone sharing its GPS) or sim;
+                                             ICARUS_GPS sets a default. Positions only on screen, and only with --position
+  icarus gps speed --adapter A [--gps SOURCE] [--seconds 10]
+                                             GPS speed against the vehicle's own (PID 0D), once a second, then how far
+                                             the vehicle's reads off (the speedometer check without typing)
   icarus tires STOCK NEW [--gear 3.909] [--speed 65]
                                              what new tires do to the speedometer and gearing, and which regear restores it
 
@@ -170,6 +179,7 @@ fn main() -> ExitCode {
         Some("bus") => cmd_bus(&args[1..]),
         Some("learn") => cmd_learn(&args[1..]),
         Some("tires") => cmd_tires(&args[1..]),
+        Some("gps") => gps::cmd_gps(&args[1..]),
         Some("recalls") => cmd_recalls(&args[1..]),
         Some("import") => data::cmd_import(&args[1..]),
         Some("data") => data::cmd_data(&args[1..]),
@@ -215,6 +225,7 @@ fn parse_args(a: &[String], with_value: &[&str]) -> Result<Args, String> {
             "--all",
             "--check",
             "--keep-vin",
+            "--position",
         ]
         .contains(&a[i].as_str())
         {
