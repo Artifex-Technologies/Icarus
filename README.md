@@ -95,8 +95,9 @@ the way back.
 
 ## Someone else's vehicle: read-only
 
-Icarus writes only to vehicles I mark as mine (`icarus garage mine VIN`; `icarus garage not-mine VIN` takes it back, and
-`icarus garage` lists which are which). Every other vehicle is read-only: its codes, live data, module values, reports and
+Icarus writes only to vehicles I mark as mine (the Mine box on the Garage page, or `icarus garage mine VIN`;
+`icarus garage not-mine VIN` takes it back, and `icarus garage` lists which are which). The Vehicle page's Writes line says
+which the connected vehicle is. Every other vehicle is read-only: its codes, live data, module values, reports and
 recordings all work, and clearing codes, actuator tests and setting changes are refused before anything is sent. Each
 write reads the VIN from the vehicle on the port at that moment, so plugging into a friend's car after mine cannot carry
 my permission over, and a vehicle whose VIN cannot be read is read-only too. The list is `~/.config/icarus/mine.toml`, on

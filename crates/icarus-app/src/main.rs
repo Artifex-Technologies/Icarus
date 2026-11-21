@@ -243,6 +243,8 @@ struct App {
     /// Vehicle folders: (VIN, name, folder), the one shown, a path to import.
     garage: Vec<(String, Option<String>, std::path::PathBuf)>,
     garage_sel: Option<usize>,
+    /// The VINs of my own vehicles (`icarus_obd::lock`): the only ones Icarus writes to.
+    mine: std::collections::BTreeSet<String>,
     import_path: String,
     /// Tools: tire sizes and gears, and a speedometer check.
     t_stock: String,
@@ -341,6 +343,7 @@ impl App {
             learn_stop_at: None,
             garage: icarus_obd::garage::vehicles(),
             garage_sel: None,
+            mine: icarus_obd::lock::mine(),
             import_path: String::new(),
             t_stock: "P265/65R17".into(),
             t_new: "LT285/70R17".into(),
@@ -788,6 +791,17 @@ impl App {
                 .spacing(vec2(16.0, 6.0))
                 .show(ui, |ui| {
                     row(ui, "VIN", info.vin.as_deref().unwrap_or("(not given)"));
+                    row(
+                        ui,
+                        "Writes",
+                        if info.vin.as_deref() == Some(icarus_obd::sim::VIN) {
+                            "allowed: the simulated vehicle"
+                        } else if info.vin.as_deref().is_some_and(|v| self.is_mine(v)) {
+                            "allowed: marked as mine (Garage)"
+                        } else {
+                            "none: read-only (not marked as mine)"
+                        },
+                    );
                     if let Some(v) = &info.vin_info {
                         row(ui, "Built in", v.region);
                         if let Some(y) = v.year {
@@ -1146,6 +1160,11 @@ impl App {
             self.confirm_clear =
                 Some((None, "every engine and transmission module (OBD-II)".into()));
         }
+    }
+
+    /// Whether Icarus writes to this vehicle (the simulated one always), from the list kept in `mine`.
+    fn is_mine(&self, vin: &str) -> bool {
+        vin == icarus_obd::sim::VIN || self.mine.contains(&vin.trim().to_uppercase())
     }
 
     fn open_links(&mut self, links: Vec<String>) {
@@ -2083,6 +2102,7 @@ impl App {
             );
             if ui.button("Refresh").clicked() {
                 self.garage = garage::vehicles();
+                self.mine = icarus_obd::lock::mine();
             }
         });
         if self.garage.is_empty() {
@@ -2106,6 +2126,14 @@ impl App {
             };
             ui.label(RichText::new(name.unwrap_or_else(|| vin.clone())).size(17.0).strong());
             ui.label(RichText::new(format!("VIN {vin}")).weak());
+            let mut mine = self.mine.contains(&vin);
+            if ui
+                .checkbox(&mut mine, "Mine: Icarus may clear codes, run tests and change settings on it")
+                .on_hover_text("Every other vehicle is read-only: its codes, live data and reports work, and nothing on it is cleared, tested or changed.")
+                .changed()
+            {
+                action = Some((if mine { "mine" } else { "not-mine" }, dir.clone(), std::path::PathBuf::from(&vin)));
+            }
             if ui.button("Open the folder").clicked() {
                 action = Some(("open", dir.clone(), dir.clone()));
             }
@@ -2173,6 +2201,20 @@ impl App {
         match action {
             Some(("open", p, _)) => {
                 let _ = std::process::Command::new("xdg-open").arg(&p).spawn();
+            }
+            Some((kind @ ("mine" | "not-mine"), _, vin)) => {
+                let vin = vin.display().to_string();
+                match icarus_obd::lock::set(&vin, kind == "mine") {
+                    Ok(()) => {
+                        self.mine = icarus_obd::lock::mine();
+                        self.status = if kind == "mine" {
+                            "Marked as mine: writes allowed on it.".into()
+                        } else {
+                            "Read-only now: nothing on it is cleared, tested or changed.".into()
+                        };
+                    }
+                    Err(e) => self.error = Some(e),
+                }
             }
             Some(("maps", p, dir)) => {
                 if let Some(d) = first_def(&dir) {
