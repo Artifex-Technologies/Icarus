@@ -243,8 +243,8 @@ struct App {
     /// Vehicle folders: (VIN, name, folder), the one shown, a path to import.
     garage: Vec<(String, Option<String>, std::path::PathBuf)>,
     garage_sel: Option<usize>,
-    /// The VINs of my own vehicles (`icarus_obd::lock`): the only ones Icarus writes to.
-    mine: std::collections::BTreeSet<String>,
+    /// The VINs whose Read-only switch is on (`icarus_obd::lock`).
+    read_only: std::collections::BTreeSet<String>,
     import_path: String,
     /// Tools: tire sizes and gears, and a speedometer check.
     t_stock: String,
@@ -343,7 +343,7 @@ impl App {
             learn_stop_at: None,
             garage: icarus_obd::garage::vehicles(),
             garage_sel: None,
-            mine: icarus_obd::lock::mine(),
+            read_only: icarus_obd::lock::read_only(),
             import_path: String::new(),
             t_stock: "P265/65R17".into(),
             t_new: "LT285/70R17".into(),
@@ -794,12 +794,10 @@ impl App {
                     row(
                         ui,
                         "Writes",
-                        if info.vin.as_deref() == Some(icarus_obd::sim::VIN) {
-                            "allowed: the simulated vehicle"
-                        } else if info.vin.as_deref().is_some_and(|v| self.is_mine(v)) {
-                            "allowed: marked as mine (Garage)"
+                        if info.vin.as_deref().is_some_and(|v| self.is_read_only(v)) {
+                            "none: the Read-only switch is on (Garage)"
                         } else {
-                            "none: read-only (not marked as mine)"
+                            "allowed, each with its own checks (Read-only switch off)"
                         },
                     );
                     if let Some(v) = &info.vin_info {
@@ -1162,9 +1160,9 @@ impl App {
         }
     }
 
-    /// Whether Icarus writes to this vehicle (the simulated one always), from the list kept in `mine`.
-    fn is_mine(&self, vin: &str) -> bool {
-        vin == icarus_obd::sim::VIN || self.mine.contains(&vin.trim().to_uppercase())
+    /// Whether this vehicle's Read-only switch is on.
+    fn is_read_only(&self, vin: &str) -> bool {
+        self.read_only.contains(&vin.trim().to_uppercase())
     }
 
     fn open_links(&mut self, links: Vec<String>) {
@@ -2102,7 +2100,7 @@ impl App {
             );
             if ui.button("Refresh").clicked() {
                 self.garage = garage::vehicles();
-                self.mine = icarus_obd::lock::mine();
+                self.read_only = icarus_obd::lock::read_only();
             }
         });
         if self.garage.is_empty() {
@@ -2126,13 +2124,13 @@ impl App {
             };
             ui.label(RichText::new(name.unwrap_or_else(|| vin.clone())).size(17.0).strong());
             ui.label(RichText::new(format!("VIN {vin}")).weak());
-            let mut mine = self.mine.contains(&vin);
+            let mut locked = self.read_only.contains(&vin);
             if ui
-                .checkbox(&mut mine, "Mine: Icarus may clear codes, run tests and change settings on it")
-                .on_hover_text("Every other vehicle is read-only: its codes, live data and reports work, and nothing on it is cleared, tested or changed.")
+                .checkbox(&mut locked, "Read-only: Icarus clears, tests and changes nothing on this vehicle")
+                .on_hover_text("A safety switch: codes, live data, module values, reports and recordings still work.")
                 .changed()
             {
-                action = Some((if mine { "mine" } else { "not-mine" }, dir.clone(), std::path::PathBuf::from(&vin)));
+                action = Some((if locked { "lock" } else { "unlock" }, dir.clone(), std::path::PathBuf::from(&vin)));
             }
             if ui.button("Open the folder").clicked() {
                 action = Some(("open", dir.clone(), dir.clone()));
@@ -2202,15 +2200,15 @@ impl App {
             Some(("open", p, _)) => {
                 let _ = std::process::Command::new("xdg-open").arg(&p).spawn();
             }
-            Some((kind @ ("mine" | "not-mine"), _, vin)) => {
+            Some((kind @ ("lock" | "unlock"), _, vin)) => {
                 let vin = vin.display().to_string();
-                match icarus_obd::lock::set(&vin, kind == "mine") {
+                match icarus_obd::lock::set(&vin, kind == "lock") {
                     Ok(()) => {
-                        self.mine = icarus_obd::lock::mine();
-                        self.status = if kind == "mine" {
-                            "Marked as mine: writes allowed on it.".into()
+                        self.read_only = icarus_obd::lock::read_only();
+                        self.status = if kind == "lock" {
+                            "Read-only: nothing on this vehicle is cleared, tested or changed.".into()
                         } else {
-                            "Read-only now: nothing on it is cleared, tested or changed.".into()
+                            "Read-only switch off.".into()
                         };
                     }
                     Err(e) => self.error = Some(e),
