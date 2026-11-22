@@ -32,6 +32,7 @@ pub mod power_guard;
 pub mod report;
 pub mod settings;
 pub mod sim;
+pub mod slcan;
 pub mod socketcan;
 pub mod uds;
 pub mod vehicledata;

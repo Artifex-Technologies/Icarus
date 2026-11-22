@@ -18,6 +18,8 @@ pub trait Port {
 ///   `bt:AA:BB:CC:DD:EE:FF` or `...#2`         a paired Bluetooth adapter, RFCOMM channel 1 unless given
 ///   `tcp:192.168.0.10:35000`       a Wi-Fi adapter
 ///   `can:can0`, or just `can0`/`vcan0`        a Linux CAN interface (SocketCAN: a CANable), spoken to directly
+///   `slcan:/dev/ttyACM0[@baud][#bitrate]`     an SLCAN adapter on a serial port, for watching the bus listen-only
+///                                             (115200 baud and 500 kbit/s unless given)
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
     /// The simulated vehicle: engine running (`sim`) or ignition on, engine off (`sim:off`).
@@ -35,6 +37,13 @@ pub enum Target {
     Tcp(String),
     /// A Linux CAN interface by name (`can0`): diagnostics over SocketCAN (`canlink`), or watching the bus.
     Can(String),
+    /// An SLCAN adapter (Lawicel CANUSB, a CANable with slcan firmware) on a serial port: watching only (`slcan`).
+    Slcan {
+        path: String,
+        baud: u32,
+        /// The CAN bit rate, one of `slcan::BITRATES`.
+        bitrate: u32,
+    },
 }
 
 /// Whether `s` is a CAN interface's usual name: `can` or `vcan` and a number.
@@ -50,7 +59,7 @@ impl Target {
     pub fn wired(&self) -> bool {
         match self {
             Target::Sim { .. } | Target::Can(_) => true,
-            Target::Serial { path, .. } => !path.contains("rfcomm"),
+            Target::Serial { path, .. } | Target::Slcan { path, .. } => !path.contains("rfcomm"),
             Target::Bluetooth { .. } | Target::Tcp(_) => false,
         }
     }
@@ -59,6 +68,38 @@ impl Target {
         if s == "sim" || s == "sim:off" {
             return Ok(Target::Sim {
                 engine_on: s == "sim",
+            });
+        }
+        if let Some(rest) = s.strip_prefix("slcan:") {
+            let (rest, bitrate) = match rest.split_once('#') {
+                None => (rest, 500_000),
+                Some((r, b)) => {
+                    let n = match b.strip_suffix('k') {
+                        Some(k) => k.parse::<u32>().ok().and_then(|k| k.checked_mul(1000)),
+                        None => b.parse::<u32>().ok(),
+                    };
+                    match n.filter(|n| crate::slcan::BITRATES.contains(n)) {
+                        Some(n) => (r, n),
+                        None => {
+                            return Err(format!(
+                                "slcan: bit rate {b:?} is not one SLCAN sets (10k 20k 50k 100k 125k 250k 500k 800k \
+                                 1000k)"
+                            ))
+                        }
+                    }
+                }
+            };
+            let (path, baud) = rest.split_once('@').unwrap_or((rest, "115200"));
+            if !path.starts_with('/') {
+                return Err("slcan: needs the serial port, e.g. slcan:/dev/ttyACM0".into());
+            }
+            let baud = baud
+                .parse::<u32>()
+                .map_err(|_| format!("bad baud rate {baud}"))?;
+            return Ok(Target::Slcan {
+                path: path.to_string(),
+                baud,
+                bitrate,
             });
         }
         if let Some(ifn) = s.strip_prefix("can:") {
@@ -114,7 +155,7 @@ impl Target {
                 baud,
             });
         }
-        Err(format!("unknown adapter {s:?}: use sim, /dev/ttyUSB0[@baud], bt:AA:BB:CC:DD:EE:FF[#channel], tcp:host:port or can:can0"))
+        Err(format!("unknown adapter {s:?}: use sim, /dev/ttyUSB0[@baud], bt:AA:BB:CC:DD:EE:FF[#channel], tcp:host:port, can:can0 or slcan:/dev/ttyACM0"))
     }
 
     /// The byte stream to an ELM327/STN adapter. A CAN interface is not one: it is reached frame by frame
@@ -125,6 +166,13 @@ impl Target {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!("{ifn} is a CAN interface, not an ELM327 adapter: this needs an OBD adapter (sim, /dev/ttyUSB0, bt:, tcp:)"),
+                ))
+            }
+            // never spoken to as an ELM327: an SLCAN adapter is opened listen-only, by `slcan` alone
+            Target::Slcan { path, .. } => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{path} is an SLCAN adapter, opened listen-only for watching the bus (icarus bus watch, icarus learn); this needs an OBD adapter or a CAN interface"),
                 ))
             }
             Target::Sim { engine_on: true } => Box::new(crate::sim::SimCar::new()),
@@ -372,6 +420,33 @@ mod tests {
             Target::parse("can0").unwrap().open().is_err(),
             "not an ELM327"
         );
+        // an SLCAN adapter: 115200 baud and 500 kbit/s unless given; never opened as an ELM327
+        let slcan = |path: &str, baud, bitrate| Target::Slcan {
+            path: path.into(),
+            baud,
+            bitrate,
+        };
+        assert_eq!(
+            Target::parse("slcan:/dev/ttyACM0").unwrap(),
+            slcan("/dev/ttyACM0", 115_200, 500_000)
+        );
+        assert_eq!(
+            Target::parse("slcan:/dev/ttyUSB1@921600#125k").unwrap(),
+            slcan("/dev/ttyUSB1", 921_600, 125_000)
+        );
+        assert_eq!(
+            Target::parse("slcan:/dev/ttyACM0#250000").unwrap(),
+            slcan("/dev/ttyACM0", 115_200, 250_000)
+        );
+        assert!(Target::parse("slcan:/dev/ttyACM0").unwrap().open().is_err());
+        for bad in [
+            "slcan:",
+            "slcan:ttyACM0",
+            "slcan:/dev/ttyACM0#33k",
+            "slcan:/dev/x@fast",
+        ] {
+            assert!(Target::parse(bad).is_err(), "{bad}");
+        }
         for bad in [
             "bt:00:11",
             "bt:00:11:22:33:44:ZZ",

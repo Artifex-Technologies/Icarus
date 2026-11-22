@@ -10,7 +10,7 @@ use icarus_obd::link::Link;
 use icarus_obd::port::Target;
 use icarus_obd::{
     actuator, bus, charging, clear, dtc, garage, lock, lookup, mode06, nhtsa, report, settings,
-    sim, socketcan, uds, vehicles, vin,
+    sim, slcan, socketcan, uds, vehicles, vin,
 };
 mod data;
 mod gps;
@@ -94,7 +94,8 @@ Module data (definition files; nothing is sent to a vehicle):
 Bus (watching only: nothing is sent onto the bus):
   icarus bus watch (--adapter A | --can can0) [--seconds N] [--raw]
                                              every ID with its rate and changing bytes, diagnostic messages in words, and
-                                             actuator tests another tool runs, as entries for the vehicle's file
+                                             actuator tests another tool runs, as entries for the vehicle's file. A is also
+                                             slcan:/dev/ttyACM0[@baud][#bitrate] (an SLCAN adapter, opened listen-only)
   icarus learn (--adapter A | --can can0) [--seconds N] [--ask-sarina]
                                              learn from another tool working on the vehicle (a Y-cable on the OBD port):
                                              type what you are about to do in it and press Enter (a mark), then do it;
@@ -1572,9 +1573,63 @@ fn cmd_dtc(a: &[String]) -> Result<(), String> {
 }
 
 fn cmd_bus(a: &[String]) -> Result<(), String> {
+    bus_watch(a, &serial_port).map(|_| ())
+}
+
+/// A serial port, raw (an SLCAN adapter's).
+fn serial_port(path: &str, baud: u32) -> std::io::Result<Box<dyn icarus_obd::port::Port>> {
+    Ok(Box::new(icarus_obd::port::open_serial(path, baud)?))
+}
+
+/// What opens a serial port (`serial_port`, or a recorded session in the tests).
+type OpenSerial<'a> = dyn Fn(&str, u32) -> std::io::Result<Box<dyn icarus_obd::port::Port>> + 'a;
+
+/// The SLCAN adapter `--adapter slcan:...` names: (serial port, baud, CAN bit rate).
+fn slcan_target(args: &Args) -> Option<(String, u32, u32)> {
+    match adapter_target(args) {
+        Ok((
+            _,
+            Target::Slcan {
+                path,
+                baud,
+                bitrate,
+            },
+        )) => Some((path, baud, bitrate)),
+        _ => None,
+    }
+}
+
+/// Frames from an SLCAN adapter opened listen-only on `port`, handed to `step` until it says stop; the channel is closed
+/// afterwards.
+fn watch_slcan(
+    port: Box<dyn icarus_obd::port::Port>,
+    bitrate: u32,
+    start: Instant,
+    mut step: impl FnMut(Option<bus::Frame>) -> bool,
+) -> Result<String, String> {
+    let mut s = slcan::Slcan::listen(port, bitrate).map_err(e)?;
+    let watched = loop {
+        match s.read(Duration::from_millis(100), start.elapsed().as_secs_f64()) {
+            Err(x) => break Err(x.to_string()),
+            Ok(f) => {
+                if !step(f) {
+                    break Ok("stopped".to_string());
+                }
+            }
+        }
+    };
+    let closed = s.close().map_err(e);
+    let ended = watched?;
+    closed?;
+    Ok(ended)
+}
+
+/// `icarus bus watch`: an SLCAN adapter's serial port is opened with `serial` (the tests give a recorded session).
+fn bus_watch(a: &[String], serial: &OpenSerial<'_>) -> Result<bus::Analyzer, String> {
     if a.first().map(String::as_str) != Some("watch") {
         return Err(
-            "usage: icarus bus watch (--adapter A | --can can0) [--seconds N] [--raw]".into(),
+            "usage: icarus bus watch (--adapter A | --can can0 | --adapter slcan:/dev/ttyACM0) [--seconds N] [--raw]"
+                .into(),
         );
     }
     // --raw is a switch of its own: taken out before the options are read (parse_args refused it as unknown, so it never worked)
@@ -1627,6 +1682,16 @@ fn cmd_bus(a: &[String]) -> Result<(), String> {
                 break "stopped".to_string();
             }
         }
+    } else if let Some((path, baud, bitrate)) = slcan_target(&args) {
+        // listen-only (L), never O: the adapter acknowledges nothing and sends nothing
+        let port = serial(&path, baud).map_err(|x| format!("{path}: {x}"))?;
+        if raw {
+            println!(
+                "{}",
+                icarus_obd::drivelog::adapter_line(&format!("SLCAN {path} at {bitrate} bit/s"))
+            );
+        }
+        watch_slcan(port, bitrate, start, |f| step(&mut an, f))?
     } else {
         let mut elm = connect_elm(&args)?;
         let proto = elm.protocol;
@@ -1689,7 +1754,7 @@ fn cmd_bus(a: &[String]) -> Result<(), String> {
             println!("{}", bus::to_toml(t));
         }
     }
-    Ok(())
+    Ok(an)
 }
 
 fn cmd_learn(a: &[String]) -> Result<(), String> {
@@ -1744,11 +1809,18 @@ fn cmd_learn(a: &[String]) -> Result<(), String> {
     };
     let all = profiles();
     let can_if = can_interface(&args);
+    let slcan_t = slcan_target(&args);
     let (vin, source, vehicle) = if let Some(ifn) = &can_if {
         (
             None,
             format!("the CAN interface {ifn}"),
             "a vehicle Icarus did not ask (CAN interface)".to_string(),
+        )
+    } else if let Some((path, ..)) = &slcan_t {
+        (
+            None,
+            format!("the SLCAN adapter {path}"),
+            "a vehicle Icarus did not ask (SLCAN adapter)".to_string(),
         )
     } else {
         let mut elm = connect_elm(&args)?;
@@ -1798,6 +1870,11 @@ fn cmd_learn(a: &[String]) -> Result<(), String> {
                 break;
             }
         }
+    }
+    if let Some((path, baud, bitrate)) = &slcan_t {
+        eprintln!("Learning on the SLCAN adapter {path}, opened listen-only. Type what you are about to do and press Enter before each change; \"stop\" or Ctrl+C ends.");
+        let port = serial_port(path, *baud).map_err(|x| format!("{path}: {x}"))?;
+        watch_slcan(port, *bitrate, start, |f| step(&mut an, f))?;
     }
     let modules = vin
         .as_deref()
@@ -2122,6 +2199,48 @@ mod tests {
             assert!(asked.iter().any(|a| a == want), "{want:02X?}: {asked:02X?}");
         }
         note_dropped(&mut link);
+    }
+
+    /// `icarus bus watch --adapter slcan:/dev/ttyACM0`, the serial port being a recorded SLCAN session: its frames are
+    /// read (11-bit and 29-bit; remote frames passed over), and the channel was opened listen-only and closed, never `O`.
+    #[test]
+    fn bus_watch_reads_a_recorded_slcan_session_listen_only() {
+        use icarus_obd::slcan::recorded::Session;
+        let (session, sent) = Session::new(&[
+            "t2C48031AF8001C000000",
+            "t3B750100500000",
+            "T18DAF1103410D00",
+            "r7DF8",
+            "t2C48031AF9001C000000",
+            "t610420000000",
+        ]);
+        let session = std::cell::RefCell::new(Some(session));
+        let a: Vec<String> = [
+            "watch",
+            "--adapter",
+            "slcan:/dev/ttyACM0",
+            "--seconds",
+            "0.3",
+        ]
+        .map(String::from)
+        .to_vec();
+        let an = bus_watch(&a, &|path, baud| {
+            assert_eq!((path, baud), ("/dev/ttyACM0", 115_200));
+            Ok(Box::new(session.borrow_mut().take().unwrap()))
+        })
+        .unwrap();
+        assert_eq!(an.frames, 5, "every data frame, the remote one passed over");
+        for id in [0x2C4, 0x3B7, 0x610, 0x18DA_F110] {
+            assert!(an.ids.contains_key(&id), "{id:X}");
+        }
+        assert_eq!(an.ids[&0x2C4].count, 2);
+        let log = sent.lock().unwrap().clone();
+        assert_eq!(log, ["C\r", "S6\r", "L\r", "C\r"]);
+        assert!(!log.iter().any(|c| c.starts_with('O')), "{log:?}");
+        // diagnostics are never sent through one
+        let args = parse_args(&a[1..3], &["adapter"]).unwrap();
+        let why = connect(&args).err().unwrap();
+        assert!(why.contains("listen-only"), "{why}");
     }
 
     /// The same through `--adapter vcan0` on a real virtual CAN interface, when one exists (made once with root:

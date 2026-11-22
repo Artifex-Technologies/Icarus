@@ -135,10 +135,18 @@ Use in the speedometer check). Positions are shown only with `--position` and ar
 
 ## The bus
 
-`icarus bus watch --adapter A` (the OBDLink's monitor mode) or `--can can0` / `--adapter can0` (a Linux CAN interface such as a CANable),
+`icarus bus watch --adapter A` (the OBDLink's monitor mode), `--can can0` / `--adapter can0` (a Linux CAN interface such
+as a CANable) or `--adapter slcan:/dev/ttyACM0` (an SLCAN adapter: see below),
 or the Bus page: every ID with its rate and last bytes, the bytes that just changed lit up (press a pedal or a switch and
 watch which byte follows), and diagnostic messages between a tool and the modules put in words. Watching only: nothing
 is sent onto the bus. What another tool does while Icarus watches is learned (next section).
+
+SLCAN adapters (Lawicel CANUSB, a CANable with the slcan firmware, many cheap USB-CAN sticks) are watched without
+`slcand` or root: `--adapter slcan:/dev/ttyACM0[@baud][#bitrate]` (115200 baud and 500 kbit/s unless given; `#125k`
+for a medium-speed bus). Icarus speaks SLCAN on the serial port itself and opens the channel listen-only (`L`), so the
+adapter acknowledges nothing; it never opens it in normal mode (`O`) and never sends a frame (the only commands sent are
+`C`, `S0`-`S8` and `L`), and an adapter that refuses `L` is not watched through. `icarus learn` takes the same adapters.
+They watch only: the `obd` commands refuse them.
 
 ## Learning from another tool
 
@@ -415,6 +423,7 @@ The adapter `A` is one of:
 | `/dev/ttyUSB0[@115200]` | a USB adapter (38400 baud unless given) |
 | `tcp:192.168.0.10:35000` | a Wi-Fi adapter |
 | `can:can0` (or just `can0`, `vcan0`) | a Linux CAN interface (SocketCAN), such as a CANable set up with `ip link set can0 up type can bitrate 500000` |
+| `slcan:/dev/ttyACM0[@baud][#bitrate]` | an SLCAN adapter, for watching the bus only (listen-only; see The bus) |
 
 `ICARUS_ADAPTER` sets a default.
 

@@ -58,6 +58,7 @@ docs/plans/BACKLOG.md and docs/plans/LOG.md (private; ask the owner).
   `profile/airootfs/usr/share/labyrinth/pkgbuilds`), published in Labyrinth's `[labyrinth]` package repository and listed in
   Agora's catalog, so it updates through Agora and pacman like the other apps.
 - Adapters: `sim`, `bt:MAC[#channel]`, `/dev/ttyUSB0[@baud]`, `tcp:HOST:PORT`, `can:can0` (SocketCAN, `canlink`'s own
-  ISO-TP; tests use `canlink::SimBus`); `ICARUS_ADAPTER` sets a default.
+  ISO-TP; tests use `canlink::SimBus`), `slcan:/dev/ttyACM0[@baud][#bitrate]` (bus watching only, listen-only `L`, never
+  `O`; tests use `slcan::recorded::Session`); `ICARUS_ADAPTER` sets a default.
 - `crates/icarus-obd/src/uds.rs` lets only reading services out; each write lives in its own module behind its allow-list.
 - Interfaces and tuners with Windows-only software, and how Icarus reaches them: [docs/INTERFACES.md](docs/INTERFACES.md).
