@@ -1,10 +1,44 @@
 //! A definition: what the numbers in a ROM mean. Each element names a place in the image (a table, a single value, or a flag
 //! bit), how its numbers are stored, and the formula from stored number to real unit. The same model is filled from a TunerPro
-//! `.xdf` (see `xdf`) and, later, from A2L files and Icarus's own definitions.
+//! `.xdf` (see `xdf`) and an ASAM `.a2l` (see `a2l`); `load` reads either.
 
 use crate::expr::{Expr, ExprError};
 use crate::rom::{Cell, Rom, RomError};
 use std::fmt;
+use std::path::Path;
+
+/// A parsed definition and what was left out of it, each with the reason.
+#[derive(Debug)]
+pub struct Parsed {
+    pub definition: Definition,
+    pub skipped: Vec<String>,
+}
+
+/// Reads a definition file: a TunerPro `.xdf` or an ASAM `.a2l`, told apart by what the file holds (XML, or ASAP2's
+/// `/begin` blocks) rather than by its name. Errors do not repeat the path.
+pub fn load(path: &Path) -> Result<Parsed, DefError> {
+    let bytes = std::fs::read(path).map_err(|e| DefError::Missing(e.to_string()))?;
+    parse_any(&bytes)
+}
+
+/// `load` for bytes already read.
+pub fn parse_any(bytes: &[u8]) -> Result<Parsed, DefError> {
+    // A2L files are often Latin-1 rather than UTF-8: each byte is then its own character
+    let text = match std::str::from_utf8(bytes) {
+        Ok(s) => s.to_string(),
+        Err(_) => bytes.iter().map(|b| *b as char).collect(),
+    };
+    let t = text.trim_start_matches('\u{feff}').trim_start();
+    if t.starts_with('<') {
+        crate::xdf::parse(t)
+    } else if crate::a2l::looks_like(t) {
+        crate::a2l::parse(t)
+    } else {
+        Err(DefError::Bad(
+            "neither a TunerPro definition (.xdf) nor an ASAM one (.a2l)".into(),
+        ))
+    }
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct Definition {
@@ -54,10 +88,28 @@ pub struct Data {
     /// Bits from one row to the next (0: packed).
     pub major_stride_bits: i64,
     pub math: Expr,
+    /// The formula's other variables and where each value comes from (empty for a formula in X alone).
+    pub vars: Vec<Var>,
     pub units: String,
     pub decimals: u8,
     pub min: Option<f64>,
     pub max: Option<f64>,
+}
+
+/// A variable of a formula besides X: a value from elsewhere, worked out before the formula is.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Var {
+    /// As the formula writes it ("Y").
+    pub name: String,
+    pub source: Source,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Source {
+    /// Another element's value in real units (a single value; its own formula may use other values in turn).
+    Element(u32),
+    /// The raw number stored at an address (no formula).
+    Address { address: u64, cell: Cell },
 }
 
 #[derive(Clone, Debug)]
@@ -78,7 +130,12 @@ pub enum Axis {
     /// Breakpoints stored in the image.
     Stored(Data),
     /// Breakpoints taken from another element (its id), converted by this axis's formula.
-    Link { id: u32, math: Expr, units: String },
+    Link {
+        id: u32,
+        math: Expr,
+        vars: Vec<Var>,
+        units: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -211,18 +268,126 @@ impl Definition {
 
     /// All values of `d`, rows x cols, in real units.
     pub fn values(&self, rom: &Rom, d: &Data) -> Result<Vec<Vec<f64>>, DefError> {
+        let math = self.math(rom, d)?;
         let mut out = Vec::with_capacity(d.rows);
         for r in 0..d.rows {
             let mut row = Vec::with_capacity(d.cols);
             for c in 0..d.cols {
-                row.push(d.math.eval(rom.read(self.cell_offset(d, r, c)?, d.cell)?));
+                row.push(math.eval(rom.read(self.cell_offset(d, r, c)?, d.cell)?));
             }
             out.push(row);
         }
         Ok(out)
     }
 
-    /// Stores `value` (real units) in cell (row, col) of `d`; returns the value as stored (after rounding to the cell).
+    /// `d`'s formula in X alone for this image: its other variables replaced by their values in `rom`, each worked out first
+    /// (a value whose own formula uses others has those worked out before it). Formulas that use each other in a loop are
+    /// an error that names the loop.
+    pub fn math(&self, rom: &Rom, d: &Data) -> Result<Expr, DefError> {
+        self.bound(rom, &d.math, &d.vars, &mut Vec::new())
+    }
+
+    fn bound(
+        &self,
+        rom: &Rom,
+        math: &Expr,
+        vars: &[Var],
+        path: &mut Vec<u32>,
+    ) -> Result<Expr, DefError> {
+        if vars.is_empty() {
+            return Ok(math.clone());
+        }
+        let mut values = Vec::with_capacity(vars.len());
+        for v in vars {
+            values.push((v.name.clone(), self.var_value(rom, v, path)?));
+        }
+        Ok(math.bind(&values))
+    }
+
+    fn var_value(&self, rom: &Rom, v: &Var, path: &mut Vec<u32>) -> Result<f64, DefError> {
+        match &v.source {
+            Source::Address { address, cell } => Ok(rom.read(self.offset(*address)?, *cell)?),
+            Source::Element(id) => {
+                if path.contains(id) {
+                    return Err(self.loop_error(path, *id));
+                }
+                let d = self.linked_value(*id)?;
+                path.push(*id);
+                let math = self.bound(rom, &d.math, &d.vars, path);
+                path.pop();
+                Ok(math?.eval(rom.read(self.cell_offset(d, 0, 0)?, d.cell)?))
+            }
+        }
+    }
+
+    /// The single value element `id` holds, for a formula that uses it.
+    fn linked_value(&self, id: u32) -> Result<&Data, DefError> {
+        let e = self.by_id(id).ok_or_else(|| {
+            DefError::Missing(format!(
+                "a formula uses element 0x{id:X}, which the definition lacks"
+            ))
+        })?;
+        match &e.kind {
+            Kind::Constant(d) => Ok(d),
+            _ => Err(DefError::Bad(format!(
+                "a formula uses \"{}\", which is not a single value",
+                e.title
+            ))),
+        }
+    }
+
+    fn loop_error(&self, path: &[u32], back_to: u32) -> DefError {
+        let names: Vec<String> = path
+            .iter()
+            .chain(std::iter::once(&back_to))
+            .skip_while(|id| **id != back_to)
+            .map(|id| {
+                self.by_id(*id)
+                    .map_or(format!("0x{id:X}"), |e| format!("\"{}\"", e.title))
+            })
+            .collect();
+        DefError::Bad(format!(
+            "formulas use each other in a loop ({}), so none of them can be worked out",
+            names.join(" uses ")
+        ))
+    }
+
+    /// The elements whose formulas cannot be worked out with any image, each with the reason: a variable linked to an
+    /// element the definition lacks or to one that is not a single value, or formulas that use each other in a loop.
+    /// Readers leave these out (with the reason) rather than show numbers that mean nothing.
+    pub fn formula_problems(&self) -> Vec<(usize, String)> {
+        let mut out = Vec::new();
+        for (i, e) in self.elements.iter().enumerate() {
+            if let Some(err) = var_lists(e)
+                .into_iter()
+                .find_map(|vars| self.check_vars(vars, &mut e.id.into_iter().collect()).err())
+            {
+                out.push((i, err.to_string()));
+            }
+        }
+        out
+    }
+
+    fn check_vars(&self, vars: &[Var], path: &mut Vec<u32>) -> Result<(), DefError> {
+        for v in vars {
+            if let Source::Element(id) = v.source {
+                if path.contains(&id) {
+                    return Err(self.loop_error(path, id));
+                }
+                let d = self.linked_value(id)?;
+                path.push(id);
+                let r = self.check_vars(&d.vars, path);
+                path.pop();
+                r?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Stores `value` (real units) in cell (row, col) of `d`; returns the value as stored (after rounding to the cell). A
+    /// formula that uses other values is turned around with those values as they are in `rom` (a later change to one of
+    /// them changes what this cell shows, not what it stores); where the formula then does not depend on the stored number,
+    /// the edit is refused.
     pub fn set(
         &self,
         rom: &mut Rom,
@@ -239,14 +404,15 @@ impl Definition {
             )));
         }
         let at = self.cell_offset(d, row, col)?;
+        let math = self.math(rom, d)?;
         let raw = if d.cell.float {
-            d.math.invert_float(value)?
+            math.invert_float(value)?
         } else {
             let (lo, hi) = d.cell.range();
-            d.math.invert_int(value, lo, hi)? as f64
+            math.invert_int(value, lo, hi)? as f64
         };
         rom.write(at, d.cell, raw)?;
-        Ok(d.math.eval(rom.read(at, d.cell)?))
+        Ok(math.eval(rom.read(at, d.cell)?))
     }
 
     fn axis_labels(&self, rom: &Rom, axis: &Axis, count: usize) -> Result<Vec<String>, DefError> {
@@ -259,7 +425,7 @@ impl Definition {
             Axis::Index(_) => (0..count).map(|i| i.to_string()).collect(),
             Axis::Labels(l) => l.clone(),
             Axis::Stored(d) => nums(self.values(rom, d)?.concat(), d.decimals),
-            Axis::Link { id, math, .. } => {
+            Axis::Link { id, math, vars, .. } => {
                 let e = self.by_id(*id).ok_or_else(|| {
                     DefError::Missing(format!(
                         "axis links to element 0x{id:X}, which the definition lacks"
@@ -272,6 +438,7 @@ impl Definition {
                         return Err(DefError::Bad("an axis cannot link to a flag".into()))
                     }
                 };
+                let math = self.bound(rom, math, vars, &mut Vec::new())?;
                 let v = self
                     .values(rom, d)?
                     .concat()
@@ -308,34 +475,50 @@ impl Definition {
         Ok(())
     }
 
-    /// Which elements cover the bytes in `range` (file offsets): what a tune changed, by name.
+    /// Which elements cover the bytes in `range` (file offsets): what a tune changed, by name. An element whose formula uses
+    /// a value in `range` is among them (what it shows changed, though its own bytes did not).
     pub fn covering(&self, range: std::ops::Range<usize>) -> Vec<&Element> {
         self.elements
             .iter()
             .filter(|e| {
-                let spans: Vec<std::ops::Range<usize>> = match &e.kind {
-                    Kind::Constant(d) => self.span(d).into_iter().collect(),
-                    Kind::Table(t) => {
-                        let mut v: Vec<_> = self.span(&t.z).into_iter().collect();
-                        for a in [&t.x, &t.y] {
-                            if let Axis::Stored(d) = a {
-                                v.extend(self.span(d));
-                            }
-                        }
-                        v
-                    }
-                    Kind::Flag(f) => self
-                        .offset(f.address)
-                        .ok()
-                        .map(|o| o..o + f.cell.bytes())
-                        .into_iter()
-                        .collect(),
-                };
+                let mut spans = Vec::new();
+                self.spans_into(e, &mut spans, &mut Vec::new());
                 spans
                     .iter()
                     .any(|s| s.start < range.end && range.start < s.end)
             })
             .collect()
+    }
+
+    /// The bytes an element's values come from: its cells, stored axes, and the values its formulas use (`seen` stops loops).
+    fn spans_into(&self, e: &Element, out: &mut Vec<std::ops::Range<usize>>, seen: &mut Vec<u32>) {
+        match &e.kind {
+            Kind::Constant(d) => out.extend(self.span(d)),
+            Kind::Table(t) => {
+                out.extend(self.span(&t.z));
+                for a in [&t.x, &t.y] {
+                    if let Axis::Stored(d) = a {
+                        out.extend(self.span(d));
+                    }
+                }
+            }
+            Kind::Flag(f) => out.extend(self.offset(f.address).ok().map(|o| o..o + f.cell.bytes())),
+        }
+        for v in var_lists(e).into_iter().flatten() {
+            match &v.source {
+                Source::Address { address, cell } => {
+                    out.extend(self.offset(*address).ok().map(|o| o..o + cell.bytes()))
+                }
+                Source::Element(id) => {
+                    if !seen.contains(id) {
+                        seen.push(*id);
+                        if let Some(l) = self.by_id(*id) {
+                            self.spans_into(l, out, seen);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// The bytes `d` occupies (first to last cell).
@@ -352,6 +535,25 @@ pub fn fmt_num(n: f64, decimals: u8) -> String {
     format!("{:.*}", decimals as usize, n)
 }
 
+/// Each formula's other variables in an element: its values', its stored axes' and its linked axes'.
+fn var_lists(e: &Element) -> Vec<&[Var]> {
+    match &e.kind {
+        Kind::Constant(d) => vec![&d.vars],
+        Kind::Table(t) => {
+            let mut v: Vec<&[Var]> = vec![&t.z.vars];
+            for a in [&t.x, &t.y] {
+                match a {
+                    Axis::Stored(d) => v.push(&d.vars),
+                    Axis::Link { vars, .. } => v.push(vars),
+                    _ => {}
+                }
+            }
+            v
+        }
+        Kind::Flag(_) => vec![],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,6 +568,7 @@ mod tests {
             minor_stride_bits: 0,
             major_stride_bits: 0,
             math: Expr::parse(math).unwrap(),
+            vars: vec![],
             units: String::new(),
             decimals: 1,
             min: None,
@@ -409,6 +612,7 @@ mod tests {
                         y: Axis::Link {
                             id: 1,
                             math: Expr::identity(),
+                            vars: vec![],
                             units: "rpm".into(),
                         },
                         z: data(0x10, 2, 3, "X/2"),
@@ -480,5 +684,44 @@ mod tests {
         };
         assert_eq!(def.offset(0x8010).unwrap(), 0x10);
         assert!(def.offset(0x10).is_err());
+    }
+
+    #[test]
+    fn formulas_that_use_each_other_in_a_loop_are_named_not_worked_out() {
+        let uses = |math: &str, other: u32| {
+            let mut d = data(0, 1, 1, "X");
+            d.math = Expr::parse_with(math, &["Y"]).unwrap();
+            d.vars = vec![Var {
+                name: "Y".into(),
+                source: Source::Element(other),
+            }];
+            d
+        };
+        let def = Definition {
+            elements: vec![
+                el(1, "a", Kind::Constant(uses("X+Y", 2))),
+                el(2, "b", Kind::Constant(uses("X*Y", 1))),
+                el(3, "c", Kind::Constant(uses("X-Y", 1))),
+            ],
+            ..Default::default()
+        };
+        let problems = def.formula_problems();
+        assert_eq!(
+            problems.iter().map(|p| p.0).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert!(
+            problems[2].1.contains("\"a\" uses \"b\" uses \"a\""),
+            "{problems:?}"
+        );
+        let rom = Rom::new(vec![1]);
+        let Kind::Constant(a) = &def.elements[0].kind else {
+            panic!()
+        };
+        assert!(def
+            .values(&rom, a)
+            .unwrap_err()
+            .to_string()
+            .contains("loop"));
     }
 }

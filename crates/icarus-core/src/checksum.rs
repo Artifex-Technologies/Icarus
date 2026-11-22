@@ -225,7 +225,7 @@ fn crc16_ccitt(data: impl Iterator<Item = u8>) -> u64 {
     crc as u64
 }
 
-fn crc32(data: impl Iterator<Item = u8>) -> u64 {
+pub(crate) fn crc32(data: impl Iterator<Item = u8>) -> u64 {
     let mut crc: u32 = 0xFFFF_FFFF;
     for b in data {
         crc ^= b as u32;

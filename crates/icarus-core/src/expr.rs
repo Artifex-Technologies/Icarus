@@ -3,6 +3,8 @@
 //! it to store one.
 //!
 //! The grammar: numbers (`12`, `0.375`, `1e-3`, `0x1F`), the variable `X`, `+ - * /`, `^` (power), unary minus and parentheses.
+//! A formula may also name other variables (TunerPro's "Y" that stands for another element's value) when they are declared
+//! (`parse_with`); they are bound to numbers (`bind`) before the formula is worked out or inverted.
 
 use std::fmt;
 
@@ -10,6 +12,8 @@ use std::fmt;
 pub enum Expr {
     Num(f64),
     X,
+    /// Another declared variable, by the name the formula uses (works out as NaN until bound).
+    Var(String),
     Neg(Box<Expr>),
     Bin(Op, Box<Expr>, Box<Expr>),
 }
@@ -41,9 +45,15 @@ impl Expr {
     }
 
     pub fn parse(text: &str) -> Result<Expr, ExprError> {
+        Expr::parse_with(text, &[])
+    }
+
+    /// Parses a formula in X and the variables in `vars` (any case, as for X).
+    pub fn parse_with(text: &str, vars: &[&str]) -> Result<Expr, ExprError> {
         let mut p = Parser {
             s: text.as_bytes(),
             i: 0,
+            vars,
         };
         let e = p.expr()?;
         p.ws();
@@ -60,6 +70,7 @@ impl Expr {
         match self {
             Expr::Num(n) => *n,
             Expr::X => x,
+            Expr::Var(_) => f64::NAN,
             Expr::Neg(a) => -a.eval(x),
             Expr::Bin(op, a, b) => {
                 let (a, b) = (a.eval(x), b.eval(x));
@@ -72,6 +83,49 @@ impl Expr {
                 }
             }
         }
+    }
+
+    /// The other variables the formula names.
+    pub fn vars(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        self.collect_vars(&mut out);
+        out
+    }
+
+    fn collect_vars(&self, out: &mut Vec<String>) {
+        match self {
+            Expr::Var(v) if !out.contains(v) => out.push(v.clone()),
+            Expr::Neg(a) => a.collect_vars(out),
+            Expr::Bin(_, a, b) => {
+                a.collect_vars(out);
+                b.collect_vars(out);
+            }
+            _ => {}
+        }
+    }
+
+    /// The formula with each named variable replaced by its value; a variable not in `values` stays (and works out as NaN).
+    pub fn bind(&self, values: &[(String, f64)]) -> Expr {
+        match self {
+            Expr::Var(v) => match values.iter().find(|(n, _)| n == v) {
+                Some((_, n)) => Expr::Num(*n),
+                None => self.clone(),
+            },
+            Expr::Neg(a) => Expr::Neg(Box::new(a.bind(values))),
+            Expr::Bin(op, a, b) => {
+                Expr::Bin(*op, Box::new(a.bind(values)), Box::new(b.bind(values)))
+            }
+            _ => self.clone(),
+        }
+    }
+
+    /// Whether the stored number changes the result at all (not for "0*X", or "X*Y" with Y bound to 0): a formula that
+    /// does not cannot be turned around to store a value.
+    fn depends_on_x(&self, lo: f64, hi: f64) -> bool {
+        let first = self.eval(lo);
+        [hi, (lo + hi) / 2.0, lo + 1.0, hi - 1.0]
+            .iter()
+            .any(|x| self.eval(*x) != first)
     }
 
     /// (a, b) when the formula is a*X + b (almost all of them are), checked at several points.
@@ -100,6 +154,11 @@ impl Expr {
         if let Some((a, b)) = self.affine() {
             let raw = ((value - b) / a).round();
             return Ok(raw.clamp(lo as f64, hi as f64) as i64);
+        }
+        if !self.depends_on_x(lo as f64, hi as f64) {
+            return Err(ExprError(
+                "the formula gives the same value whatever is stored, so no stored number can be worked out".into(),
+            ));
         }
         let dist = |r: i64| (self.eval(r as f64) - value).abs();
         if hi - lo <= 1 << 20 {
@@ -144,6 +203,7 @@ impl Expr {
 struct Parser<'a> {
     s: &'a [u8],
     i: usize,
+    vars: &'a [&'a str],
 }
 
 impl Parser<'_> {
@@ -221,21 +281,32 @@ impl Parser<'_> {
                 self.i += 1;
                 Ok(e)
             }
-            Some(b'X' | b'x') => {
-                self.i += 1;
-                if self
+            Some(c) if c.is_ascii_alphabetic() => {
+                let start = self.i;
+                while self
                     .s
                     .get(self.i)
                     .is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_')
                 {
-                    return Err(ExprError("only the variable X is supported".into()));
+                    self.i += 1;
                 }
-                Ok(Expr::X)
+                let word = std::str::from_utf8(&self.s[start..self.i]).unwrap();
+                if word.eq_ignore_ascii_case("X") {
+                    return Ok(Expr::X);
+                }
+                if let Some(v) = self.vars.iter().find(|v| v.eq_ignore_ascii_case(word)) {
+                    return Ok(Expr::Var(v.to_string()));
+                }
+                Err(ExprError(if self.vars.is_empty() {
+                    format!("\"{word}\": only the variable X is supported (no functions or other variables)")
+                } else {
+                    format!(
+                        "\"{word}\" is not one of the formula's variables (X, {})",
+                        self.vars.join(", ")
+                    )
+                }))
             }
             Some(c) if c.is_ascii_digit() || c == b'.' => self.number(),
-            Some(c) if c.is_ascii_alphabetic() => Err(ExprError(
-                "only the variable X is supported (no functions or other variables)".into(),
-            )),
             Some(c) => Err(ExprError(format!("unexpected '{}'", c as char))),
             None => Err(ExprError("the formula ends too early".into())),
         }
@@ -305,6 +376,31 @@ mod tests {
         for bad in ["", "X+", "(X", "Y*2", "X2", "sin(X)", "X $ 2", "1..2"] {
             assert!(Expr::parse(bad).is_err(), "{bad:?} should not parse");
         }
+    }
+
+    #[test]
+    fn declared_variables_are_bound_before_use() {
+        let e = Expr::parse_with("X*y/100 + Z", &["Y", "Z"]).unwrap();
+        assert_eq!(e.vars(), vec!["Y".to_string(), "Z".to_string()]);
+        assert!(e.eval(50.0).is_nan(), "unbound variables give no number");
+        let b = e.bind(&[("Y".into(), 20.0), ("Z".into(), 1.0)]);
+        assert!(b.vars().is_empty());
+        assert_eq!(b.eval(50.0), 11.0);
+        assert_eq!(b.invert_int(11.0, 0, 255).unwrap(), 50);
+        assert!(Expr::parse_with("X*W", &["Y"])
+            .unwrap_err()
+            .0
+            .contains("not one of"));
+        assert!(Expr::parse("X*Y").is_err(), "undeclared, as before");
+        // Y bound to 0: every stored number gives 0, so none can be worked out for a value
+        let zero = Expr::parse_with("X*X*Y", &["Y"])
+            .unwrap()
+            .bind(&[("Y".into(), 0.0)]);
+        assert!(zero
+            .invert_int(5.0, 0, 255)
+            .unwrap_err()
+            .0
+            .contains("same value"));
     }
 
     #[test]

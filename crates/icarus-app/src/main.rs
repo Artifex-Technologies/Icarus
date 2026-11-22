@@ -5,12 +5,12 @@
 mod autoconn;
 mod logs;
 mod single;
+mod surface;
 mod worker;
 
 use eframe::egui::{self, vec2, Color32, CornerRadius, Margin, RichText, Sense, Stroke};
 use icarus_core::def::{fmt_num, Definition, Kind};
 use icarus_core::rom::{self, Rom};
-use icarus_core::xdf;
 use icarus_obd::garage::{self, Described};
 use icarus_obd::j1979;
 use icarus_obd::uds::Dialect;
@@ -92,6 +92,27 @@ struct Maps {
     specs_note: String,
     save_path: String,
     save_note: String,
+    look: Look,
+    /// The image's versions kept beside it (icarus-core version.rs), and the one shown against stock.
+    versions: Vec<(std::path::PathBuf, icarus_core::version::Version)>,
+    version_shown: Option<usize>,
+    version_name: String,
+    version_note: String,
+    version_msg: String,
+}
+
+/// How a table is shown: its cells, a 2D graph or a 3D surface (surface.rs), and the 3D view's turn and tilt (radians).
+struct Look {
+    view: View,
+    yaw: f32,
+    pitch: f32,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum View {
+    Cells,
+    Graph,
+    Surface,
 }
 
 /// An edit asked for on the Maps page, applied after drawing.
@@ -103,8 +124,33 @@ enum MapEdit {
     UndoAll,
 }
 
+/// Something asked for in the Maps page's versions row, done after drawing.
+enum VersionAct {
+    /// Compare with the original only ("stock").
+    Stock,
+    /// Show what version i changes against stock.
+    Show(usize),
+    /// Take version i's changes as the edits, to go on from them.
+    Edit(usize),
+    /// Keep the edits as a new version.
+    Save,
+}
+
+/// Per element: whether its values differ between images `a` and `b` (the same size).
+fn changed_elements(def: &Definition, a: &[u8], b: &[u8]) -> Vec<bool> {
+    let mut changed = vec![false; def.elements.len()];
+    for r in rom::diff(a, b) {
+        for e in def.covering(r) {
+            if let Some(i) = def.elements.iter().position(|x| std::ptr::eq(x, e)) {
+                changed[i] = true;
+            }
+        }
+    }
+    changed
+}
+
 /// What to do at start (command line): `--connect` (the adapter from ICARUS_ADAPTER, or `--adapter A`), `--page NAME`,
-/// `--scan` and `--live` once connected, `--maps DEF.xdf IMAGE.bin [SECOND.bin]`, `--learn` (a learning watch once
+/// `--scan` and `--live` once connected, `--maps DEF.xdf|.a2l IMAGE.bin [SECOND.bin]`, `--learn` (a learning watch once
 /// connected; `--mark TEXT` marks at its start and `--learn-seconds N` stops it, for demonstrations and screenshots),
 /// `--gps SOURCE` (the Tools page's GPS source, listened to at start).
 #[derive(Default)]
@@ -126,6 +172,8 @@ struct Start {
     /// `--map NAME`: the map to show first (with `--cell R,C`, that cell chosen for editing).
     map: Option<String>,
     cell: Option<(usize, usize)>,
+    /// `--view cells|2d|3d`: how the Maps page shows a table at start.
+    view: Option<View>,
     gps: Option<String>,
 }
 
@@ -182,6 +230,15 @@ impl Start {
                     let c = a.get(i + 3).filter(|x| !x.starts_with("--")).cloned();
                     i += if c.is_some() { 3 } else { 2 };
                     s.maps = Some((d, b, c.unwrap_or_default()));
+                }
+                "--view" => {
+                    i += 1;
+                    s.view = Some(match a.get(i).map(|v| v.to_lowercase()).as_deref() {
+                        Some("cells") => View::Cells,
+                        Some("2d") => View::Graph,
+                        Some("3d") => View::Surface,
+                        _ => return Err("--view is cells, 2d or 3d".into()),
+                    });
                 }
                 "--map" => {
                     i += 1;
@@ -438,9 +495,22 @@ impl App {
                 specs_note: String::new(),
                 save_path: String::new(),
                 save_note: String::new(),
+                look: Look {
+                    view: View::Cells,
+                    yaw: 0.6,
+                    pitch: 0.9,
+                },
+                versions: Vec::new(),
+                version_shown: None,
+                version_name: String::new(),
+                version_note: String::new(),
+                version_msg: String::new(),
             },
             start,
         };
+        if let Some(v) = app.start.view {
+            app.maps.look.view = v;
+        }
         if let Some((d, b, c)) = app.start.maps.take() {
             (app.maps.def_path, app.maps.bin_path, app.maps.cmp_path) = (d, b, c);
             app.load_maps();
@@ -2354,7 +2424,8 @@ impl App {
                             ui.label(RichText::new(format!("{} KB", size / 1024)).small().weak());
                             match sub {
                                 "OEM tunes" | "Custom tunes" => {
-                                    if ui.small_button("Open in Maps").clicked() {
+                                    // a version is changes, not an image: it is seen against the OEM image it was made from
+                                    if !icarus_core::version::is_version_file(&path) && ui.small_button("Open in Maps").clicked() {
                                         action = Some(("maps", path.clone(), dir.clone()));
                                     }
                                     if sub == "Custom tunes" {
@@ -2381,7 +2452,7 @@ impl App {
                 });
             }
             card(ui, pal, "Add a file", |ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.import_path).hint_text("/path/to/file.bin or .xdf").desired_width(f32::INFINITY));
+                ui.add(egui::TextEdit::singleline(&mut self.import_path).hint_text("/path/to/file.bin, .xdf or .a2l").desired_width(f32::INFINITY));
                 ui.horizontal(|ui| {
                     if ui.button("As OEM tune (read-only)").clicked() {
                         action = Some(("oem", std::path::PathBuf::from(self.import_path.trim()), dir.clone()));
@@ -2398,7 +2469,10 @@ impl App {
         let first_def = |dir: &std::path::Path| {
             garage::files(dir, "Definitions")
                 .into_iter()
-                .find(|f| f.0.to_lowercase().ends_with(".xdf"))
+                .find(|f| {
+                    let n = f.0.to_lowercase();
+                    n.ends_with(".xdf") || n.ends_with(".a2l")
+                })
                 .map(|f| dir.join("Definitions").join(f.0))
         };
         match action {
@@ -2664,33 +2738,23 @@ impl App {
         m.note.clear();
         m.selected = None;
         let result = (|| -> Result<(), String> {
-            let text = std::fs::read_to_string(m.def_path.trim())
+            let p = icarus_core::def::load(std::path::Path::new(m.def_path.trim()))
                 .map_err(|e| format!("definition: {e}"))?;
-            let p = xdf::parse(&text).map_err(|e| format!("definition: {e}"))?;
             let bin = std::fs::read(m.bin_path.trim()).map_err(|e| format!("image: {e}"))?;
+            let cmp_path = std::path::Path::new(m.cmp_path.trim());
             let cmp = if m.cmp_path.trim().is_empty() {
                 None
+            } else if icarus_core::version::is_version_file(cmp_path) {
+                // a version: the image it makes from this one
+                Some(icarus_core::version::load(cmp_path)?.apply(&bin)?)
             } else {
-                Some(std::fs::read(m.cmp_path.trim()).map_err(|e| format!("second image: {e}"))?)
+                Some(std::fs::read(cmp_path).map_err(|e| format!("second image: {e}"))?)
             };
-            let mut changed = vec![false; p.definition.elements.len()];
-            if let Some(c) = &cmp {
-                if c.len() != bin.len() {
-                    return Err("the two images differ in size".into());
-                }
-                for r in rom::diff(&bin, c) {
-                    for e in p.definition.covering(r) {
-                        if let Some(i) = p
-                            .definition
-                            .elements
-                            .iter()
-                            .position(|x| std::ptr::eq(x, e))
-                        {
-                            changed[i] = true;
-                        }
-                    }
-                }
-            }
+            let changed = match &cmp {
+                Some(c) if c.len() != bin.len() => return Err("the two images differ in size".into()),
+                Some(c) => changed_elements(&p.definition, &bin, c),
+                None => vec![false; p.definition.elements.len()],
+            };
             let n = changed.iter().filter(|c| **c).count();
             m.note = format!(
                 "{} elements{}{}",
@@ -2699,8 +2763,9 @@ impl App {
                     String::new()
                 } else {
                     format!(
-                        ", {} left out (formulas Icarus cannot read yet)",
-                        p.skipped.len()
+                        ", {} left out (first: {})",
+                        p.skipped.len(),
+                        p.skipped[0]
                     )
                 },
                 if cmp.is_some() {
@@ -2739,6 +2804,12 @@ impl App {
                 .to_string();
             m.save_note.clear();
             m.cell = None;
+            m.versions = icarus_core::version::list(std::path::Path::new(m.bin_path.trim()), &bin);
+            m.version_shown = m
+                .versions
+                .iter()
+                .position(|(p, _)| p.as_path() == cmp_path);
+            m.version_msg.clear();
             m.def = Some(p.definition);
             m.rom = Some(Rom::new(bin));
             m.cmp = cmp.map(Rom::new);
@@ -2759,7 +2830,7 @@ impl App {
             .num_columns(2)
             .spacing(vec2(10.0, 6.0))
             .show(ui, |ui| {
-                ui.label("Definition (.xdf)");
+                ui.label("Definition (.xdf, .a2l)");
                 ui.add(egui::TextEdit::singleline(&mut self.maps.def_path).desired_width(520.0));
                 ui.end_row();
                 ui.label("Image (.bin)");
@@ -2768,7 +2839,7 @@ impl App {
                 ui.label("Compare with");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.maps.cmp_path)
-                        .hint_text("optional: a modified image, to see what it changed")
+                        .hint_text("optional: a modified image or a .version.toml, to see what it changed")
                         .desired_width(520.0),
                 );
                 ui.end_row();
@@ -2781,6 +2852,7 @@ impl App {
         });
         ui.add_space(6.0);
         let mut edit: Option<MapEdit> = None;
+        let mut vact: Option<VersionAct> = None;
         let Maps {
             def,
             rom,
@@ -2795,6 +2867,12 @@ impl App {
             specs_note,
             save_path,
             save_note,
+            look,
+            versions,
+            version_shown,
+            version_name,
+            version_note,
+            version_msg,
             ..
         } = &mut self.maps;
         let (Some(def), Some(rom_mut)) = (def.as_ref(), rom.as_mut()) else {
@@ -2840,6 +2918,59 @@ impl App {
         });
         if !save_note.is_empty() {
             ui.label(RichText::new(save_note.as_str()).small());
+        }
+        // versions: stock (the image as read, never changed) and named sets of changes against it, kept beside it
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Versions:");
+            if ui
+                .selectable_label(cmp.is_none(), "Stock")
+                .on_hover_text("The original image, as it was read: never changed")
+                .clicked()
+            {
+                vact = Some(VersionAct::Stock);
+            }
+            for (k, (_, v)) in versions.iter().enumerate() {
+                let tip = format!(
+                    "{} byte(s) changed in {} place(s){}",
+                    v.changed_bytes(),
+                    v.changes.len(),
+                    if v.note.is_empty() { String::new() } else { format!(": {}", v.note) }
+                );
+                if ui
+                    .selectable_label(*version_shown == Some(k), v.name.as_str())
+                    .on_hover_text(tip)
+                    .clicked()
+                {
+                    vact = Some(VersionAct::Show(k));
+                }
+            }
+            if let Some(k) = *version_shown {
+                if ui
+                    .button("Edit from it")
+                    .on_hover_text("Its changes become the edits, to go on from; stock stays as it is")
+                    .clicked()
+                {
+                    vact = Some(VersionAct::Edit(k));
+                }
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Keep the edits as a version");
+            ui.add(egui::TextEdit::singleline(version_name).hint_text("name").desired_width(160.0));
+            ui.add(egui::TextEdit::singleline(version_note).hint_text("note (optional)").desired_width(240.0));
+            if ui
+                .add_enabled(
+                    !edits.is_empty() && !version_name.trim().is_empty(),
+                    egui::Button::new("Save version"),
+                )
+                .on_hover_text("A small file of what changed against stock, beside the vehicle's files; never over another file")
+                .clicked()
+            {
+                vact = Some(VersionAct::Save);
+            }
+        });
+        if !version_msg.is_empty() {
+            ui.label(RichText::new(version_msg.as_str()).small());
         }
         ui.add_space(4.0);
         let q = search.to_lowercase();
@@ -2921,12 +3052,15 @@ impl App {
                 }
                 let e = &def.elements[i];
                 edit_bar(ui, pal, def, rom, e, cell, value_text, &mut edit);
-                element_view(ui, pal, def, rom, cmp.as_ref(), e, cell, value_text);
+                element_view(ui, pal, def, rom, cmp.as_ref(), e, cell, value_text, look);
             });
         });
+        if let Some(a) = vact {
+            self.maps.version_msg = version_act(&mut self.maps, a).unwrap_or_else(|e| e);
+        }
         // apply what was asked for
         let Some(ed) = edit else { return };
-        let (Some(i), Some(rom)) = (*selected, self.maps.rom.as_mut()) else {
+        let (Some(i), Some(rom)) = (self.maps.selected, self.maps.rom.as_mut()) else {
             return;
         };
         let Some(def) = self.maps.def.as_ref() else {
@@ -2967,10 +3101,12 @@ impl App {
             ) => (|| {
                 let at = def.cell_offset(d, row, col).map_err(|x| x.to_string())?;
                 let raw = rom.read(at, d.cell).map_err(|x| x.to_string())?;
+                // the formula with the values it uses as they are in this image
+                let math = def.math(rom, d).map_err(|x| x.to_string())?;
                 // one step of the stored number, in the direction the real value goes
-                let up = d.math.eval(raw + 1.0) >= d.math.eval(raw);
+                let up = math.eval(raw + 1.0) >= math.eval(raw);
                 let new = raw + if up { n as f64 } else { -n as f64 };
-                let real = d.math.eval(new);
+                let real = math.eval(new);
                 if d.min.is_some_and(|m| real < m) || d.max.is_some_and(|m| real > m) {
                     return Err(format!(
                         "{} is outside the definition's limits",
@@ -2992,6 +3128,91 @@ impl App {
                     self.maps.value_text = fmt_num(v[r][c], d.decimals);
                 }
             }
+        }
+    }
+}
+
+/// Does what the Maps page's versions row asked for; returns what to say about it.
+fn version_act(m: &mut Maps, a: VersionAct) -> Result<String, String> {
+    let Maps {
+        def,
+        rom,
+        cmp,
+        cmp_path,
+        bin_path,
+        changed,
+        only_changed,
+        selected,
+        cell,
+        versions,
+        version_shown,
+        version_name,
+        version_note,
+        ..
+    } = m;
+    let (Some(def), Some(rom)) = (def.as_ref(), rom.as_mut()) else {
+        return Ok(String::new());
+    };
+    let image = std::path::PathBuf::from(bin_path.trim());
+    let mut to_stock = |cmp: &mut Option<Rom>, cmp_path: &mut String| {
+        *cmp = None;
+        cmp_path.clear();
+        *version_shown = None;
+        *changed = vec![false; def.elements.len()];
+        *only_changed = false;
+    };
+    match a {
+        VersionAct::Stock => {
+            to_stock(cmp, cmp_path);
+            Ok(String::new())
+        }
+        VersionAct::Show(k) => {
+            let (p, v) = versions.get(k).ok_or("that version is no longer there")?;
+            let bytes = v.apply(rom.original())?;
+            *changed = changed_elements(def, rom.original(), &bytes);
+            let n = changed.iter().filter(|c| **c).count();
+            *cmp = Some(Rom::new(bytes));
+            *cmp_path = p.display().to_string();
+            *version_shown = Some(k);
+            *only_changed = n > 0;
+            if let Some(first) = changed.iter().position(|c| *c) {
+                *selected = Some(first);
+                *cell = None;
+            }
+            Ok(format!(
+                "Version \"{}\" against stock: {} byte(s) in {} place(s); {n} element(s) changed, outlined in their tables",
+                v.name,
+                v.changed_bytes(),
+                v.changes.len()
+            ))
+        }
+        VersionAct::Edit(k) => {
+            if !rom.changes().is_empty() {
+                return Err("There are edits not kept yet: keep them (as a version or an image) or Undo all first.".into());
+            }
+            let (_, v) = versions.get(k).ok_or("that version is no longer there")?;
+            rom.load_edits(&v.apply(rom.original())?)
+                .map_err(|e| e.to_string())?;
+            let name = v.name.clone();
+            to_stock(cmp, cmp_path);
+            Ok(format!(
+                "Editing from version \"{name}\": its changes are the edits now (stock stays as it is); keep them as a new version or save an image"
+            ))
+        }
+        VersionAct::Save => {
+            let (p, v) = icarus_core::version::save_edits(rom, Some(def), &image, version_name, version_note)?;
+            *versions = icarus_core::version::list(&image, rom.original());
+            *version_shown = versions
+                .iter()
+                .position(|(p, _)| p.display().to_string() == *cmp_path);
+            version_name.clear();
+            version_note.clear();
+            Ok(format!(
+                "Kept version \"{}\": {} byte(s) changed against stock, in {}",
+                v.name,
+                v.changed_bytes(),
+                p.display()
+            ))
         }
     }
 }
@@ -3065,7 +3286,7 @@ fn edit_bar(
                         if ui.button("+").on_hover_text("one step up").clicked() {
                             *edit = Some(MapEdit::Step(1));
                         }
-                        if let Ok(at) = def.cell_offset(d, r, c) {
+                        if let (Ok(at), Ok(math)) = (def.cell_offset(d, r, c), def.math(rom, d)) {
                             if let (Ok(now), Ok(was)) =
                                 (rom.read(at, d.cell), rom.read_original(at, d.cell))
                             {
@@ -3073,7 +3294,7 @@ fn edit_bar(
                                     ui.label(
                                         RichText::new(format!(
                                             "was {}",
-                                            fmt_num(d.math.eval(was), d.decimals)
+                                            fmt_num(math.eval(was), d.decimals)
                                         ))
                                         .color(pal.amber),
                                     );
@@ -3100,6 +3321,7 @@ fn element_view(
     e: &icarus_core::def::Element,
     cell: &mut Option<(usize, usize)>,
     value_text: &mut String,
+    look: &mut Look,
 ) {
     ui.label(RichText::new(&e.title).size(18.0).strong());
     if !e.description.is_empty() {
@@ -3159,6 +3381,62 @@ fn element_view(
             let w = cmp.and_then(|c| def.table(c, t).ok());
             if !t.z.units.is_empty() {
                 ui.label(RichText::new(format!("values in {}", t.z.units)).weak());
+            }
+            // the cells, or a picture of them: a line per row, or a surface for a map
+            let can_3d = t.z.rows > 1 && t.z.cols > 1;
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut look.view, View::Cells, "Cells");
+                ui.selectable_value(&mut look.view, View::Graph, "2D");
+                if can_3d {
+                    ui.selectable_value(&mut look.view, View::Surface, "3D");
+                }
+            });
+            let view = match look.view {
+                View::Surface if !can_3d => View::Graph,
+                other => other,
+            };
+            if view != View::Cells {
+                // the second image's values when comparing, as the cells show them
+                let z = w.as_ref().map_or(&v.z, |w| &w.z);
+                let hit = if view == View::Surface {
+                    surface::draw_3d(
+                        ui,
+                        z,
+                        &mut look.yaw,
+                        &mut look.pitch,
+                        pal.field,
+                        Color32::from_black_alpha(110),
+                        heat,
+                    )
+                } else {
+                    surface::draw_2d(ui, z, pal.field, pal.hover, heat)
+                };
+                match hit {
+                    Some(((r, c), clicked)) => {
+                        ui.label(format!(
+                            "At {} / {}: {} {}",
+                            v.y.get(r).map_or("-", String::as_str),
+                            v.x.get(c).map_or("-", String::as_str),
+                            fmt_num(z[r][c], t.z.decimals),
+                            t.z.units
+                        ));
+                        if clicked {
+                            *cell = Some((r, c));
+                            *value_text = fmt_num(v.z[r][c], t.z.decimals);
+                        }
+                    }
+                    None => {
+                        ui.label(
+                            RichText::new(if view == View::Surface {
+                                "Drag to turn it. Point at a value to read it; click it to change it above."
+                            } else {
+                                "The first row's line is blue, the last row's red. Point at a value to read it; click it to change it above."
+                            })
+                            .weak(),
+                        );
+                    }
+                }
+                return;
             }
             let all: Vec<f64> = v.z.concat();
             let (lo, hi) = all
@@ -3698,7 +3976,7 @@ fn main() -> eframe::Result {
     let start = match Start::parse(&args) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("icarus-app: {e}\nusage: icarus-app [--connect] [--adapter A] [--page vehicle|modules|live|logs|tests|settings|learning|bus|maps|garage|tools] [--scan] [--live] [--record] [--learn [--mark TEXT] [--learn-seconds N]] [--maps DEF.xdf IMAGE.bin [SECOND.bin]] [--map NAME [--cell R,C]]");
+            eprintln!("icarus-app: {e}\nusage: icarus-app [--connect] [--adapter A] [--page vehicle|modules|live|logs|tests|settings|learning|bus|maps|garage|tools] [--scan] [--live] [--record] [--learn [--mark TEXT] [--learn-seconds N]] [--maps DEF.xdf|.a2l IMAGE.bin [SECOND.bin|VERSION.version.toml]] [--map NAME [--cell R,C]] [--view cells|2d|3d]");
             std::process::exit(2);
         }
     };

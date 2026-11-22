@@ -167,6 +167,19 @@ impl Rom {
         }
     }
 
+    /// Takes `edited` (the same size) as the edited image, the original kept as it was read: a version opened for editing.
+    pub fn load_edits(&mut self, edited: &[u8]) -> Result<(), RomError> {
+        if edited.len() != self.original.len() {
+            return Err(RomError::Layout(format!(
+                "the edited image has 0x{:X} bytes, the original 0x{:X}",
+                edited.len(),
+                self.original.len()
+            )));
+        }
+        self.data.copy_from_slice(edited);
+        Ok(())
+    }
+
     /// Puts every byte back as it was read.
     pub fn revert(&mut self) {
         self.data.copy_from_slice(&self.original);

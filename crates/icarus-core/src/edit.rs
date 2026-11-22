@@ -50,15 +50,21 @@ impl Saved {
     }
 }
 
-/// Where an edit of `image` goes by default: beside it as "<name>-edited.bin", or into "Custom tunes" when the image is in a
-/// vehicle's "OEM tunes" folder; a free name either way.
-pub fn default_path(image: &Path) -> PathBuf {
+/// The folder that what is made from `image` goes into (edits, versions): beside it, or the vehicle's "Custom tunes" when
+/// the image is in its "OEM tunes" folder.
+pub fn save_dir(image: &Path) -> PathBuf {
     let dir = image.parent().map(Path::to_path_buf).unwrap_or_default();
-    let dir = if dir.file_name().is_some_and(|n| n == "OEM tunes") {
+    if dir.file_name().is_some_and(|n| n == "OEM tunes") {
         dir.with_file_name("Custom tunes")
     } else {
         dir
-    };
+    }
+}
+
+/// Where an edit of `image` goes by default: beside it as "<name>-edited.bin", or into "Custom tunes" when the image is in a
+/// vehicle's "OEM tunes" folder; a free name either way.
+pub fn default_path(image: &Path) -> PathBuf {
+    let dir = save_dir(image);
     let stem = image
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())

@@ -3,7 +3,6 @@
 
 use icarus_core::def::{fmt_num, Definition, Kind};
 use icarus_core::rom::{self, Rom};
-use icarus_core::xdf;
 use icarus_obd::elm::Elm;
 use icarus_obd::j1979::{self, DtcKind};
 use icarus_obd::port::Target;
@@ -21,16 +20,23 @@ use std::time::{Duration, Instant};
 
 const HELP: &str = "icarus: vehicle tuning, learning and diagnostics
 
-Files (nothing is sent to a vehicle):
-  icarus def FILE.xdf [--find TEXT]          what a definition describes (with --find: the matching maps)
-  icarus show IMAGE.bin FILE.xdf NAME        one map or value from an image, in real units
-  icarus set IMAGE.bin FILE.xdf NAME VALUE [--row R --col C] [--out NEW.bin] [--checksums FILE]
+Files (nothing is sent to a vehicle; DEF is a TunerPro .xdf or an ASAM .a2l definition):
+  icarus def DEF [--find TEXT]               what a definition describes (with --find: the matching maps)
+  icarus show IMAGE.bin DEF NAME             one map or value from an image, in real units
+  icarus set IMAGE.bin DEF NAME VALUE [--row R --col C] [--out NEW.bin] [--checksums FILE]
                                              change one value, table cell (from 0) or switch (on/off) and save a NEW file
                                              (never over one), its checksums corrected where they are known
                                              (<definition>.checksums.toml beside the definition, or --checksums)
   icarus checksums IMAGE.bin CHECKSUMS.toml  whether an image's checksums are right
-  icarus diff ORIGINAL.bin TUNED.bin [--def FILE.xdf]
-                                             what a tune changed: byte ranges, and with a definition each map, cell by cell
+  icarus diff ORIGINAL.bin TUNED.bin|VERSION.version.toml [--def DEF]
+                                             what a tune (or a version) changed: byte ranges, and with a definition each
+                                             map, cell by cell
+  icarus version new ORIGINAL.bin TUNED.bin NAME [--def DEF] [--note TEXT]
+                                             keep what a tune changes as a named version of the original: a small file of
+                                             changes beside the vehicle's files (Custom tunes), never over another file
+  icarus version list ORIGINAL.bin           \"stock\" (the original) and the versions kept for it
+  icarus version image ORIGINAL.bin VERSION.version.toml [--out NEW.bin] [--def DEF | --checksums FILE]
+                                             a version's full image as a NEW file, its checksums corrected where known
 
 Vehicle, through an OBD adapter (read-only: nothing is cleared or written):
   icarus obd info  --adapter A               adapter, protocol, VIN, modules, calibration IDs, check-engine light, monitors
@@ -182,6 +188,7 @@ fn main() -> ExitCode {
         Some("diff") => cmd_diff(&args[1..]),
         Some("set") => cmd_set(&args[1..]),
         Some("checksums") => cmd_checksums(&args[1..]),
+        Some("version") => cmd_version(&args[1..]),
         Some("obd") => cmd_obd(&args[1..]),
         Some("vin") => cmd_vin(&args[1..]),
         Some("vehicles") => cmd_vehicles(),
@@ -269,9 +276,9 @@ impl Args {
     }
 }
 
+/// A TunerPro (.xdf) or ASAM (.a2l) definition.
 fn load_def(path: &str) -> Result<Definition, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
-    let p = xdf::parse(&text).map_err(|e| format!("{path}: {e}"))?;
+    let p = icarus_core::def::load(std::path::Path::new(path)).map_err(|e| format!("{path}: {e}"))?;
     if !p.skipped.is_empty() {
         eprintln!(
             "note: {} element(s) of {path} were left out (first: {})",
@@ -304,7 +311,7 @@ fn kind_name(k: &Kind) -> &'static str {
 fn cmd_def(a: &[String]) -> Result<(), String> {
     let args = parse_args(a, &["find"])?;
     let [path] = args.pos.as_slice() else {
-        return Err("usage: icarus def FILE.xdf [--find TEXT]".into());
+        return Err("usage: icarus def DEF.xdf|.a2l [--find TEXT]".into());
     };
     let def = load_def(path)?;
     if let Some(text) = args.opt("find") {
@@ -332,6 +339,13 @@ fn cmd_def(a: &[String]) -> Result<(), String> {
     );
     if !def.description.is_empty() {
         println!("{}", def.description.lines().next().unwrap_or(""));
+    }
+    if def.base_offset != 0 {
+        println!(
+            "Addresses: file offset = address {} 0x{:X}",
+            if def.base_subtract { "-" } else { "+" },
+            def.base_offset
+        );
     }
     let count = |k: &str| {
         def.elements
@@ -415,7 +429,7 @@ fn print_element(def: &Definition, rom: &Rom, e: &icarus_core::def::Element) -> 
 fn cmd_show(a: &[String]) -> Result<(), String> {
     let args = parse_args(a, &[])?;
     let [image, defp, name] = args.pos.as_slice() else {
-        return Err("usage: icarus show IMAGE.bin FILE.xdf NAME".into());
+        return Err("usage: icarus show IMAGE.bin DEF.xdf|.a2l NAME".into());
     };
     let def = load_def(defp)?;
     let rom = Rom::new(load_image(image, Some(&def))?);
@@ -446,7 +460,7 @@ fn load_checksums(
 fn cmd_set(a: &[String]) -> Result<(), String> {
     let args = parse_args(a, &["row", "col", "out", "checksums"])?;
     let [image, defp, name, value] = args.pos.as_slice() else {
-        return Err("usage: icarus set IMAGE.bin FILE.xdf NAME VALUE [--row R --col C] [--out NEW.bin] [--checksums FILE]".into());
+        return Err("usage: icarus set IMAGE.bin DEF.xdf|.a2l NAME VALUE [--row R --col C] [--out NEW.bin] [--checksums FILE]".into());
     };
     let def = load_def(defp)?;
     let mut rom = Rom::new(load_image(image, Some(&def))?);
@@ -544,30 +558,49 @@ fn cmd_checksums(a: &[String]) -> Result<(), String> {
 fn cmd_diff(a: &[String]) -> Result<(), String> {
     let args = parse_args(a, &["def"])?;
     let [orig, tuned] = args.pos.as_slice() else {
-        return Err("usage: icarus diff ORIGINAL.bin TUNED.bin [--def FILE.xdf]".into());
+        return Err("usage: icarus diff ORIGINAL.bin TUNED.bin|VERSION.version.toml [--def DEF.xdf|.a2l]".into());
     };
     let def = args.opt("def").map(load_def).transpose()?;
-    let (ob, tb) = (
-        load_image(orig, def.as_ref())?,
-        load_image(tuned, def.as_ref())?,
-    );
-    let ranges = rom::diff(&ob, &tb);
+    let ob = load_image(orig, def.as_ref())?;
+    // a version is its changes against the original: the image it makes is compared
+    let tb = if icarus_core::version::is_version_file(std::path::Path::new(tuned)) {
+        let v = icarus_core::version::load(std::path::Path::new(tuned))?;
+        println!(
+            "Version \"{}\" of {}{}",
+            v.name,
+            orig,
+            if v.note.is_empty() { String::new() } else { format!(": {}", v.note) }
+        );
+        v.apply(&ob)?
+    } else {
+        load_image(tuned, def.as_ref())?
+    };
+    for line in diff_report(def.as_ref(), &ob, &tb)? {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// What `tb` changes against `ob`: byte ranges, and with a definition each element, cell by cell.
+fn diff_report(def: Option<&Definition>, ob: &[u8], tb: &[u8]) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    let ranges = rom::diff(ob, tb);
     if ranges.is_empty() {
-        println!("The two images are the same.");
-        return Ok(());
+        out.push("The two images are the same.".to_string());
+        return Ok(out);
     }
     let bytes: usize = ranges.iter().map(|r| r.len()).sum();
-    println!("{bytes} byte(s) differ in {} place(s).", ranges.len());
+    out.push(format!("{bytes} byte(s) differ in {} place(s).", ranges.len()));
     let Some(def) = def else {
         for r in ranges.iter().take(50) {
-            println!("  0x{:06X}..0x{:06X} ({} bytes)", r.start, r.end, r.len());
+            out.push(format!("  0x{:06X}..0x{:06X} ({} bytes)", r.start, r.end, r.len()));
         }
-        return Ok(());
+        return Ok(out);
     };
     if ob.len() != tb.len() {
         return Err("the images differ in size, so a cell-by-cell comparison would mislead".into());
     }
-    let (or, tr) = (Rom::new(ob), Rom::new(tb));
+    let (or, tr) = (Rom::new(ob.to_vec()), Rom::new(tb.to_vec()));
     let mut seen: Vec<*const icarus_core::def::Element> = Vec::new();
     let mut unnamed = 0usize;
     for r in &ranges {
@@ -580,30 +613,31 @@ fn cmd_diff(a: &[String]) -> Result<(), String> {
                 continue;
             }
             seen.push(e as *const _);
-            println!("\n{} ({})", e.title, kind_name(&e.kind));
+            out.push(String::new());
+            out.push(format!("{} ({})", e.title, kind_name(&e.kind)));
             match &e.kind {
                 Kind::Flag(f) => {
                     let (a, b) = (
                         def.flag(&or, f).map_err(|x| x.to_string())?,
                         def.flag(&tr, f).map_err(|x| x.to_string())?,
                     );
-                    println!(
+                    out.push(format!(
                         "  {} -> {}",
                         if a { "on" } else { "off" },
                         if b { "on" } else { "off" }
-                    );
+                    ));
                 }
                 Kind::Constant(d) => {
                     let (a, b) = (
                         def.values(&or, d).map_err(|x| x.to_string())?,
                         def.values(&tr, d).map_err(|x| x.to_string())?,
                     );
-                    println!(
+                    out.push(format!(
                         "  {} -> {} {}",
                         fmt_num(a[0][0], d.decimals),
                         fmt_num(b[0][0], d.decimals),
                         d.units
-                    );
+                    ));
                 }
                 Kind::Table(t) => {
                     let (a, b) = (
@@ -611,7 +645,7 @@ fn cmd_diff(a: &[String]) -> Result<(), String> {
                         def.table(&tr, t).map_err(|x| x.to_string())?,
                     );
                     if a.x != b.x || a.y != b.y {
-                        println!("  the axis breakpoints changed too");
+                        out.push("  the axis breakpoints changed too".to_string());
                     }
                     let mut n = 0;
                     for (ri, (ra, rb)) in a.z.iter().zip(&b.z).enumerate() {
@@ -619,29 +653,96 @@ fn cmd_diff(a: &[String]) -> Result<(), String> {
                             if va != vb {
                                 n += 1;
                                 if n <= 12 {
-                                    println!(
+                                    out.push(format!(
                                         "  at {} / {}: {} -> {} {}",
                                         b.y.get(ri).map(String::as_str).unwrap_or("-"),
                                         b.x.get(ci).map(String::as_str).unwrap_or("-"),
                                         fmt_num(*va, t.z.decimals),
                                         fmt_num(*vb, t.z.decimals),
                                         t.z.units
-                                    );
+                                    ));
                                 }
                             }
                         }
                     }
                     if n > 12 {
-                        println!("  ... {} cells changed in all", n);
+                        out.push(format!("  ... {} cells changed in all", n));
                     }
                 }
             }
         }
     }
     if unnamed > 0 {
-        println!("\n{unnamed} changed byte(s) are in no element of the definition (code, checksums, or maps it does not describe).");
+        out.push(String::new());
+        out.push(format!("{unnamed} changed byte(s) are in no element of the definition (code, checksums, or maps it does not describe)."));
     }
-    Ok(())
+    Ok(out)
+}
+
+/// `icarus version`: versions of a tune ("stock", the original, plus named sets of changes against it; icarus-core
+/// version.rs), kept beside the vehicle's files.
+fn cmd_version(a: &[String]) -> Result<(), String> {
+    use icarus_core::version::{self, Version};
+    use std::path::Path;
+    let args = parse_args(a.get(1..).unwrap_or(&[]), &["def", "note", "out", "checksums"])?;
+    match (a.first().map(String::as_str), args.pos.as_slice()) {
+        (Some("new"), [orig, tuned, name]) => {
+            let def = args.opt("def").map(load_def).transpose()?;
+            let ob = load_image(orig, def.as_ref())?;
+            let tb = load_image(tuned, def.as_ref())?;
+            let file_name = Path::new(orig)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let v = Version::between(name, args.opt("note").unwrap_or(""), &file_name, &ob, &tb, def.as_ref())?;
+            let p = version::save(&v, Path::new(orig))?;
+            println!(
+                "Saved version \"{}\": {} byte(s) in {} place(s) changed against {orig}, in {}",
+                v.name,
+                v.changed_bytes(),
+                v.changes.len(),
+                p.display()
+            );
+            Ok(())
+        }
+        (Some("list"), [orig]) => {
+            let ob = load_image(orig, None)?;
+            println!("stock: {orig} (the original, never changed)");
+            for (p, v) in version::list(Path::new(orig), &ob) {
+                println!(
+                    "{}: {} byte(s) in {} place(s){}  ({})",
+                    v.name,
+                    v.changed_bytes(),
+                    v.changes.len(),
+                    if v.note.is_empty() { String::new() } else { format!(", {}", v.note) },
+                    p.display()
+                );
+            }
+            Ok(())
+        }
+        (Some("image"), [orig, vpath]) => {
+            let ob = load_image(orig, None)?;
+            let v = version::load(Path::new(vpath))?;
+            let mut rom = Rom::new(ob.clone());
+            rom.load_edits(&v.apply(&ob)?).map_err(|e| e.to_string())?;
+            let specs = match (args.opt("checksums"), args.opt("def")) {
+                (Some(c), _) => load_checksums("", Some(c), rom.len())?,
+                (None, Some(d)) => load_checksums(d, None, rom.len())?,
+                (None, None) => vec![],
+            };
+            let out = args.opt("out").map(std::path::PathBuf::from).unwrap_or_else(|| {
+                icarus_core::edit::save_dir(Path::new(orig)).join(format!(
+                    "{} - {}.bin",
+                    Path::new(orig).file_stem().unwrap_or_default().to_string_lossy(),
+                    v.name
+                ))
+            });
+            let saved = icarus_core::edit::save(&rom, &specs, &out)?;
+            println!("{}", saved.summary());
+            Ok(())
+        }
+        _ => Err("usage: icarus version new ORIGINAL.bin TUNED.bin NAME [--def DEF] [--note TEXT]\n       icarus version list ORIGINAL.bin\n       icarus version image ORIGINAL.bin VERSION.version.toml [--out NEW.bin] [--def DEF | --checksums FILE]".into()),
+    }
 }
 
 fn connect(args: &Args) -> Result<Elm, String> {
@@ -2331,6 +2432,60 @@ mod tests {
             assert_eq!(header.contains("GPS latitude"), gps, "{header}");
             assert_eq!(header.contains("GPS speed [km/h]"), gps, "{header}");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A 2x2 map, written for this test.
+    const DEF: &str = r#"<XDFFORMAT version="1.70">
+  <XDFHEADER><deftitle>Test</deftitle></XDFHEADER>
+  <XDFTABLE uniqueid="0x1">
+    <title>Spark</title>
+    <XDFAXIS id="x" uniqueid="0x0"><indexcount>2</indexcount></XDFAXIS>
+    <XDFAXIS id="y" uniqueid="0x0"><indexcount>2</indexcount></XDFAXIS>
+    <XDFAXIS id="z">
+      <EMBEDDEDDATA mmedaddress="0x10" mmedelementsizebits="8" mmedrowcount="2" mmedcolcount="2" />
+      <units>deg</units>
+      <decimalpl>1</decimalpl>
+      <MATH equation="X/2"><VAR id="X" /></MATH>
+    </XDFAXIS>
+  </XDFTABLE>
+</XDFFORMAT>"#;
+
+    #[test]
+    fn diff_shows_what_a_saved_version_changes() {
+        let dir = std::env::temp_dir().join(format!("icarus-cli-version-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let oem = dir.join("Truck").join("OEM tunes");
+        std::fs::create_dir_all(&oem).unwrap();
+        let image = oem.join("stock.bin");
+        let mut stock = vec![0u8; 0x20];
+        stock[0x10..0x14].copy_from_slice(&[20, 30, 40, 50]);
+        std::fs::write(&image, &stock).unwrap();
+        let def = icarus_core::def::parse_any(DEF.as_bytes())
+            .unwrap()
+            .definition;
+        // as on the Maps page: a cell changed, then "Save as version"
+        let mut rom = Rom::new(stock.clone());
+        let Kind::Table(t) = &def.element("Spark").unwrap().kind else {
+            panic!()
+        };
+        def.set(&mut rom, &t.z, 1, 0, 22.0).unwrap();
+        let (path, _) =
+            icarus_core::version::save_edits(&rom, Some(&def), &image, "More spark", "").unwrap();
+        assert_eq!(
+            path,
+            dir.join("Truck/Custom tunes/stock - More spark.version.toml")
+        );
+        let v = icarus_core::version::load(&path).unwrap();
+        assert_eq!(v.changes[0].elements, vec!["Spark"]);
+        let lines = diff_report(Some(&def), &stock, &v.apply(&stock).unwrap()).unwrap();
+        assert_eq!(lines[0], "1 byte(s) differ in 1 place(s).");
+        assert!(lines.iter().any(|l| l == "Spark (map)"), "{lines:?}");
+        assert!(
+            lines.iter().any(|l| l.trim_end() == "  at 1 / 0: 20.0 -> 22.0 deg"),
+            "{lines:?}"
+        );
+        assert_eq!(std::fs::read(&image).unwrap(), stock, "stock stays as it was");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

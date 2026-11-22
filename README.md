@@ -332,7 +332,30 @@ icarus checksums IMAGE.bin FILE.checksums.toml                                  
 
 Every edit is saved as a new file (`IMAGE-edited.bin` beside it, or in the vehicle's Custom tunes folder when the image is in
 its OEM tunes folder; `--out` to choose), never over a file. In the window, the Maps page does the same: click a cell, type a
-value (or step it with - and +), Undo this map / Undo all, Save.
+value (or step it with - and +), Undo this map / Undo all, Save. A table shows as its cells, as a 2D graph (a line per
+row) or, for a map, as a 3D surface that turns as you drag it; pointing at a value reads it, clicking it picks that cell to
+change.
+
+**Versions.** "Stock" is the original image, never changed; a version is a name and the changes against it, kept as a
+small file (`<image> - <name>.version.toml`, the changed bytes with the original's bytes beside them, the original named
+by its size and CRC-32) in the same folder as edits, never over another file. On the Maps page, "Keep the edits as a
+version" saves one, the Versions row shows what each changes against stock (the changed maps listed, their cells
+outlined), and "Edit from it" goes on editing from a version. A version only applies to the image it was made from, and
+makes the full image again whenever asked; its checksums are corrected then, as for any edit.
+
+```sh
+icarus version new STOCK.bin TUNED.bin "Cold start" --def DEF   # keep what a tune changes as a version of stock
+icarus version list STOCK.bin                                     # stock and its versions
+icarus diff STOCK.bin "STOCK - Cold start.version.toml" --def DEF # what the version changes, map by map
+icarus version image STOCK.bin "STOCK - Cold start.version.toml" --def DEF   # its full image, as a new file
+```
+
+Formulas that use other values (a TunerPro `VAR` linked to another element, or to a raw number at an address) are worked
+out with those values as they are in the image, the values they use first. Editing such a cell stores the number that shows
+the value typed with the linked values as they are now; changing a linked value later changes what the cell shows, and a
+tune that changes it shows every map that uses it as changed. Formulas that use each other in a loop, or a link to an
+element that is missing or not a single value, are left out with the reason; a cell whose formula no longer depends on the
+stored number (a linked value of 0 in `X*Y`) is refused.
 
 Checksums: an ECU checks its calibration against numbers kept in the image, so an edited image needs them corrected. How each
 family computes them is its own; a definition's checksums are described in `<definition>.checksums.toml` beside it (sums of
@@ -368,11 +391,12 @@ vehicle's name, and Save report; **Modules** scans every module for its identity
 button is held; **Settings** shows each module setting's value and changes it (asks first; undo puts the last change
 back); **Learning** watches another tool and names what it learned; **Bus** shows every ID and message; **Maps** opens a
 definition and an image
-(and a second image to compare: it starts on the first map the second one changed, changed cells outlined); **Logs**
-summarizes a recording (fuel trims by driving condition), charts it on one time line, lays a chosen value out over engine
-speed and load like a tuner's table (each cell the mean of its readings), and draws the drive's GPS track coloured by speed
-when it was recorded with GPS (the shape only: no map is fetched). Start options:
-`--connect [--adapter A] --page modules --scan`, `--live`, `--maps DEF.xdf IMAGE.bin [SECOND.bin]`, `--learn [--mark TEXT]
+(and a second image or a version to compare: it starts on the first map that changed, changed cells outlined; tables as
+cells, a 2D graph or a 3D surface; versions of the image); **Logs** summarizes a recording (fuel trims by driving
+condition), charts it on one time line, lays a chosen value out over engine speed and load like a tuner's table (each cell
+the mean of its readings), and draws the drive's GPS track coloured by speed when it was recorded with GPS (the shape only:
+no map is fetched). Start options:
+`--connect [--adapter A] --page modules --scan`, `--live`, `--maps DEF.xdf|.a2l IMAGE.bin [SECOND.bin|VERSION.version.toml]` with `--map NAME` and `--view cells|2d|3d`, `--learn [--mark TEXT]
 [--learn-seconds N]` (a learning watch at start, for demonstrations).
 
 ## What it does today
@@ -383,13 +407,22 @@ settings (both above).
 **Files** (no vehicle needed):
 
 ```sh
-icarus def FILE.xdf [--find TEXT]                 # what a TunerPro definition describes; --find searches map names
-icarus show IMAGE.bin FILE.xdf NAME               # one map, curve or value from an image, in real units
-icarus diff ORIGINAL.bin TUNED.bin --def FILE.xdf # what a tune changed, map by map and cell by cell
+icarus def DEF [--find TEXT]                      # what a definition describes; --find searches map names
+icarus show IMAGE.bin DEF NAME                    # one map, curve or value from an image, in real units
+icarus diff ORIGINAL.bin TUNED.bin --def DEF      # what a tune changed, map by map and cell by cell
 ```
 
 `diff` is the quickest way to learn from an existing tune: give it the stock image and a modified one, and it names every
 map that changed and shows each cell's old and new value.
+
+A definition (DEF) is a TunerPro `.xdf` or an ASAM MCD-2 MC `.a2l` (ASAP2, what calibration tools use); Icarus tells them
+apart by their contents, and both work the same everywhere (`def`, `show`, `set`, `diff`, the Maps page). From an A2L it
+reads `CHARACTERISTIC`s of type `VALUE`, `CURVE` and `MAP` with their record layouts (`FNC_VALUES` row or column order,
+`AXIS_PTS_X/Y`, alignment, byte order), `COMPU_METHOD` `IDENTICAL`, `LINEAR` and `RAT_FUNC` (the form with one real value
+per stored number), fixed axes, shared axes (`COM_AXIS` and its `AXIS_PTS`, which are listed as elements too) and axes stored
+with the values; `FUNCTION`s become categories. The image is taken to start at the A2L's lowest memory segment that is not
+RAM (`icarus def` prints the offset). Everything else (conversion tables and formulas, bit masks, point counts stored in
+the image, rescale axes, keywords it does not know) leaves that element out, listed with the reason, rather than guessed.
 
 **Vehicle**, through an OBD-II adapter:
 
@@ -457,7 +490,7 @@ Rust (stable), Linux. Dependencies: `roxmltree` (XML) and `libc`.
 
 | Crate | What |
 | --- | --- |
-| `crates/icarus-core` | ROM images (original + edited, diff), definitions (tables, values, switches), formulas, the TunerPro `.xdf` reader; module-data definitions, their decoder, the OBDb importer and the capture importers (Bluetooth logs, bus logs); ISO-TP |
+| `crates/icarus-core` | ROM images (original + edited, diff), definitions (tables, values, switches), formulas, the TunerPro `.xdf` and ASAM `.a2l` readers; module-data definitions, their decoder, the OBDb importer and the capture importers (Bluetooth logs, bus logs); ISO-TP |
 | `crates/icarus-obd` | adapters (USB, Bluetooth, Wi-Fi, simulated), the ELM327/STN language, the standard OBD-II services |
 | `crates/icarus` | the `icarus` command |
 | `crates/icarus-app` | the window (egui, Yggdrasil's look from yggdrasil-ui); a worker thread owns the adapter |
