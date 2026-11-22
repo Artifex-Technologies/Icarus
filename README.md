@@ -181,7 +181,7 @@ Or the **Learning** page: Start learning, type what you are about to do and pres
 - **The session** is saved in the vehicle's `Logs` folder as `learning-DATE-TIME.md`: the module names from Icarus's
   profile, the marks, what was learned, what was noted, and every diagnostic message in words. No VIN.
 - **Naming and adding.** On the Learning page each learned setting gets a name and names for its values ("was"/"set"
-  become "on"/"off"), and one button adds it to the vehicle's file (`~/.config/icarus/vehicles/MAKE.toml`); the Settings
+  become "on"/"off"), and one button adds it to the vehicle's file (`~/.config/icarus/vehicles/MAKE.toml`); the Module settings
   and Tests pages then offer it.
 - **Sarina**, only when Sarina is installed (Sarina's own `sarina` program, not just Labyrinth's `labyrinth-ask-sarina`,
   which every Labyrinth system has; without Sarina the page says nothing about Sarina): Ask Sarina on a session (or
@@ -232,11 +232,15 @@ own start, stop and result requests go out; its result is asked for until the mo
 the default session comes back whatever happened, and every run is in `~/.local/state/icarus/actions.log`. `sim:off` has
 two to try.
 
+## Basic, Advanced and Tuning
+
+The window starts at **Basic**: the vehicle, its modules' codes, live data, logs, the garage and the tools, for diagnosing and troubleshooting. The gear at the bottom of the side bar opens Icarus's own settings: **Advanced** adds the pages that control modules (Tests, Module settings, Learning, Bus), and **Tuning**, shown only while Advanced is on and turned on only after a yes, adds Maps. The choice is kept per computer in `~/.config/icarus/window.toml`. The levels only show and hide pages: every change to a vehicle keeps its own checks, and a vehicle set to Read-Only in the Garage stays read-only at every level. The command line has everything. `icarus-app --page settings` opens the gear's page, `--page module` the Module settings page.
+
 ## Module settings
 
 What dealer tools call customizations: a feature a module keeps switched on or off, or a value it keeps (a chime, a lock
 behaviour, a light). Icarus learns them by watching such a tool change one on my own vehicle (previous section), and then
-changes them itself, on the Settings page (asks first, with the value now and the one chosen) or:
+changes them itself, on the Module settings page (asks first, with the value now and the one chosen) or:
 
 ```sh
 icarus obd settings --adapter A                                # the settings known for this vehicle, and each one's value now

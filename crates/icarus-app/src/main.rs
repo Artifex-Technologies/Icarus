@@ -3,6 +3,7 @@
 //! bus, and maps from an image and a definition (with what a tune changed). Yggdrasil's look (yggdrasil-ui).
 
 mod autoconn;
+mod levels;
 mod logs;
 mod single;
 mod surface;
@@ -34,6 +35,24 @@ enum Page {
     Garage,
     Tools,
     Logs,
+    /// The window's own settings (its levels), behind the gear.
+    App,
+}
+
+/// The level a page needs (ICA-74): Basic for diagnosis and analysis, Advanced for controlling modules, Tuning for maps.
+fn need(p: Page) -> levels::Need {
+    use levels::Need;
+    match p {
+        Page::Vehicle
+        | Page::Modules
+        | Page::Live
+        | Page::Logs
+        | Page::Garage
+        | Page::Tools
+        | Page::App => Need::Basic,
+        Page::Tests | Page::Settings | Page::Learn | Page::Bus => Need::Advanced,
+        Page::Maps => Need::Tuning,
+    }
 }
 
 const PAGES: [(Page, &str); 11] = [
@@ -42,7 +61,7 @@ const PAGES: [(Page, &str); 11] = [
     (Page::Live, "Live data"),
     (Page::Logs, "Logs"),
     (Page::Tests, "Tests"),
-    (Page::Settings, "Settings"),
+    (Page::Settings, "Module settings"),
     (Page::Learn, "Learning"),
     (Page::Bus, "Bus"),
     (Page::Maps, "Maps"),
@@ -213,13 +232,16 @@ impl Start {
                 "--page" => {
                     i += 1;
                     let want = a.get(i).ok_or("--page needs a name")?.to_lowercase();
-                    s.page = Some(
+                    // "settings" is the window's own (the gear); a module's settings are "module settings"
+                    s.page = Some(if want == "settings" {
+                        Page::App
+                    } else {
                         PAGES
                             .iter()
                             .find(|p| p.1.to_lowercase().starts_with(&want))
                             .ok_or(format!("no page {want}"))?
-                            .0,
-                    );
+                            .0
+                    });
                 }
                 "--maps" => {
                     let d = a
@@ -345,6 +367,10 @@ struct App {
     gps_now: bool,
     s_obd: String,
     page: Page,
+    /// The window's levels (levels.rs).
+    levels: levels::Levels,
+    /// Turning Tuning on waits for this question's yes.
+    tuning_ask: bool,
     tx: Sender<Cmd>,
     rx: Receiver<Event>,
     /// Connect by itself, and again whenever the adapter answers once more (a real adapter is known; autoconn.rs).
@@ -377,6 +403,7 @@ struct App {
 
 impl App {
     fn new(ctx: &egui::Context, start: Start) -> App {
+        let levels = levels::Levels::load();
         let (bg_tx, bg_rx) = channel::<Bg>();
         let (tx, wrx) = channel();
         let (wtx, rx) = channel();
@@ -458,7 +485,13 @@ impl App {
             record_gps: false,
             gps_now: start.gps.is_some(),
             s_obd: String::new(),
-            page: start.page.unwrap_or(Page::Vehicle),
+            // a start page the levels do not show (--page tests on Basic) is the vehicle's
+            page: start
+                .page
+                .filter(|p| levels.allows(need(*p)))
+                .unwrap_or(Page::Vehicle),
+            levels,
+            tuning_ask: false,
             tx,
             rx,
             adapter: chosen.0.clone(),
@@ -2010,6 +2043,60 @@ impl App {
             let _ = tx.send(Bg::Sarina(icarus_obd::learning::ask_sarina(&file)));
             c.request_repaint();
         });
+    }
+
+    /// The window's own settings (the gear): the levels. Advanced shows more and unlocks module control; Tuning shows only while
+    /// Advanced is on and asks first.
+    fn page_app(&mut self, ui: &mut egui::Ui, pal: &theme::Palette) {
+        ui.heading("Settings");
+        ui.label(RichText::new("Icarus on this computer.").weak());
+        ui.add_space(10.0);
+        // each switch on its row, its words below it (wrapped: a grid's cells do not wrap)
+        let row = |ui: &mut egui::Ui, name: &str, on: &mut bool, words: &str| -> bool {
+            let changed = ui
+                .horizontal(|ui| {
+                    let c = switch(ui, pal, on).changed();
+                    ui.label(RichText::new(name).strong());
+                    c
+                })
+                .inner;
+            ui.add(egui::Label::new(RichText::new(words).weak()).wrap());
+            ui.add_space(10.0);
+            changed
+        };
+        let mut adv = self.levels.advanced;
+        if row(ui, "Advanced", &mut adv, "More detail on every page, and control of each module: actuator tests (the throttle and the rest), module settings, service routines, learning from another tool and the bus view.") {
+            self.levels.set_advanced(adv);
+            self.save_levels();
+        }
+        if self.levels.advanced {
+            let mut tun = self.levels.tuning;
+            if row(
+                ui,
+                "Tuning",
+                &mut tun,
+                "Maps and tuning files for the engine and the other computers.",
+            ) {
+                if tun {
+                    self.tuning_ask = true;
+                } else {
+                    self.levels.tuning = false;
+                    self.save_levels();
+                }
+            }
+        }
+        ui.add_space(12.0);
+        ui.label(RichText::new("Every change to a vehicle keeps its own checks, and a vehicle set to Read-Only in the Garage stays read-only at every level.").weak());
+    }
+
+    fn save_levels(&mut self) {
+        if let Err(e) = self.levels.save() {
+            self.error = Some(format!("Icarus's settings were not saved: {e}"));
+        }
+        // a page the levels no longer show is left for the vehicle's
+        if !self.levels.allows(need(self.page)) {
+            self.page = Page::Vehicle;
+        }
     }
 
     fn page_settings(&mut self, ui: &mut egui::Ui, pal: &theme::Palette) {
@@ -3954,6 +4041,9 @@ impl eframe::App for App {
                 ui.label(RichText::new("vehicle electronics").small().weak());
                 ui.add_space(14.0);
                 for (p, name) in PAGES {
+                    if !self.levels.allows(need(p)) {
+                        continue;
+                    }
                     let sel = self.page == p;
                     let (rect, resp) =
                         ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::click());
@@ -3976,6 +4066,17 @@ impl eframe::App for App {
                     }
                 }
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                    // the window's own settings: the levels (and later the units, the look and the devices)
+                    let gear = ui
+                        .selectable_label(
+                            self.page == Page::App,
+                            RichText::new("\u{2699} Settings").size(14.0),
+                        )
+                        .on_hover_text("Icarus's own settings: Basic, Advanced and Tuning");
+                    if gear.clicked() {
+                        self.page = Page::App;
+                    }
+                    ui.add_space(6.0);
                     let (text, col) = match self.link {
                         Link::On => ("connected", pal.green),
                         Link::Busy => ("connecting", pal.amber),
@@ -4025,11 +4126,37 @@ impl eframe::App for App {
                                 Page::Garage => self.page_garage(ui, &pal),
                                 Page::Tools => self.page_tools(ui, &pal),
                                 Page::Logs => self.logs.page(ui, &pal),
+                                Page::App => self.page_app(ui, &pal),
                                 _ => self.page_live(ui, &pal),
                             });
                     }
                 }
             });
+        if self.tuning_ask {
+            let mut answer = None;
+            egui::Modal::new(egui::Id::new("confirm-tuning")).show(&ctx, |ui| {
+                ui.set_max_width(460.0);
+                ui.label(RichText::new("Turn on tuning?").size(17.0).strong());
+                ui.add_space(6.0);
+                ui.label("Tuning changes the software in a vehicle's computers. A wrong change can stop a vehicle from starting. Icarus keeps the original first and checks the conditions before it writes anything, but the decision to write is yours.");
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Turn on tuning").clicked() {
+                        answer = Some(true);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        answer = Some(false);
+                    }
+                });
+            });
+            if let Some(yes) = answer {
+                self.tuning_ask = false;
+                if yes {
+                    self.levels.tuning = true;
+                    self.save_levels();
+                }
+            }
+        }
         if let Some(def) = self.confirm_service.clone() {
             let mut go = false;
             let mut cancel = false;
@@ -4281,4 +4408,57 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| Ok(Box::new(App::new(&cc.egui_ctx, start)))),
     )
+}
+
+#[cfg(test)]
+mod level_pages {
+    use super::*;
+
+    fn shown(l: levels::Levels) -> Vec<&'static str> {
+        PAGES
+            .iter()
+            .filter(|(p, _)| l.allows(need(*p)))
+            .map(|(_, n)| *n)
+            .collect()
+    }
+
+    #[test]
+    fn each_level_shows_its_pages() {
+        let basic = levels::Levels::default();
+        assert_eq!(
+            shown(basic),
+            ["Vehicle", "Modules", "Live data", "Logs", "Garage", "Tools"]
+        );
+        let adv = levels::Levels {
+            advanced: true,
+            tuning: false,
+        };
+        assert_eq!(
+            shown(adv),
+            [
+                "Vehicle",
+                "Modules",
+                "Live data",
+                "Logs",
+                "Tests",
+                "Module settings",
+                "Learning",
+                "Bus",
+                "Garage",
+                "Tools"
+            ]
+        );
+        let all = levels::Levels {
+            advanced: true,
+            tuning: true,
+        };
+        assert_eq!(
+            shown(all).len(),
+            PAGES.len(),
+            "Tuning adds Maps: every page"
+        );
+        assert!(shown(all).contains(&"Maps") && !shown(adv).contains(&"Maps"));
+        // the gear's page is there at every level
+        assert!(basic.allows(need(Page::App)));
+    }
 }
