@@ -6,8 +6,14 @@
 //! (signed) and 0x02 (least significant byte first), row and column counts (rows are the y axis), axes linked to another
 //! element (`embedinfo type="3" linkobjid=...`) and `MATH equation="..."` in X. Read as believed but not yet seen in a real
 //! file: 0x04 (column-major), 0x10000 (floating point), stored axis breakpoints, `LABEL` axes, strides and `XDFFLAG` masks.
+//!
+//! A formula can use other values besides X, each declared as a `VAR` of the `MATH`: `type="link" linkid="0x..."` is
+//! another element's value in real units (the element with that `uniqueid`, a single value), `type="address"` the raw
+//! number at `address` (`sizeinbits`, `flags` as in `EMBEDDEDDATA`). They are worked out first, in the order they use each
+//! other; formulas that use each other in a loop, or a link to an element that is missing or not a single value, leave
+//! the element out with the reason.
 
-use crate::def::{Axis, Data, DefError, Definition, Element, Flag, Kind, Table};
+use crate::def::{Axis, Data, DefError, Definition, Element, Flag, Kind, Source, Table, Var};
 use crate::expr::Expr;
 use crate::rom::Cell;
 use roxmltree::{Document, Node};
@@ -97,20 +103,36 @@ pub fn parse(text: &str) -> Result<Parsed, DefError> {
                     .collect(),
                 kind,
             }),
-            Err(e) => skipped.push(format!(
-                "{}: {e}",
-                if title.is_empty() {
-                    "(untitled)".to_string()
-                } else {
-                    title
-                }
-            )),
+            Err(e) => skipped.push(format!("{}: {e}", shown_title(title))),
         }
+    }
+    // formulas that use other elements: each one must lead to single values, never round in a loop (leaving one out can
+    // leave another without its value, so until none is left)
+    loop {
+        let problems = def.formula_problems();
+        if problems.is_empty() {
+            break;
+        }
+        let mut out: Vec<String> = problems
+            .iter()
+            .rev()
+            .map(|(i, why)| format!("{}: {why}", shown_title(def.elements.remove(*i).title)))
+            .collect();
+        out.reverse();
+        skipped.extend(out);
     }
     Ok(Parsed {
         definition: def,
         skipped,
     })
+}
+
+fn shown_title(title: String) -> String {
+    if title.is_empty() {
+        "(untitled)".to_string()
+    } else {
+        title
+    }
 }
 
 fn child<'a, 'i>(n: Node<'a, 'i>, tag: &str) -> Option<Node<'a, 'i>> {
@@ -138,19 +160,71 @@ fn attr_num(n: Node, a: &str) -> Option<i64> {
     n.attribute(a).and_then(num).map(|v| v as i64)
 }
 
-fn math(n: Node) -> Result<Expr, DefError> {
+/// A node's formula and its variables besides X (see the top of this file).
+fn math(n: Node, d: Defaults) -> Result<(Expr, Vec<Var>), DefError> {
     let Some(m) = child(n, "MATH") else {
-        return Ok(Expr::identity());
+        return Ok((Expr::identity(), vec![]));
     };
+    let mut vars = Vec::new();
     for v in m.children().filter(|c| c.has_tag_name("VAR")) {
-        let id = v.attribute("id").unwrap_or("");
-        if !id.eq_ignore_ascii_case("X") {
-            return Err(DefError::Bad(format!(
-                "the formula uses variable {id} (values from other elements are not supported yet)"
-            )));
+        let id = v.attribute("id").unwrap_or("").trim();
+        if id.eq_ignore_ascii_case("X") {
+            continue;
         }
+        if id.is_empty() {
+            return Err(DefError::Bad("a formula variable has no name".into()));
+        }
+        let kind = v
+            .attribute("type")
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        let source = match kind.as_str() {
+            "link" => Source::Element(
+                attr_num(v, "linkid")
+                    .filter(|l| (0..=u32::MAX as i64).contains(l))
+                    .ok_or_else(|| {
+                        DefError::Bad(format!(
+                            "formula variable {id} links to no element (no linkid)"
+                        ))
+                    })? as u32,
+            ),
+            "address" => {
+                let address = attr_num(v, "address").filter(|a| *a >= 0).ok_or_else(|| {
+                    DefError::Bad(format!("formula variable {id} has no address"))
+                })?;
+                let flags = attr_num(v, "flags").map(|f| f as u32);
+                let cell = Cell {
+                    bits: attr_num(v, "sizeinbits").map_or(d.bits, |b| b as u8),
+                    signed: flags.map_or(d.signed, |f| f & FLAG_SIGNED != 0),
+                    little_endian: flags.map_or(d.lsb_first, |f| f & FLAG_LSB_FIRST != 0),
+                    float: flags.map_or(d.float, |f| f & FLAG_FLOAT != 0),
+                };
+                cell.check()?;
+                Source::Address {
+                    address: address as u64,
+                    cell,
+                }
+            }
+            "" => {
+                return Err(DefError::Bad(format!(
+                    "formula variable {id} does not say where its value comes from (no type)"
+                )))
+            }
+            other => {
+                return Err(DefError::Bad(format!(
+                    "formula variable {id} is of type \"{other}\", which Icarus does not read"
+                )))
+            }
+        };
+        vars.push(Var {
+            name: id.to_string(),
+            source,
+        });
     }
-    Ok(Expr::parse(m.attribute("equation").unwrap_or("X"))?)
+    let names: Vec<&str> = vars.iter().map(|v| v.name.as_str()).collect();
+    let expr = Expr::parse_with(m.attribute("equation").unwrap_or("X"), &names)?;
+    Ok((expr, vars))
 }
 
 /// The numbers of an element or axis node: its EMBEDDEDDATA, MATH, units and limits.
@@ -181,6 +255,7 @@ fn embedded(
             .map_or(default, |v| v as usize)
     };
     let float_of = |tag: &str| child(n, tag).and_then(|c| c.text()).and_then(num);
+    let (math, vars) = math(n, d)?;
     Ok(Data {
         address: address as u64,
         cell,
@@ -189,7 +264,8 @@ fn embedded(
         column_major: flags.is_some_and(|f| f & FLAG_COLUMN_MAJOR != 0),
         minor_stride_bits: attr_num(e, "mmedminorstridebits").unwrap_or(0).max(0),
         major_stride_bits: attr_num(e, "mmedmajorstridebits").unwrap_or(0).max(0),
-        math: math(n)?,
+        math,
+        vars,
         units: text_of(n, "units"),
         decimals: float_of("decimalpl").map_or(2, |v| v.clamp(0.0, 9.0) as u8),
         min: float_of("min"),
@@ -203,9 +279,11 @@ fn axis(n: Node, d: Defaults) -> Result<Axis, DefError> {
         .unwrap_or(1)
         .max(1);
     if let Some(link) = child(n, "embedinfo").and_then(|e| attr_num(e, "linkobjid")) {
+        let (math, vars) = math(n, d)?;
         return Ok(Axis::Link {
             id: link as u32,
-            math: math(n)?,
+            math,
+            vars,
             units: text_of(n, "units"),
         });
     }
@@ -404,6 +482,155 @@ mod tests {
             .map(|e| e.title.clone())
             .collect();
         assert_eq!(names, vec!["Spark advance"]);
+    }
+
+    /// Formulas that use other values, written for this test: a map that uses a value that uses another value, a raw
+    /// number from an address, and the cases that cannot be worked out.
+    const LINKED: &str = r#"<!-- Written by hand for Icarus's tests -->
+<XDFFORMAT version="1.70">
+  <XDFHEADER>
+    <deftitle>Linked formulas</deftitle>
+    <BASEOFFSET offset="0" subtract="0" />
+    <DEFAULTS datasizeinbits="8" sigdigits="2" outputtype="1" signed="0" lsbfirst="0" float="0" />
+    <REGION type="0xFFFFFFFF" startaddress="0x0" size="0x20" name="Binary File" />
+  </XDFHEADER>
+  <XDFCONSTANT uniqueid="0x100">
+    <title>Injector size</title>
+    <EMBEDDEDDATA mmedtypeflags="0x02" mmedaddress="0x00" mmedelementsizebits="16" />
+    <units>cc/min</units>
+    <decimalpl>0</decimalpl>
+    <MATH equation="X/2"><VAR id="X" /></MATH>
+  </XDFCONSTANT>
+  <XDFTABLE uniqueid="0x102">
+    <title>Fuel map</title>
+    <XDFAXIS id="x" uniqueid="0x0"><indexcount>2</indexcount></XDFAXIS>
+    <XDFAXIS id="y" uniqueid="0x0"><indexcount>2</indexcount></XDFAXIS>
+    <XDFAXIS id="z">
+      <EMBEDDEDDATA mmedaddress="0x10" mmedelementsizebits="8" mmedrowcount="2" mmedcolcount="2" />
+      <units>mg</units>
+      <decimalpl>1</decimalpl>
+      <MATH equation="X*Y/Scale">
+        <VAR id="X" />
+        <VAR id="Y" type="link" linkid="0x101" />
+        <VAR id="Scale" type="address" address="0x04" sizeinbits="8" flags="0x0" />
+      </MATH>
+    </XDFAXIS>
+  </XDFTABLE>
+  <XDFCONSTANT uniqueid="0x101">
+    <title>Fuel per pulse</title>
+    <EMBEDDEDDATA mmedaddress="0x02" mmedelementsizebits="8" />
+    <decimalpl>1</decimalpl>
+    <MATH equation="X*Y/100"><VAR id="X" /><VAR id="Y" type="link" linkid="0x100" /></MATH>
+  </XDFCONSTANT>
+  <XDFCONSTANT uniqueid="0x103">
+    <title>Scaled by zero</title>
+    <EMBEDDEDDATA mmedaddress="0x07" mmedelementsizebits="8" />
+    <MATH equation="X*X*Y"><VAR id="X" /><VAR id="Y" type="address" address="0x06" sizeinbits="8" /></MATH>
+  </XDFCONSTANT>
+  <XDFCONSTANT uniqueid="0x200">
+    <title>Loop A</title>
+    <EMBEDDEDDATA mmedaddress="0x08" mmedelementsizebits="8" />
+    <MATH equation="X+Y"><VAR id="X" /><VAR id="Y" type="link" linkid="0x201" /></MATH>
+  </XDFCONSTANT>
+  <XDFCONSTANT uniqueid="0x201">
+    <title>Loop B</title>
+    <EMBEDDEDDATA mmedaddress="0x09" mmedelementsizebits="8" />
+    <MATH equation="X+Y"><VAR id="X" /><VAR id="Y" type="link" linkid="0x200" /></MATH>
+  </XDFCONSTANT>
+  <XDFCONSTANT uniqueid="0x202">
+    <title>Missing link</title>
+    <EMBEDDEDDATA mmedaddress="0x0A" mmedelementsizebits="8" />
+    <MATH equation="X+Y"><VAR id="X" /><VAR id="Y" type="link" linkid="0x999" /></MATH>
+  </XDFCONSTANT>
+  <XDFCONSTANT uniqueid="0x203">
+    <title>Uses a map</title>
+    <EMBEDDEDDATA mmedaddress="0x0B" mmedelementsizebits="8" />
+    <MATH equation="X+Y"><VAR id="X" /><VAR id="Y" type="link" linkid="0x102" /></MATH>
+  </XDFCONSTANT>
+  <XDFCONSTANT uniqueid="0x204">
+    <title>Unknown variable kind</title>
+    <EMBEDDEDDATA mmedaddress="0x0C" mmedelementsizebits="8" />
+    <MATH equation="X+Y"><VAR id="X" /><VAR id="Y" type="inputvar" /></MATH>
+  </XDFCONSTANT>
+</XDFFORMAT>"#;
+
+    #[test]
+    fn formulas_that_use_other_values_load_in_real_units() {
+        let p = parse(LINKED).unwrap();
+        let def = &p.definition;
+        let titles: Vec<&str> = def.elements.iter().map(|e| e.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            vec![
+                "Injector size",
+                "Fuel map",
+                "Fuel per pulse",
+                "Scaled by zero"
+            ]
+        );
+        let why = |t: &str| {
+            p.skipped
+                .iter()
+                .find(|s| s.starts_with(&format!("{t}: ")))
+                .cloned()
+                .unwrap_or_else(|| panic!("{t} not left out: {:?}", p.skipped))
+        };
+        assert!(why("Loop A").contains("\"Loop A\" uses \"Loop B\" uses \"Loop A\""));
+        assert!(why("Loop B").contains("loop"));
+        assert!(why("Missing link").contains("0x999, which the definition lacks"));
+        assert!(why("Uses a map").contains("not a single value"));
+        assert!(why("Unknown variable kind").contains("\"inputvar\""));
+        assert_eq!(p.skipped.len(), 5);
+
+        let mut img = vec![0u8; 0x20];
+        img[0..2].copy_from_slice(&880u16.to_le_bytes()); // 440 cc/min
+        img[2] = 50; // 50 * 440 / 100 = 220
+        img[4] = 100; // the map's divisor, raw
+        img[7] = 5;
+        img[0x10..0x14].copy_from_slice(&[10, 20, 30, 40]); // X * 220 / 100
+        let mut rom = Rom::new(img);
+        let Kind::Constant(fpp) = &def.element("Fuel per pulse").unwrap().kind else {
+            panic!()
+        };
+        assert_eq!(def.values(&rom, fpp).unwrap(), vec![vec![220.0]]);
+        let Kind::Table(map) = &def.element("Fuel map").unwrap().kind else {
+            panic!()
+        };
+        assert_eq!(
+            def.table(&rom, map).unwrap().z,
+            vec![vec![22.0, 44.0], vec![66.0, 88.0]],
+            "worked out after the values it uses, in their order"
+        );
+
+        // stored from a shown value with the linked values as they are: 33 mg / 2.2 = 15
+        assert_eq!(def.set(&mut rom, &map.z, 0, 0, 33.0).unwrap(), 33.0);
+        assert_eq!(rom.bytes()[0x10], 15);
+        // a change to the value at the start of the chain changes what the others show, not what they store
+        let Kind::Constant(inj) = &def.element("Injector size").unwrap().kind else {
+            panic!()
+        };
+        assert_eq!(def.set(&mut rom, inj, 0, 0, 220.0).unwrap(), 220.0);
+        assert_eq!(def.values(&rom, fpp).unwrap(), vec![vec![110.0]]);
+        assert_eq!(def.table(&rom, map).unwrap().z[0][0], 16.5);
+        assert_eq!(rom.bytes()[0x10], 15);
+        let changed: Vec<&str> = def
+            .covering(0..2)
+            .iter()
+            .map(|e| e.title.as_str())
+            .collect();
+        assert_eq!(
+            changed,
+            vec!["Injector size", "Fuel map", "Fuel per pulse"],
+            "what uses the changed value shows as changed too"
+        );
+        // with the value it uses at 0, the formula gives 0 whatever is stored: refused, never a guess
+        let Kind::Constant(zero) = &def.element("Scaled by zero").unwrap().kind else {
+            panic!()
+        };
+        assert_eq!(def.values(&rom, zero).unwrap(), vec![vec![0.0]]);
+        let err = def.set(&mut rom, zero, 0, 0, 3.0).unwrap_err().to_string();
+        assert!(err.contains("same value whatever is stored"), "{err}");
+        assert_eq!(rom.bytes()[7], 5, "nothing stored");
     }
 
     #[test]

@@ -304,6 +304,13 @@ Every edit is saved as a new file (`IMAGE-edited.bin` beside it, or in the vehic
 its OEM tunes folder; `--out` to choose), never over a file. In the window, the Maps page does the same: click a cell, type a
 value (or step it with - and +), Undo this map / Undo all, Save.
 
+Formulas that use other values (a TunerPro `VAR` linked to another element, or to a raw number at an address) are worked
+out with those values as they are in the image, the values they use first. Editing such a cell stores the number that shows
+the value typed with the linked values as they are now; changing a linked value later changes what the cell shows, and a
+tune that changes it shows every map that uses it as changed. Formulas that use each other in a loop, or a link to an
+element that is missing or not a single value, are left out with the reason; a cell whose formula no longer depends on the
+stored number (a linked value of 0 in `X*Y`) is refused.
+
 Checksums: an ECU checks its calibration against numbers kept in the image, so an edited image needs them corrected. How each
 family computes them is its own; a definition's checksums are described in `<definition>.checksums.toml` beside it (sums of
 bytes, 16- or 32-bit words, XOR, CRC-16/CCITT, CRC-32; stored as the value or as the complement that makes the sum come out

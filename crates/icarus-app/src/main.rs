@@ -2571,8 +2571,9 @@ impl App {
                     String::new()
                 } else {
                     format!(
-                        ", {} left out (formulas Icarus cannot read yet)",
-                        p.skipped.len()
+                        ", {} left out (first: {})",
+                        p.skipped.len(),
+                        p.skipped[0]
                     )
                 },
                 if cmp.is_some() {
@@ -2839,10 +2840,12 @@ impl App {
             ) => (|| {
                 let at = def.cell_offset(d, row, col).map_err(|x| x.to_string())?;
                 let raw = rom.read(at, d.cell).map_err(|x| x.to_string())?;
+                // the formula with the values it uses as they are in this image
+                let math = def.math(rom, d).map_err(|x| x.to_string())?;
                 // one step of the stored number, in the direction the real value goes
-                let up = d.math.eval(raw + 1.0) >= d.math.eval(raw);
+                let up = math.eval(raw + 1.0) >= math.eval(raw);
                 let new = raw + if up { n as f64 } else { -n as f64 };
-                let real = d.math.eval(new);
+                let real = math.eval(new);
                 if d.min.is_some_and(|m| real < m) || d.max.is_some_and(|m| real > m) {
                     return Err(format!(
                         "{} is outside the definition's limits",
@@ -2937,7 +2940,7 @@ fn edit_bar(
                         if ui.button("+").on_hover_text("one step up").clicked() {
                             *edit = Some(MapEdit::Step(1));
                         }
-                        if let Ok(at) = def.cell_offset(d, r, c) {
+                        if let (Ok(at), Ok(math)) = (def.cell_offset(d, r, c), def.math(rom, d)) {
                             if let (Ok(now), Ok(was)) =
                                 (rom.read(at, d.cell), rom.read_original(at, d.cell))
                             {
@@ -2945,7 +2948,7 @@ fn edit_bar(
                                     ui.label(
                                         RichText::new(format!(
                                             "was {}",
-                                            fmt_num(d.math.eval(was), d.decimals)
+                                            fmt_num(math.eval(was), d.decimals)
                                         ))
                                         .color(pal.amber),
                                     );
