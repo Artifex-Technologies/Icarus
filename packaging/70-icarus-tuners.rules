@@ -10,6 +10,10 @@ SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="5059", TAG+="uacc
 # Linux's cp210x driver makes it /dev/ttyUSB*; this gives the person at the seat the port without joining the uucp group.
 SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60|ea63|ea70", TAG+="uaccess"
 
+# OBDLink EX and SX (an STN chip behind an FTDI FT230X, 0403:6015): Linux's ftdi_sio makes it /dev/ttyUSB*. 0403:6015 is FTDI's
+# own ID, on many other devices too, so the maker's product name ("OBDLink EX") narrows it to OBDLink's cables
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6015", ATTRS{product}=="OBDLink*", TAG+="uaccess"
+
 # COBB (vendor 1a84): AccessPORT 2.0/2.0B and the AccessPORT's USB-OBD cables, on raw USB (COBB's own macOS program uses libusb)
 SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="1a84", TAG+="uaccess"
 
