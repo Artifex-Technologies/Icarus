@@ -203,7 +203,11 @@ pub fn track(s: &Series) -> Option<Vec<(f64, f64, Option<f64>)>> {
 /// (a Bluetooth adapter takes one connection), so nothing else should try for it meanwhile.
 pub fn recording_now() -> Option<PathBuf> {
     let newest = list(&folders()).into_iter().next()?;
-    let age = std::fs::metadata(&newest).and_then(|m| m.modified()).ok()?.elapsed().ok()?;
+    let age = std::fs::metadata(&newest)
+        .and_then(|m| m.modified())
+        .ok()?
+        .elapsed()
+        .ok()?;
     (age < std::time::Duration::from_secs(5)).then_some(newest)
 }
 

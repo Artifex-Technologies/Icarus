@@ -14,13 +14,22 @@ use yggdrasil_ui::theme;
 /// The values read every sweep while recording a drive, when the vehicle offers them: what fuel trims, timing, air flow,
 /// the throttle and the mixture are read from. Engine speed comes first: a row is written each time it comes round.
 pub const DRIVE_FAST: &[u8] = &[
-    0x0C, 0x0D, 0x04, 0x06, 0x07, 0x08, 0x09, 0x0E, 0x10, 0x11, 0x49, 0x15, 0x19, 0x44, 0x24, 0x28, 0x34, 0x38,
+    0x0C, 0x0D, 0x04, 0x06, 0x07, 0x08, 0x09, 0x0E, 0x10, 0x11, 0x49, 0x15, 0x19, 0x44, 0x24, 0x28,
+    0x34, 0x38,
 ];
 
 /// A drive's values from what the vehicle offers: (read every sweep, the rest read in turn).
 pub fn drive_set(offered: &[u8]) -> (Vec<u8>, Vec<u8>) {
-    let fast: Vec<u8> = DRIVE_FAST.iter().copied().filter(|p| offered.contains(p)).collect();
-    let rest = offered.iter().copied().filter(|p| !fast.contains(p)).collect();
+    let fast: Vec<u8> = DRIVE_FAST
+        .iter()
+        .copied()
+        .filter(|p| offered.contains(p))
+        .collect();
+    let rest = offered
+        .iter()
+        .copied()
+        .filter(|p| !fast.contains(p))
+        .collect();
     (fast, rest)
 }
 
@@ -33,7 +42,9 @@ pub fn us_units() -> bool {
             .filter_map(|k| std::env::var(k).ok())
             .find(|v| !v.is_empty())
             .unwrap_or_default();
-        ["en_US", "es_US", "en_LR", "my_MM"].iter().any(|p| loc.starts_with(p))
+        ["en_US", "es_US", "en_LR", "my_MM"]
+            .iter()
+            .any(|p| loc.starts_with(p))
     })
 }
 
@@ -55,7 +66,9 @@ pub fn shown(unit: &str, v: f64) -> (f64, &str) {
 
 /// The unit in a recording's column name (`"Vehicle speed [km/h]"`).
 fn unit_of(name: &str) -> &str {
-    name.rsplit_once(" [").map(|(_, u)| u.trim_end_matches(']')).unwrap_or("")
+    name.rsplit_once(" [")
+        .map(|(_, u)| u.trim_end_matches(']'))
+        .unwrap_or("")
 }
 
 /// Recording the live values to a CSV, one row per sweep.
@@ -102,23 +115,50 @@ fn file_name() -> String {
 impl Recorder {
     /// Starts a recording in ~/Documents/Icarus/logs: `fast` read every sweep, `rest` in turn; its first line names the
     /// `adapter` (drivelog::adapter_line).
-    pub fn start(fast: &[u8], rest: &[u8], adapter: &str, gps: Option<&str>) -> Result<Recorder, String> {
+    pub fn start(
+        fast: &[u8],
+        rest: &[u8],
+        adapter: &str,
+        gps: Option<&str>,
+    ) -> Result<Recorder, String> {
         // the receiver first: a source that does not open stops the recording before a file is made
         let gps = gps.map(icarus_obd::gps::Follower::start).transpose()?;
-        let pids: Vec<u8> = fast.iter().chain(rest).copied().filter(|p| j1979::pid(*p).is_some()).collect();
-        let dir = drivelog::folders().into_iter().next().ok_or("no home folder")?;
+        let pids: Vec<u8> = fast
+            .iter()
+            .chain(rest)
+            .copied()
+            .filter(|p| j1979::pid(*p).is_some())
+            .collect();
+        let dir = drivelog::folders()
+            .into_iter()
+            .next()
+            .ok_or("no home folder")?;
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let path = dir.join(file_name());
-        let mut file = std::fs::File::create(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let mut names: Vec<String> =
-            pids.iter().filter_map(|p| j1979::pid(*p)).map(|d| format!("{} [{}]", d.name, d.unit)).collect();
+        let mut file =
+            std::fs::File::create(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut names: Vec<String> = pids
+            .iter()
+            .filter_map(|p| j1979::pid(*p))
+            .map(|d| format!("{} [{}]", d.name, d.unit))
+            .collect();
         if gps.is_some() {
             names.extend(icarus_obd::gps::COLUMNS.iter().map(|c| c.to_string()));
         }
-        writeln!(file, "{}\n{}", drivelog::adapter_line(adapter), drivelog::csv_header(&names))
-            .map_err(|e| e.to_string())?;
+        writeln!(
+            file,
+            "{}\n{}",
+            drivelog::adapter_line(adapter),
+            drivelog::csv_header(&names)
+        )
+        .map_err(|e| e.to_string())?;
         let awake = std::process::Command::new("systemd-inhibit")
-            .args(["--what=sleep:idle:handle-lid-switch", "--who=Icarus", "--why=Recording a drive", "cat"])
+            .args([
+                "--what=sleep:idle:handle-lid-switch",
+                "--who=Icarus",
+                "--why=Recording a drive",
+                "cat",
+            ])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -145,7 +185,8 @@ impl Recorder {
         }
         let t0 = *self.t0.get_or_insert(at);
         if pid == self.pids[0] && !self.row.is_empty() {
-            let mut values: Vec<Option<f64>> = self.pids.iter().map(|p| self.row.get(p).copied()).collect();
+            let mut values: Vec<Option<f64>> =
+                self.pids.iter().map(|p| self.row.get(p).copied()).collect();
             if let Some(g) = &self.gps {
                 values.extend(g.cells());
             }
@@ -215,7 +256,9 @@ impl Logs {
             let newest_before = self.list.first().cloned();
             self.list = drivelog::list(&drivelog::folders());
             // following the newest recording when it was the one shown and a newer one started
-            if self.chosen.is_none() || (self.chosen == newest_before && self.list.first() != newest_before.as_ref()) {
+            if self.chosen.is_none()
+                || (self.chosen == newest_before && self.list.first() != newest_before.as_ref())
+            {
                 self.chosen = self.list.first().cloned();
                 self.loaded = None;
             }
@@ -225,20 +268,37 @@ impl Logs {
                 }
             }
         }
-        let live = self.chosen.as_ref().and_then(|p| changed(p)).and_then(|t| t.elapsed().ok()).is_some_and(|a| a.as_secs() < 5);
+        let live = self
+            .chosen
+            .as_ref()
+            .and_then(|p| changed(p))
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|a| a.as_secs() < 5);
         if live {
             ui.ctx().request_repaint_after(tick);
         }
         ui.horizontal(|ui| {
             ui.label("Recording");
-            let name = |p: &PathBuf| p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+            let name = |p: &PathBuf| {
+                p.file_name()
+                    .map(|f| f.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            };
             let mut pick = None;
             egui::ComboBox::from_id_salt("log-pick")
                 .width(320.0)
-                .selected_text(self.chosen.as_ref().map(name).unwrap_or_else(|| "none yet".into()))
+                .selected_text(
+                    self.chosen
+                        .as_ref()
+                        .map(name)
+                        .unwrap_or_else(|| "none yet".into()),
+                )
                 .show_ui(ui, |ui| {
                     for p in &self.list {
-                        if ui.selectable_label(Some(p) == self.chosen.as_ref(), name(p)).clicked() {
+                        if ui
+                            .selectable_label(Some(p) == self.chosen.as_ref(), name(p))
+                            .clicked()
+                        {
                             pick = Some(p.clone());
                         }
                     }
@@ -257,32 +317,46 @@ impl Logs {
             }
         });
         if self.list.is_empty() {
-            ui.label(RichText::new("No recordings yet: Live data > Record, or icarus obd live ... --csv FILE.").color(pal.dim));
+            ui.label(
+                RichText::new(
+                    "No recordings yet: Live data > Record, or icarus obd live ... --csv FILE.",
+                )
+                .color(pal.dim),
+            );
             return;
         }
         self.load();
-        let Some((summary, series)) = &self.loaded else { return };
+        let Some((summary, series)) = &self.loaded else {
+            return;
+        };
         egui::ScrollArea::vertical().id_salt("logs").show(ui, |ui| {
-            egui::Frame::new().inner_margin(egui::Margin { left: 0, right: 18, top: 4, bottom: 8 }).show(ui, |ui| {
-                match summary {
-                    Ok(s) => summary_ui(ui, pal, s),
-                    Err(e) => {
-                        ui.label(RichText::new(format!("No summary: {e}")).color(pal.dim));
+            egui::Frame::new()
+                .inner_margin(egui::Margin {
+                    left: 0,
+                    right: 18,
+                    top: 4,
+                    bottom: 8,
+                })
+                .show(ui, |ui| {
+                    match summary {
+                        Ok(s) => summary_ui(ui, pal, s),
+                        Err(e) => {
+                            ui.label(RichText::new(format!("No summary: {e}")).color(pal.dim));
+                        }
                     }
-                }
-                ui.add_space(10.0);
-                match series {
-                    Ok(s) => {
-                        charts(ui, pal, s, &mut self.hover);
-                        ui.add_space(10.0);
-                        grid_ui(ui, pal, s, &mut self.grid_value);
-                        track_ui(ui, pal, s);
+                    ui.add_space(10.0);
+                    match series {
+                        Ok(s) => {
+                            charts(ui, pal, s, &mut self.hover);
+                            ui.add_space(10.0);
+                            grid_ui(ui, pal, s, &mut self.grid_value);
+                            track_ui(ui, pal, s);
+                        }
+                        Err(e) => {
+                            ui.label(RichText::new(format!("Nothing to draw: {e}")).color(pal.red));
+                        }
                     }
-                    Err(e) => {
-                        ui.label(RichText::new(format!("Nothing to draw: {e}")).color(pal.red));
-                    }
-                }
-            });
+                });
         });
     }
 }
@@ -295,7 +369,11 @@ fn heat(x: f64) -> Color32 {
     } else {
         ((x - 0.5) * 2.0, 1.0 - (x - 0.5) * 2.0, 0.0)
     };
-    Color32::from_rgb((60.0 + 180.0 * r) as u8, (60.0 + 160.0 * g) as u8, (60.0 + 180.0 * b) as u8)
+    Color32::from_rgb(
+        (60.0 + 180.0 * r) as u8,
+        (60.0 + 160.0 * g) as u8,
+        (60.0 + 180.0 * b) as u8,
+    )
 }
 
 /// A value over engine speed and load (drivelog::grid): a tuner's table, each cell coloured by its mean.
@@ -309,8 +387,13 @@ fn grid_ui(ui: &mut egui::Ui, pal: &theme::Palette, s: &Series, choice: &mut Opt
             !n.contains("engine speed") && !n.contains("engine load") && !n.starts_with("gps")
         })
         .collect();
-    let default = s.find(&["short-term fuel trim", "bank 1"]).or(s.find(&["timing advance"])).or(options.first().copied());
-    let Some(mut col) = choice.or(default) else { return };
+    let default = s
+        .find(&["short-term fuel trim", "bank 1"])
+        .or(s.find(&["timing advance"]))
+        .or(options.first().copied());
+    let Some(mut col) = choice.or(default) else {
+        return;
+    };
     ui.label(RichText::new("Over engine speed and load").strong());
     egui::ComboBox::from_id_salt("grid-value")
         .selected_text(&s.names[col])
@@ -327,7 +410,10 @@ fn grid_ui(ui: &mut egui::Ui, pal: &theme::Palette, s: &Series, choice: &mut Opt
     let cw = ((ui.available_width() - 60.0) / g.rpm.len().max(1) as f32).clamp(28.0, 70.0);
     let ch = 20.0;
     let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(60.0 + cw * g.rpm.len() as f32, ch * (g.load.len() + 1) as f32),
+        egui::vec2(
+            60.0 + cw * g.rpm.len() as f32,
+            ch * (g.load.len() + 1) as f32,
+        ),
         egui::Sense::hover(),
     );
     let p = ui.painter_at(rect);
@@ -339,21 +425,37 @@ fn grid_ui(ui: &mut egui::Ui, pal: &theme::Palette, s: &Series, choice: &mut Opt
         p.text(
             egui::pos2(rect.left() + 2.0, y + ch / 2.0),
             egui::Align2::LEFT_CENTER,
-            format!("{:.0}-{:.0} %", g.load[row], g.load[row] + drivelog::LOAD_STEP),
+            format!(
+                "{:.0}-{:.0} %",
+                g.load[row],
+                g.load[row] + drivelog::LOAD_STEP
+            ),
             font.clone(),
             pal.dim,
         );
         for (c, cell) in cells.iter().enumerate() {
-            let r = egui::Rect::from_min_size(egui::pos2(rect.left() + 60.0 + cw * c as f32, y), egui::vec2(cw - 1.0, ch - 1.0));
+            let r = egui::Rect::from_min_size(
+                egui::pos2(rect.left() + 60.0 + cw * c as f32, y),
+                egui::vec2(cw - 1.0, ch - 1.0),
+            );
             if let Some((m, _)) = cell {
                 p.rect_filled(r, 2.0, heat((m - g.min) / span));
-                p.text(r.center(), egui::Align2::CENTER_CENTER, format!("{m:.1}"), font.clone(), Color32::BLACK);
+                p.text(
+                    r.center(),
+                    egui::Align2::CENTER_CENTER,
+                    format!("{m:.1}"),
+                    font.clone(),
+                    Color32::BLACK,
+                );
             }
         }
     }
     for (c, lo) in g.rpm.iter().enumerate() {
         p.text(
-            egui::pos2(rect.left() + 60.0 + cw * (c as f32 + 0.5), rect.bottom() - ch / 2.0),
+            egui::pos2(
+                rect.left() + 60.0 + cw * (c as f32 + 0.5),
+                rect.bottom() - ch / 2.0,
+            ),
             egui::Align2::CENTER_CENTER,
             format!("{:.0}", lo),
             font.clone(),
@@ -375,48 +477,83 @@ fn track_ui(ui: &mut egui::Ui, pal: &theme::Palette, s: &Series) {
     let size = egui::vec2(ui.available_width().min(520.0), 260.0);
     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
     let p = ui.painter_at(rect);
-    p.rect_stroke(rect, 4.0, egui::Stroke::new(1.0, pal.dim), egui::StrokeKind::Inside);
+    p.rect_stroke(
+        rect,
+        4.0,
+        egui::Stroke::new(1.0, pal.dim),
+        egui::StrokeKind::Inside,
+    );
     let scale = ((size.x as f64 - 20.0) / w).min((size.y as f64 - 20.0) / h);
-    let at = |x: f64, y: f64| egui::pos2(rect.left() + 10.0 + (x * scale) as f32, rect.bottom() - 10.0 - (y * scale) as f32);
+    let at = |x: f64, y: f64| {
+        egui::pos2(
+            rect.left() + 10.0 + (x * scale) as f32,
+            rect.bottom() - 10.0 - (y * scale) as f32,
+        )
+    };
     let top = t.iter().filter_map(|p| p.2).fold(1.0, f64::max);
     for pair in t.windows(2) {
         let col = pair[1].2.map(|v| heat(v / top)).unwrap_or(pal.dim);
-        p.line_segment([at(pair[0].0, pair[0].1), at(pair[1].0, pair[1].1)], egui::Stroke::new(2.5, col));
+        p.line_segment(
+            [at(pair[0].0, pair[0].1), at(pair[1].0, pair[1].1)],
+            egui::Stroke::new(2.5, col),
+        );
     }
     ui.label(RichText::new(format!("{:.1} km across, {:.1} km north to south; blue slow, red fast (top {top:.0} km/h). The positions stay in this file.", w / 1000.0, h / 1000.0)).small().color(pal.dim));
 }
 
 fn summary_ui(ui: &mut egui::Ui, pal: &theme::Palette, s: &Summary) {
-    let mut line = format!("{} readings over {:.0} minutes", s.readings, s.seconds / 60.0);
+    let mut line = format!(
+        "{} readings over {:.0} minutes",
+        s.readings,
+        s.seconds / 60.0
+    );
     if let Some(k) = s.top_kmh {
         line.push_str(&format!(", top {k:.0} km/h ({:.0} mph)", k * 0.621371));
     }
     if let Some((lo, hi)) = s.coolant_c {
-        line.push_str(&format!(", coolant {lo:.0}-{hi:.0} °C ({:.0}-{:.0} °F)", lo * 1.8 + 32.0, hi * 1.8 + 32.0));
+        line.push_str(&format!(
+            ", coolant {lo:.0}-{hi:.0} °C ({:.0}-{:.0} °F)",
+            lo * 1.8 + 32.0,
+            hi * 1.8 + 32.0
+        ));
     }
     if let Some((lo, hi)) = s.volts {
         line.push_str(&format!(", {lo:.2}-{hi:.2} V"));
     }
     ui.label(RichText::new(line).color(pal.dim));
     ui.add_space(6.0);
-    let pct = |v: Option<f64>| v.map(|x| format!("{x:+.1} %")).unwrap_or_else(|| "-".into());
+    let pct = |v: Option<f64>| {
+        v.map(|x| format!("{x:+.1} %"))
+            .unwrap_or_else(|| "-".into())
+    };
     let v = |v: Option<f64>| v.map(|x| format!("{x:.2} V")).unwrap_or_else(|| "-".into());
-    egui::Grid::new("log-bands").striped(true).spacing([18.0, 6.0]).show(ui, |ui| {
-        for h in ["Fuel trims", "Readings", "Bank 1", "Bank 2", "Bank 1 - bank 2", "Rear O2 bank 1", "Rear O2 bank 2"] {
-            ui.label(RichText::new(h).strong());
-        }
-        ui.end_row();
-        for b in &s.bands {
-            ui.label(b.name);
-            ui.label(b.readings.to_string());
-            ui.label(pct(b.bank1));
-            ui.label(pct(b.bank2));
-            ui.label(pct(b.bank1.zip(b.bank2).map(|(a, c)| a - c)));
-            ui.label(v(b.o2_1));
-            ui.label(v(b.o2_2));
+    egui::Grid::new("log-bands")
+        .striped(true)
+        .spacing([18.0, 6.0])
+        .show(ui, |ui| {
+            for h in [
+                "Fuel trims",
+                "Readings",
+                "Bank 1",
+                "Bank 2",
+                "Bank 1 - bank 2",
+                "Rear O2 bank 1",
+                "Rear O2 bank 2",
+            ] {
+                ui.label(RichText::new(h).strong());
+            }
             ui.end_row();
-        }
-    });
+            for b in &s.bands {
+                ui.label(b.name);
+                ui.label(b.readings.to_string());
+                ui.label(pct(b.bank1));
+                ui.label(pct(b.bank2));
+                ui.label(pct(b.bank1.zip(b.bank2).map(|(a, c)| a - c)));
+                ui.label(v(b.o2_1));
+                ui.label(v(b.o2_2));
+                ui.end_row();
+            }
+        });
     ui.label(
         RichText::new(format!(
             "Long-term trims from start to end: bank 1 {} to {}, bank 2 {} to {}. Timing drops under load: {} at the rev limiter or a shift, {} others.",
@@ -434,7 +571,12 @@ fn summary_ui(ui: &mut egui::Ui, pal: &theme::Palette, s: &Summary) {
 
 /// The colours of the lines in one chart, in order.
 fn colors(pal: &theme::Palette) -> [Color32; 4] {
-    [pal.accent, Color32::from_rgb(236, 152, 64), pal.green, Color32::from_rgb(90, 160, 236)]
+    [
+        pal.accent,
+        Color32::from_rgb(236, 152, 64),
+        pal.green,
+        Color32::from_rgb(90, 160, 236),
+    ]
 }
 
 /// The charts, top to bottom: (title, the columns by the words in their names, a zero line). A chart shows only the
@@ -442,25 +584,69 @@ fn colors(pal: &theme::Palette) -> [Color32; 4] {
 const CHARTS: &[(&str, &[&[&str]], bool)] = &[
     (
         "Fuel trims",
-        &[&["short-term", "bank 1"], &["long-term", "bank 1"], &["short-term", "bank 2"], &["long-term", "bank 2"]],
+        &[
+            &["short-term", "bank 1"],
+            &["long-term", "bank 1"],
+            &["short-term", "bank 2"],
+            &["long-term", "bank 2"],
+        ],
         true,
     ),
     (
         "Air/fuel: aimed for, and measured by each bank's front sensor",
-        &[&["commanded lambda"], &["wide-band", "bank 1"], &["wide-band", "bank 2"]],
+        &[
+            &["commanded lambda"],
+            &["wide-band", "bank 1"],
+            &["wide-band", "bank 2"],
+        ],
         false,
     ),
     ("Engine speed", &[&["engine speed"]], false),
     ("Speed", &[&["vehicle speed"]], false),
-    ("Pedal and throttle", &[&["accelerator pedal"], &["throttle position"], &["commanded throttle"]], false),
+    (
+        "Pedal and throttle",
+        &[
+            &["accelerator pedal"],
+            &["throttle position"],
+            &["commanded throttle"],
+        ],
+        false,
+    ),
     ("Load", &[&["engine load"], &["absolute load"]], false),
     ("Timing", &[&["timing advance"]], false),
     ("Air flow", &[&["mass air flow"]], false),
-    ("Rear oxygen sensors", &[&["o2 sensor", "bank 1 sensor 2"], &["o2 sensor", "bank 2 sensor 2"]], false),
-    ("Temperatures", &[&["coolant"], &["intake air"], &["ambient"], &["oil temperature"]], false),
-    ("Catalysts", &[&["catalyst", "bank 1 sensor 1"], &["catalyst", "bank 2 sensor 1"]], false),
+    (
+        "Rear oxygen sensors",
+        &[
+            &["o2 sensor", "bank 1 sensor 2"],
+            &["o2 sensor", "bank 2 sensor 2"],
+        ],
+        false,
+    ),
+    (
+        "Temperatures",
+        &[
+            &["coolant"],
+            &["intake air"],
+            &["ambient"],
+            &["oil temperature"],
+        ],
+        false,
+    ),
+    (
+        "Catalysts",
+        &[
+            &["catalyst", "bank 1 sensor 1"],
+            &["catalyst", "bank 2 sensor 1"],
+        ],
+        false,
+    ),
     ("Fuel rail pressure", &[&["fuel rail"]], false),
-    ("Engine torque", &[&["demand torque"], &["actual engine torque"]], false),
+    (
+        "Engine torque",
+        &[&["demand torque"], &["actual engine torque"]],
+        false,
+    ),
     ("Fuel used", &[&["fuel rate"]], false),
     ("Battery and charging", &[&["module voltage"]], false),
     ("Fuel level", &[&["fuel level"]], false),
@@ -480,16 +666,32 @@ fn charts(ui: &mut egui::Ui, pal: &theme::Palette, s: &Series, hover: &mut Optio
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(format!("{title} ({})", shown(unit, 0.0).1)).strong());
             for (k, &i) in idx.iter().enumerate() {
-                let short = s.names[i].split(" [").next().unwrap_or("").replace("fuel trim, ", "");
-                let at = hover.and_then(|h| value_at(s, i, h)).map(|v| format!(" {:.2}", conv(v))).unwrap_or_default();
-                ui.label(RichText::new(format!("● {short}{at}")).color(colors(pal)[k % 4]).small());
+                let short = s.names[i]
+                    .split(" [")
+                    .next()
+                    .unwrap_or("")
+                    .replace("fuel trim, ", "");
+                let at = hover
+                    .and_then(|h| value_at(s, i, h))
+                    .map(|v| format!(" {:.2}", conv(v)))
+                    .unwrap_or_default();
+                ui.label(
+                    RichText::new(format!("● {short}{at}"))
+                        .color(colors(pal)[k % 4])
+                        .small(),
+                );
             }
         });
-        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 120.0), Sense::hover());
+        let (rect, resp) =
+            ui.allocate_exact_size(vec2(ui.available_width(), 120.0), Sense::hover());
         let p = ui.painter_at(rect);
         p.rect_filled(rect, CornerRadius::same(4), pal.field);
-        let vals = idx.iter().flat_map(|&i| s.cols[i].iter().flatten().map(|v| conv(*v)));
-        let (mut lo, mut hi) = vals.fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), v| (a.min(v), b.max(v)));
+        let vals = idx
+            .iter()
+            .flat_map(|&i| s.cols[i].iter().flatten().map(|v| conv(*v)));
+        let (mut lo, mut hi) = vals.fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), v| {
+            (a.min(v), b.max(v))
+        });
         if *zero {
             lo = lo.min(0.0);
             hi = hi.max(0.0);
@@ -501,7 +703,13 @@ fn charts(ui: &mut egui::Ui, pal: &theme::Palette, s: &Series, hover: &mut Optio
         let x = |t: f64| rect.left() + ((t - t0) / (t1 - t0).max(1e-9)) as f32 * rect.width();
         let y = |v: f64| rect.bottom() - 6.0 - ((v - lo) / span) as f32 * (rect.height() - 12.0);
         if *zero && lo < 0.0 && hi > 0.0 {
-            p.line_segment([egui::pos2(rect.left(), y(0.0)), egui::pos2(rect.right(), y(0.0))], Stroke::new(1.0, pal.border));
+            p.line_segment(
+                [
+                    egui::pos2(rect.left(), y(0.0)),
+                    egui::pos2(rect.right(), y(0.0)),
+                ],
+                Stroke::new(1.0, pal.border),
+            );
         }
         for (k, &i) in idx.iter().enumerate() {
             // one line through the values read (a value read in turn is there every few seconds), broken where none came for
@@ -530,14 +738,29 @@ fn charts(ui: &mut egui::Ui, pal: &theme::Palette, s: &Series, hover: &mut Optio
                 }
             }
         }
-        p.text(rect.left_top() + vec2(4.0, 2.0), egui::Align2::LEFT_TOP, format!("{hi:.1}"), egui::FontId::proportional(10.0), pal.dim);
-        p.text(rect.left_bottom() + vec2(4.0, -2.0), egui::Align2::LEFT_BOTTOM, format!("{lo:.1}"), egui::FontId::proportional(10.0), pal.dim);
+        p.text(
+            rect.left_top() + vec2(4.0, 2.0),
+            egui::Align2::LEFT_TOP,
+            format!("{hi:.1}"),
+            egui::FontId::proportional(10.0),
+            pal.dim,
+        );
+        p.text(
+            rect.left_bottom() + vec2(4.0, -2.0),
+            egui::Align2::LEFT_BOTTOM,
+            format!("{lo:.1}"),
+            egui::FontId::proportional(10.0),
+            pal.dim,
+        );
         if let Some(pos) = resp.hover_pos() {
             new_hover = Some(t0 + ((pos.x - rect.left()) / rect.width()) as f64 * (t1 - t0));
         }
         if let Some(h) = *hover {
             let hx = x(h);
-            p.line_segment([egui::pos2(hx, rect.top()), egui::pos2(hx, rect.bottom())], Stroke::new(1.0, pal.dim));
+            p.line_segment(
+                [egui::pos2(hx, rect.top()), egui::pos2(hx, rect.bottom())],
+                Stroke::new(1.0, pal.dim),
+            );
         }
         ui.add_space(8.0);
     }
@@ -545,17 +768,23 @@ fn charts(ui: &mut egui::Ui, pal: &theme::Palette, s: &Series, hover: &mut Optio
     ui.label(
         RichText::new(match hover {
             Some(h) => format!("{:.1} of {minutes:.1} minutes", (*h - t0) / 60.0),
-            None => format!("{minutes:.1} minutes: point at a chart to read every chart at that moment"),
+            None => {
+                format!("{minutes:.1} minutes: point at a chart to read every chart at that moment")
+            }
         })
         .small()
         .color(pal.dim),
     );
-    *hover = new_hover.or(*hover).filter(|_| new_hover.is_some() || ui.ui_contains_pointer());
+    *hover = new_hover
+        .or(*hover)
+        .filter(|_| new_hover.is_some() || ui.ui_contains_pointer());
 }
 
 /// The value of column `i` at the reading nearest to time `t`.
 fn value_at(s: &Series, i: usize, t: f64) -> Option<f64> {
-    let k = s.t.partition_point(|x| *x < t).min(s.t.len().saturating_sub(1));
+    let k =
+        s.t.partition_point(|x| *x < t)
+            .min(s.t.len().saturating_sub(1));
     s.cols[i].get(k).copied().flatten()
 }
 
@@ -589,11 +818,19 @@ mod tests {
         drop(r);
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(text, "0.50,650.00,-1.50\n1.00,660.00,0.80\n");
-        let s = Series { t: vec![0.0, 1.0, 2.0], names: vec!["a".into()], cols: vec![vec![Some(1.0), None, Some(3.0)]] };
+        let s = Series {
+            t: vec![0.0, 1.0, 2.0],
+            names: vec!["a".into()],
+            cols: vec![vec![Some(1.0), None, Some(3.0)]],
+        };
         assert_eq!(value_at(&s, 0, 1.9), Some(3.0));
         assert_eq!(value_at(&s, 0, 0.4), None);
         let (fast, rest) = drive_set(&[0x05, 0x06, 0x0C, 0x2F, 0x34]);
-        assert_eq!((fast, rest), (vec![0x0C, 0x06, 0x34], vec![0x05, 0x2F]), "engine speed first, the rest in turn");
+        assert_eq!(
+            (fast, rest),
+            (vec![0x0C, 0x06, 0x34], vec![0x05, 0x2F]),
+            "engine speed first, the rest in turn"
+        );
         assert_eq!(unit_of("Vehicle speed [km/h]"), "km/h");
         std::fs::remove_dir_all(&dir).unwrap();
     }

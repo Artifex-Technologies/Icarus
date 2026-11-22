@@ -62,7 +62,11 @@ pub fn explain(code: &str, profile: Option<&Profile>) -> Result<CodeInfo, String
         _ => "hybrid propulsion",
     });
     let from_profile = profile.and_then(|p| p.codes.get(&c).map(|t| (t.clone(), p.name.clone())));
-    let detail = if standard { crate::obdex::get(&c) } else { None };
+    let detail = if standard {
+        crate::obdex::get(&c)
+    } else {
+        None
+    };
     let (text, source) = match from_profile {
         Some((t, src)) => (Some(t), src),
         None if standard => match standard_text(&c) {
@@ -90,7 +94,9 @@ pub fn explain(code: &str, profile: Option<&Profile>) -> Result<CodeInfo, String
 /// "Sources"),
 /// then the credit; empty when OBDex does not have the code.
 pub fn depth(i: &CodeInfo) -> Vec<(&'static str, String)> {
-    let Some(d) = &i.detail else { return Vec::new() };
+    let Some(d) = &i.detail else {
+        return Vec::new();
+    };
     let mut v = vec![
         ("What is checked", d.about.clone()),
         ("Causes", d.causes_text()),
@@ -688,7 +694,10 @@ mod tests {
         let p0999 = explain("P0999", None).unwrap();
         assert_eq!(
             (p0999.text.as_deref(), p0999.source.as_str()),
-            (Some("Shift Solenoid F Control Circuit High"), crate::obdex::CREDIT),
+            (
+                Some("Shift Solenoid F Control Circuit High"),
+                crate::obdex::CREDIT
+            ),
             "a standard code Icarus has no words of its own for: OBDex's title"
         );
         assert!(depth(&p0999).iter().any(|(l, _)| *l == "What is checked"));

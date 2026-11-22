@@ -551,7 +551,11 @@ impl App {
     /// While a known adapter does not answer (asleep with the engine off), try again every few seconds.
     /// What is polled: the chosen values, and while recording the recording's too (its rest in turn).
     fn send_live(&self) {
-        let mut fast: Vec<u8> = self.recorder.as_ref().map(|r| r.fast.clone()).unwrap_or_default();
+        let mut fast: Vec<u8> = self
+            .recorder
+            .as_ref()
+            .map(|r| r.fast.clone())
+            .unwrap_or_default();
         for p in &self.chosen {
             if !fast.contains(p) {
                 fast.push(*p);
@@ -559,7 +563,12 @@ impl App {
         }
         let _ = self.tx.send(Cmd::Live(fast));
         if let Some(r) = &self.recorder {
-            let rest: Vec<u8> = r.rest.iter().copied().filter(|p| !self.chosen.contains(p)).collect();
+            let rest: Vec<u8> = r
+                .rest
+                .iter()
+                .copied()
+                .filter(|p| !self.chosen.contains(p))
+                .collect();
             let _ = self.tx.send(Cmd::LiveRotate(rest));
         }
     }
@@ -571,13 +580,17 @@ impl App {
             return;
         };
         let (fast, rest) = logs::drive_set(&info.live);
-        let gps = (self.record_gps && !self.gps_src.trim().is_empty()).then(|| self.gps_src.trim().to_string());
+        let gps = (self.record_gps && !self.gps_src.trim().is_empty())
+            .then(|| self.gps_src.trim().to_string());
         match logs::Recorder::start(&fast, &rest, &info.adapter, gps.as_deref()) {
             Ok(r) => {
                 self.status = format!(
                     "Recording {} values to {} (the Logs page shows it as it comes in).",
                     fast.len() + rest.len(),
-                    r.path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()
+                    r.path
+                        .file_name()
+                        .map(|f| f.to_string_lossy().into_owned())
+                        .unwrap_or_default()
                 );
                 self.recorder = Some(r);
                 self.live_on = true;
@@ -589,7 +602,11 @@ impl App {
 
     fn stop_recording(&mut self) {
         if let Some(r) = self.recorder.take() {
-            self.status = format!("Saved {} rows to {} (see the Logs page).", r.rows, r.path.display());
+            self.status = format!(
+                "Saved {} rows to {} (see the Logs page).",
+                r.rows,
+                r.path.display()
+            );
             if self.live_on {
                 self.send_live();
             }
@@ -604,7 +621,10 @@ impl App {
             self.last_try = std::time::Instant::now();
             // a recording in the background has the adapter: show it (Logs follows it) rather than try for the adapter
             if let Some(p) = logs::recording_now().filter(|_| self.recorder.is_none()) {
-                let name = p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+                let name = p
+                    .file_name()
+                    .map(|f| f.to_string_lossy().into_owned())
+                    .unwrap_or_default();
                 self.status = format!("The adapter is recording in the background ({name}): the Logs page shows it as it comes in.");
                 return;
             }
@@ -1119,10 +1139,23 @@ impl App {
                 );
             }
             Ok(h) => {
-                ui.label(RichText::new("When each code came and went, from every reading of this vehicle's codes.").weak());
+                ui.label(
+                    RichText::new(
+                        "When each code came and went, from every reading of this vehicle's codes.",
+                    )
+                    .weak(),
+                );
                 for sp in h {
                     ui.horizontal_wrapped(|ui| {
-                        dot(ui, if sp.gone.is_none() { pal.amber } else { pal.green }, sp.gone.is_none());
+                        dot(
+                            ui,
+                            if sp.gone.is_none() {
+                                pal.amber
+                            } else {
+                                pal.green
+                            },
+                            sp.gone.is_none(),
+                        );
                         ui.label(icarus_obd::history::describe(sp));
                     });
                 }
@@ -1678,8 +1711,10 @@ impl App {
                             if let (0x0D, Some((_, f)), Some(v)) = (*p, &self.tires, last) {
                                 let (x, unit) = logs::shown(d.unit, v * f);
                                 ui.label(
-                                    RichText::new(format!("{x:.1} {unit} corrected for the tires (x{f:.3})"))
-                                        .color(pal.accent),
+                                    RichText::new(format!(
+                                        "{x:.1} {unit} corrected for the tires (x{f:.3})"
+                                    ))
+                                    .color(pal.accent),
                                 );
                             }
                             if let Some(h) = h {
@@ -1714,7 +1749,11 @@ impl App {
                                 s.module,
                                 s.routine,
                                 if s.wired { ", cable only" } else { "" },
-                                if s.checked { "" } else { ", not yet checked on a vehicle" }
+                                if s.checked {
+                                    ""
+                                } else {
+                                    ", not yet checked on a vehicle"
+                                }
                             ))
                             .small()
                             .weak(),
@@ -2582,7 +2621,8 @@ impl App {
                     Ok(()) => {
                         self.read_only = icarus_obd::lock::read_only();
                         self.status = if kind == "lock" {
-                            "Read-Only on: nothing on this vehicle is cleared, tested or changed.".into()
+                            "Read-Only on: nothing on this vehicle is cleared, tested or changed."
+                                .into()
                         } else {
                             "Read-Only off.".into()
                         };
@@ -2689,7 +2729,13 @@ impl App {
                             "This vehicle measures speed at the transmission output (a regear counts too)",
                         );
                         ui.horizontal(|ui| {
-                            if ui.button("Save for this vehicle").on_hover_text("Live data then shows its speed corrected for these tires").clicked() {
+                            if ui
+                                .button("Save for this vehicle")
+                                .on_hover_text(
+                                    "Live data then shows its speed corrected for these tires",
+                                )
+                                .clicked()
+                            {
                                 let t = icarus_obd::garage::TireSetting {
                                     stock: self.t_stock.trim().to_string(),
                                     installed: self.t_new.trim().to_string(),
@@ -2698,7 +2744,11 @@ impl App {
                                     installed_ratio: installed,
                                 };
                                 match icarus_obd::garage::set_tires(&vin, Some(t)) {
-                                    Ok(()) => self.status = "Tires saved: Live data shows the corrected speed.".into(),
+                                    Ok(()) => {
+                                        self.status =
+                                            "Tires saved: Live data shows the corrected speed."
+                                                .into()
+                                    }
                                     Err(e) => self.error = Some(e),
                                 }
                                 self.refresh_tires();
@@ -2709,8 +2759,11 @@ impl App {
                             }
                             if let Some((t, f)) = &self.tires {
                                 ui.label(
-                                    RichText::new(format!("saved: {} on stock {}, speed x{f:.3}", t.installed, t.stock))
-                                        .weak(),
+                                    RichText::new(format!(
+                                        "saved: {} on stock {}, speed x{f:.3}",
+                                        t.installed, t.stock
+                                    ))
+                                    .weak(),
                                 );
                             }
                         });
@@ -2766,7 +2819,10 @@ impl App {
                         .desired_width(220.0),
                 );
                 if ui
-                    .add_enabled(!self.gps_busy && !self.gps_src.trim().is_empty(), egui::Button::new("Listen 10 s"))
+                    .add_enabled(
+                        !self.gps_busy && !self.gps_src.trim().is_empty(),
+                        egui::Button::new("Listen 10 s"),
+                    )
                     .clicked()
                 {
                     listen = true;
@@ -2781,7 +2837,10 @@ impl App {
             ui.add_space(4.0);
             ui.label(RichText::new(fx.summary()).strong());
             let us = icarus_core::moddata::units::us_customary();
-            let speed = fx.speed_kmh.filter(|_| fx.valid).map(|k| if us { k / 1.609_344 } else { k });
+            let speed = fx
+                .speed_kmh
+                .filter(|_| fx.valid)
+                .map(|k| if us { k / 1.609_344 } else { k });
             if let Some(v) = speed {
                 ui.horizontal(|ui| {
                     ui.label(format!("Speed {v:.1} {}", if us { "mph" } else { "km/h" }));
@@ -2791,27 +2850,36 @@ impl App {
                 });
             }
             let (heard, _) = fx.heard();
-            ui.label(format!("Satellites in view: {} ({heard} with a signal)", fx.sats.len()));
+            ui.label(format!(
+                "Satellites in view: {} ({heard} with a signal)",
+                fx.sats.len()
+            ));
             let mut sats: Vec<_> = fx.sats.values().collect();
             sats.sort_by(|a, b| b.snr.cmp(&a.snr).then(a.prn.cmp(&b.prn)));
-            egui::Grid::new("gps-sats").num_columns(3).spacing(vec2(10.0, 2.0)).show(ui, |ui| {
-                for s in sats {
-                    ui.label(RichText::new(format!("{} {}", s.system, s.prn)).small());
-                    let snr = s.snr.unwrap_or(0);
-                    let col = match snr {
-                        0 => pal.dim,
-                        1..=24 => pal.amber,
-                        _ => pal.accent,
-                    };
-                    ui.add(
-                        egui::ProgressBar::new(snr as f32 / 50.0)
-                            .desired_width(160.0)
-                            .fill(col),
-                    );
-                    ui.label(RichText::new(s.snr.map_or("none".into(), |n| format!("{n} dB-Hz"))).small());
-                    ui.end_row();
-                }
-            });
+            egui::Grid::new("gps-sats")
+                .num_columns(3)
+                .spacing(vec2(10.0, 2.0))
+                .show(ui, |ui| {
+                    for s in sats {
+                        ui.label(RichText::new(format!("{} {}", s.system, s.prn)).small());
+                        let snr = s.snr.unwrap_or(0);
+                        let col = match snr {
+                            0 => pal.dim,
+                            1..=24 => pal.amber,
+                            _ => pal.accent,
+                        };
+                        ui.add(
+                            egui::ProgressBar::new(snr as f32 / 50.0)
+                                .desired_width(160.0)
+                                .fill(col),
+                        );
+                        ui.label(
+                            RichText::new(s.snr.map_or("none".into(), |n| format!("{n} dB-Hz")))
+                                .small(),
+                        );
+                        ui.end_row();
+                    }
+                });
             for d in fx.diagnose(*secs) {
                 ui.label(d);
             }
@@ -2848,7 +2916,9 @@ impl App {
                 Some(std::fs::read(cmp_path).map_err(|e| format!("second image: {e}"))?)
             };
             let changed = match &cmp {
-                Some(c) if c.len() != bin.len() => return Err("the two images differ in size".into()),
+                Some(c) if c.len() != bin.len() => {
+                    return Err("the two images differ in size".into())
+                }
                 Some(c) => changed_elements(&p.definition, &bin, c),
                 None => vec![false; p.definition.elements.len()],
             };
@@ -2859,11 +2929,7 @@ impl App {
                 if p.skipped.is_empty() {
                     String::new()
                 } else {
-                    format!(
-                        ", {} left out (first: {})",
-                        p.skipped.len(),
-                        p.skipped[0]
-                    )
+                    format!(", {} left out (first: {})", p.skipped.len(), p.skipped[0])
                 },
                 if cmp.is_some() {
                     format!("; {n} changed in the second image")
@@ -2902,10 +2968,7 @@ impl App {
             m.save_note.clear();
             m.cell = None;
             m.versions = icarus_core::version::list(std::path::Path::new(m.bin_path.trim()), &bin);
-            m.version_shown = m
-                .versions
-                .iter()
-                .position(|(p, _)| p.as_path() == cmp_path);
+            m.version_shown = m.versions.iter().position(|(p, _)| p.as_path() == cmp_path);
             m.version_msg.clear();
             m.def = Some(p.definition);
             m.rom = Some(Rom::new(bin));
@@ -2936,7 +2999,9 @@ impl App {
                 ui.label("Compare with");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.maps.cmp_path)
-                        .hint_text("optional: a modified image or a .version.toml, to see what it changed")
+                        .hint_text(
+                            "optional: a modified image or a .version.toml, to see what it changed",
+                        )
                         .desired_width(520.0),
                 );
                 ui.end_row();
@@ -3031,7 +3096,11 @@ impl App {
                     "{} byte(s) changed in {} place(s){}",
                     v.changed_bytes(),
                     v.changes.len(),
-                    if v.note.is_empty() { String::new() } else { format!(": {}", v.note) }
+                    if v.note.is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {}", v.note)
+                    }
                 );
                 if ui
                     .selectable_label(*version_shown == Some(k), v.name.as_str())
@@ -3044,7 +3113,9 @@ impl App {
             if let Some(k) = *version_shown {
                 if ui
                     .button("Edit from it")
-                    .on_hover_text("Its changes become the edits, to go on from; stock stays as it is")
+                    .on_hover_text(
+                        "Its changes become the edits, to go on from; stock stays as it is",
+                    )
                     .clicked()
                 {
                     vact = Some(VersionAct::Edit(k));
@@ -3297,7 +3368,13 @@ fn version_act(m: &mut Maps, a: VersionAct) -> Result<String, String> {
             ))
         }
         VersionAct::Save => {
-            let (p, v) = icarus_core::version::save_edits(rom, Some(def), &image, version_name, version_note)?;
+            let (p, v) = icarus_core::version::save_edits(
+                rom,
+                Some(def),
+                &image,
+                version_name,
+                version_note,
+            )?;
             *versions = icarus_core::version::list(&image, rom.original());
             *version_shown = versions
                 .iter()
@@ -3958,13 +4035,21 @@ impl eframe::App for App {
             let mut cancel = false;
             let resp = egui::Modal::new(egui::Id::new("confirm-service")).show(&ctx, |ui| {
                 ui.set_max_width(460.0);
-                ui.label(RichText::new(format!("Run {}?", def.name)).size(17.0).strong());
+                ui.label(
+                    RichText::new(format!("Run {}?", def.name))
+                        .size(17.0)
+                        .strong(),
+                );
                 ui.add_space(6.0);
                 ui.label(format!(
                     "Routine {:04X} in module {:03X}{}.",
                     def.routine,
                     def.module,
-                    if def.checked { "" } else { ", not yet checked on a vehicle" }
+                    if def.checked {
+                        ""
+                    } else {
+                        ", not yet checked on a vehicle"
+                    }
                 ));
                 if !def.warning.is_empty() {
                     ui.label(&def.warning);
@@ -3973,7 +4058,11 @@ impl eframe::App for App {
                     ui.label(
                         RichText::new(format!(
                             "Needs: {}.",
-                            def.conditions.iter().map(|c| c.describe()).collect::<Vec<_>>().join(", ")
+                            def.conditions
+                                .iter()
+                                .map(|c| c.describe())
+                                .collect::<Vec<_>>()
+                                .join(", ")
                         ))
                         .weak(),
                     );
@@ -3981,7 +4070,10 @@ impl eframe::App for App {
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     if ui
-                        .add(egui::Button::new(RichText::new("Run").color(pal.on_accent())).fill(pal.red))
+                        .add(
+                            egui::Button::new(RichText::new("Run").color(pal.on_accent()))
+                                .fill(pal.red),
+                        )
                         .clicked()
                     {
                         go = true;

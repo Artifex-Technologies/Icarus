@@ -106,7 +106,11 @@ pub fn collect(
         .into_iter()
         .map(|(from, module, ids)| {
             // every CVN from that module (older buses send each in its own message)
-            let cvn = cvns.iter().filter(|c| c.0 == from).flat_map(|c| c.1.iter().cloned()).collect();
+            let cvn = cvns
+                .iter()
+                .filter(|c| c.0 == from)
+                .flat_map(|c| c.1.iter().cloned())
+                .collect();
             (format!("{module} ({from})"), ids, cvn)
         })
         .collect();
@@ -241,7 +245,11 @@ pub fn markdown(d: &Diagnosis) -> String {
         let _ = writeln!(o, "| Fuel system | {f} |");
     }
     for (module, ids, cvn) in &d.calibrations {
-        let cvn = if cvn.is_empty() { String::new() } else { format!(" (CVN {})", cvn.join(", ")) };
+        let cvn = if cvn.is_empty() {
+            String::new()
+        } else {
+            format!(" (CVN {})", cvn.join(", "))
+        };
         let _ = writeln!(o, "| Calibration, {module} | {}{cvn} |", ids.join(", "));
     }
     if let Some(v) = &d.vehicle {
@@ -461,7 +469,9 @@ mod tests {
         let d = collect(&mut elm, &vehicles::builtin(), true).unwrap();
         let md = markdown(&d);
         assert!(
-            md.contains("| Calibration, engine (ECM/PCM) (7E8) | ICARUS-SIM-CAL01 (CVN 1CA50F3E) |"),
+            md.contains(
+                "| Calibration, engine (ECM/PCM) (7E8) | ICARUS-SIM-CAL01 (CVN 1CA50F3E) |"
+            ),
             "the calibration ID and CVN are in the report"
         );
         for want in [

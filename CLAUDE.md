@@ -13,9 +13,10 @@ edits with checksums). A Cargo workspace: `crates/icarus-core` (images, definiti
 ```sh
 systemd-run --user --scope -q -p MemoryMax=8G -p MemorySwapMax=0 env CARGO_BUILD_JOBS=4 nice -n 19 cargo test --workspace
 systemd-run --user --scope -q -p MemoryMax=8G -p MemorySwapMax=0 env CARGO_BUILD_JOBS=4 nice -n 19 cargo build --release
+cargo fmt --all --check     # the whole workspace is in rustfmt's default style (since 2026-11-21): keep it so
 ```
 
-`cargo test --workspace` must pass; no test needs a vehicle, an adapter or a network (the simulated vehicle in
+`cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --all --check` must pass; no test needs a vehicle, an adapter or a network (the simulated vehicle in
 `crates/icarus-obd/src/sim.rs` stands in). Trying the CLI on `sim` writes reports and the action log into the real home: run
 it with HOME/XDG_STATE_HOME pointed at a scratch folder. There is no CI workflow in this repository; Labyrinth OS's
 `icarus-git` recipe runs the tests when it builds the package.
