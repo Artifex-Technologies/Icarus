@@ -364,11 +364,11 @@ impl State {
         let mut unreadable = false;
         let framed = self.headers || !self.caf;
         if self.kline() && self.headers {
-            // header (priority, target, sender), the data, a checksum byte
+            // header (format or priority, target, sender), the data, a checksum byte; the sender's address is the module's
             for l in lines {
                 match self.split_line_bytes(l) {
                     Some(b) if b.len() >= 5 => out.push(Reply {
-                        from: Some(u32::from(b[0]) << 16 | u32::from(b[1]) << 8 | u32::from(b[2])),
+                        from: Some(u32::from(b[2])),
                         data: b[3..b.len() - 1].to_vec(),
                     }),
                     _ => unreadable = true,

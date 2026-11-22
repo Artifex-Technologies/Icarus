@@ -6,7 +6,8 @@ identifiers each module answers. Icarus reads a recording of that tool at work a
 1. a **transcript**: every request the tool sent a module and what came back, with the time, as CSV;
 2. a **module-data set** (Icarus's own format, `~/.config/icarus/data/SET/`): every identifier a module answered on a data
    read (UDS `22`, KWP2000 `21`) becomes a request with one placeholder value covering its answer's bytes, unnamed
-   (`22 1234 (8 bytes)`) and not verified, with the answers seen kept as samples. Identity reads (KWP2000 `1A`) are
+   (`22 1234 (8 bytes)`) and not verified, with the answers seen kept as samples (a `22` read of several identifiers at
+   once counts as a read of each, K-line and J1850 modules too). Identity reads (KWP2000 `1A`) are
    listed as seen, not imported: a module's identity is read in a later build.
 
 ```sh
@@ -76,11 +77,13 @@ The captures, transcripts and sets of a real vehicle stay outside this repositor
 | Seen | What happens |
 | --- | --- |
 | A data read (`22`, `21`) one module answered | a request in the set, one hex placeholder value over the shortest answer's bytes, up to 8 different answers as samples, marked unverified for every year |
+| A `22` read of several identifiers at once (`22 1234 5678`) | one request per identifier, its answer (`62 1234 .. 5678 ..`) split at each identifier's echo: the split that fits every answer to that request and the lengths single reads of those identifiers gave (the one with the most identifiers in it); an answer that still splits more than one way is listed, not imported |
+| A K-line or J1850 module (a header such as `81 10 F1`) | imported like a CAN one, the module known by its address (`10`, the header's target byte; `ids = "kline"`); `icarus obd data` does not reach K-line yet |
 | The same, refused or unanswered every time | listed with the module's refusal code or the adapter's words (NO DATA) |
 | An identity read (`1A`) | listed as "seen, not imported" (a module's identity is read in a later build) |
 | An answer longer than one value can cover (over 8191 bytes) | listed, the rest of the capture imported |
 | A write, test, routine, clearing, security access, session or reset (`2E`, `2F`, `31`, `3B`, `14`, `27`, `10`, `11`...) | listed as "seen, not imported" |
-| Standard OBD-II (`01`, `09`...) and anything sent to every module (`7DF`) | listed as "seen, not imported" |
+| Standard OBD-II (`01`, `09`...) and anything sent to every module (`7DF`, K-line's functional addresses `33` and `6A`) | listed as "seen, not imported" |
 | An airbag or occupant module | identity only, as for every set (the vehicle gates of `icarus obd data` apply when the set is written and when it is used) |
 
 Everything the gates of `icarus obd data` refuse (an answer ID used as a request ID, a second module on one request ID, a
@@ -133,5 +136,4 @@ after the gates gets no file in the set (it is listed with the reasons).
 - Not yet tried on a real phone's log or a real bus log: the formats are read as their public descriptions give them, and
   tested on small files written for the tests.
 - Bus logs: only diagnostic IDs 700-7FF and 29-bit 18DA/18DB are read (not BMW's 6F1/6xx or GM's 24x/64x).
-- K-line and J1850 conversations appear in the transcript but are not imported.
-- A request that asks for several identifiers at once (`22 1234 5678`) is listed, not imported.
+- Modules on K-line, J1850 and 29-bit CAN are imported, but `icarus obd data` does not reach them yet.

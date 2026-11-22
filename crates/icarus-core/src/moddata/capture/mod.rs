@@ -2,9 +2,10 @@
 //! phone's Bluetooth log) or any tool on the bus, recorded by `icarus bus watch --raw` through a Y-splitter (`buslog`).
 //! Both become the same thing: a timed list of **exchanges** (a request a module was sent, and what came back), which
 //! gives a transcript (to match against a screen recording of the app) and a module-data set: every identifier a module
-//! answered on a data read (21, 22) becomes a request with one placeholder value covering its answer's bytes, unnamed and
-//! not verified, with the answers seen kept as samples. Identity reads (1A) are listed as seen, not imported (a module's
-//! identity is read in a later build).
+//! answered on a data read (21, 22; a 22 read of several identifiers at once counts as a read of each; K-line and J1850
+//! modules are known by their address) becomes a request with one placeholder value covering its answer's bytes, unnamed
+//! and not verified, with the answers seen kept as samples. Identity reads (1A) are listed as seen, not imported (a
+//! module's identity is read in a later build).
 //!
 //! **Privacy.** A Bluetooth capture holds everything the phone sent and received over Bluetooth. Only the diagnostic
 //! conversation is kept: the readers never read Bluetooth addresses, device names or link keys (HCI commands and events
@@ -25,7 +26,7 @@ use super::{
     ValueDef, ValueKind, FORMAT,
 };
 use crate::diag;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// What every set learned from a capture says about itself (shown wherever its values appear).
 pub const ATTRIBUTION: &str =
@@ -93,22 +94,26 @@ pub fn id_label(ids: Ids, id: u32, ext: Option<u8>) -> String {
     }
 }
 
-/// Whether a request ID is the one every module hears: 7DF, or a 29-bit ID with the functional format DB (18DB33F1).
+/// Whether a request ID is the one every module hears: 7DF, a 29-bit ID with the functional format DB (18DB33F1), or
+/// K-line and J1850 header bytes to a functional address (33: ISO 14230; 6A: ISO 9141 and J1850) or with KWP2000's
+/// functional format (C0-FF; a J1850 header of priority 6 or 7 is taken for one too: more is left out rather than less).
 pub fn is_functional(ids: Ids, tx: u32) -> bool {
     match ids {
         Ids::Can11 => tx == 0x7DF,
         Ids::Can29 => (tx >> 16) & 0xFF == 0xDB,
-        Ids::Kline => false,
+        Ids::Kline => (tx >> 16) & 0xFF >= 0xC0 || matches!((tx >> 8) & 0xFF, 0x33 | 0x6A),
     }
 }
 
-/// The answer ID a request ID usually has: request + 8 (11-bit), or the two address bytes swapped (29-bit, 18DA).
+/// The answer ID a request ID usually has: request + 8 (11-bit), or the two address bytes swapped (29-bit, 18DA); a
+/// K-line or J1850 module, known by its address (one byte), answers from that address.
 pub fn usual_rx(ids: Ids, tx: u32) -> Option<u32> {
     match ids {
         Ids::Can11 if tx <= 0x7F7 => Some(tx + 8),
         Ids::Can29 if (tx >> 16) & 0xFF == 0xDA => {
             Some((tx & 0xFFFF_0000) | ((tx & 0xFF) << 8) | ((tx >> 8) & 0xFF))
         }
+        Ids::Kline if tx <= 0xFF => Some(tx),
         _ => None,
     }
 }
@@ -195,13 +200,27 @@ fn byte_at(e: &Exchange, (part, j): At) -> u8 {
 }
 
 /// The bytes the VIN itself fills, wherever the exchange is a VIN's own identifier: after `22 F1 90`/`62 F1 90` and
-/// `2E F1 90` (UDS), `1A 90`/`5A 90` and `3B 90` (KWP), and `49 02 NN` (OBD-II 09 02).
+/// `2E F1 90` (UDS), `1A 90`/`5A 90` and `3B 90` (KWP), and `49 02 NN` (OBD-II 09 02); for a `22` read of several
+/// identifiers with F190 among them, everything after F190's echo in the answer.
 fn vin_fields(e: &Exchange) -> Vec<At> {
     let mut out = Vec::new();
     let req = &e.request;
     for (prefix, skip) in [(&[0x2E, 0xF1, 0x90][..], 3), (&[0x3B, 0x90][..], 2)] {
         if req.starts_with(prefix) {
             out.extend((skip..req.len()).map(|j| (None, j)));
+        }
+    }
+    if req.len() > 3
+        && !req.starts_with(&[0x22, 0xF1, 0x90])
+        && multi_read(req).is_some_and(|ids| ids.contains(&0xF190))
+    {
+        for (i, r) in e.replies.iter().enumerate() {
+            if r.data.first() != Some(&0x62) {
+                continue;
+            }
+            if let Some(p) = r.data.windows(2).skip(1).position(|w| w == [0xF1, 0x90]) {
+                out.extend((p + 3..r.data.len()).map(|j| (Some(i), j)));
+            }
         }
     }
     let answer: Option<(&[u8], usize)> = if req.starts_with(&[0x22, 0xF1, 0x90]) {
@@ -358,6 +377,231 @@ fn ident_len(sid: u8) -> usize {
     }
 }
 
+/// The identifiers of a `22` read of several different ones at once (`22 1234 5678`), if `req` is one.
+fn multi_read(req: &[u8]) -> Option<Vec<u16>> {
+    if req.len() < 5 || req[0] != 0x22 || req.len().is_multiple_of(2) {
+        return None;
+    }
+    let ids: Vec<u16> = req[1..]
+        .chunks(2)
+        .map(|c| u16::from_be_bytes([c[0], c[1]]))
+        .collect();
+    let different: BTreeSet<&u16> = ids.iter().collect();
+    (different.len() == ids.len()).then_some(ids)
+}
+
+/// How a positive answer to a read of several identifiers splits into them: (identifier, data length) in order.
+type Split = Vec<(u16, usize)>;
+
+/// The most ways one answer is tried for splitting: more, and it is taken as not to be split.
+const MAX_SPLITS: usize = 64;
+
+/// Every way `a` (an answer after its 62) splits into parts of `ids`, in order: each part an identifier's echo and at
+/// least one data byte, running to the next identifier's echo or the end; an identifier may be missing (a module leaves
+/// out the ones it does not have). None: more ways than `MAX_SPLITS`.
+fn splits(a: &[u8], ids: &[u16]) -> Option<Vec<Split>> {
+    fn walk(a: &[u8], p: usize, ids: &[u16], next: usize, cur: &mut Split, out: &mut Vec<Split>) {
+        if out.len() > MAX_SPLITS {
+            return;
+        }
+        if p == a.len() {
+            if !cur.is_empty() {
+                out.push(cur.clone());
+            }
+            return;
+        }
+        let Some(echo) = a.get(p..p + 2).map(|b| u16::from_be_bytes([b[0], b[1]])) else {
+            return;
+        };
+        for j in (next..ids.len()).filter(|j| ids[*j] == echo) {
+            for q in p + 3..=a.len() {
+                let at_next = a
+                    .get(q..q + 2)
+                    .is_some_and(|b| ids[j + 1..].contains(&u16::from_be_bytes([b[0], b[1]])));
+                if q == a.len() || at_next {
+                    cur.push((ids[j], q - p - 2));
+                    walk(a, q, ids, j + 1, cur, out);
+                    cur.pop();
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(a, 0, ids, 0, &mut Vec::new(), &mut out);
+    (out.len() <= MAX_SPLITS).then_some(out)
+}
+
+/// Whether `a` (an answer after its 62) is split `s`: each identifier's echo where the one before ends, up to the end.
+fn fits_answer(a: &[u8], s: &Split) -> bool {
+    let mut p = 0;
+    for (id, len) in s {
+        if a.get(p..p + 2) != Some(&id.to_be_bytes()[..]) {
+            return false;
+        }
+        p += 2 + len;
+    }
+    p == a.len()
+}
+
+/// The split among `c` with the most identifiers in it, when only one has that many.
+fn fullest(c: &BTreeSet<Split>) -> Option<&Split> {
+    let most = c.iter().map(Vec::len).max()?;
+    let mut best = c.iter().filter(|s| s.len() == most);
+    let one = best.next()?;
+    best.next().is_none().then_some(one)
+}
+
+/// One request per identifier for each `22` read of several identifiers at once (`22 1234 5678`) to one module, by the
+/// exchange's index; Err(why) where its answer could not be split. The answer gives each identifier's echo, then its
+/// data (`62 1234 .. 5678 ..`), and leaves out an identifier the module does not have; how long each one's data is, is
+/// not in it. The split taken is the one that fits every answer to that same request and the data lengths single reads
+/// of those identifiers gave, the one with the most identifiers in it when there are several; an answer that still
+/// splits more than one way (or none) is not imported.
+fn split_reads(ex: &[Exchange]) -> BTreeMap<usize, Result<Vec<Exchange>, String>> {
+    // data lengths single reads gave: (kind of ID, request ID, extended address, identifier)
+    let mut known: BTreeMap<(u8, u32, Option<u8>, u16), BTreeSet<usize>> = BTreeMap::new();
+    for e in ex
+        .iter()
+        .filter(|e| e.request.len() == 3 && e.request[0] == 0x22)
+    {
+        let Some(tx) = e.tx else { continue };
+        let ident = u16::from_be_bytes([e.request[1], e.request[2]]);
+        for r in &e.replies {
+            if r.data.len() > 3 && r.data[0] == 0x62 && r.data[1..3] == e.request[1..3] {
+                known
+                    .entry((e.ids as u8, tx, e.ext, ident))
+                    .or_default()
+                    .insert(r.data.len() - 3);
+            }
+        }
+    }
+    // the reads of several identifiers, by module and request, with the answer each got
+    type Group<'a> = Vec<(usize, Option<&'a Reply>)>;
+    let mut groups: BTreeMap<(u8, u32, Option<u8>, Vec<u8>), Group> = BTreeMap::new();
+    for (i, e) in ex.iter().enumerate() {
+        let (Some(ids), Some(tx)) = (multi_read(&e.request), e.tx) else {
+            continue;
+        };
+        if is_functional(e.ids, tx) {
+            continue;
+        }
+        let usual = e.rx.or(usual_rx(e.ids, tx));
+        let positive: Vec<&Reply> = e
+            .replies
+            .iter()
+            .filter(|r| {
+                r.data.len() > 3
+                    && r.data[0] == 0x62
+                    && ids.contains(&u16::from_be_bytes([r.data[1], r.data[2]]))
+            })
+            .collect();
+        let answer = positive
+            .iter()
+            .find(|r| r.from.is_some() && r.from == usual)
+            .or(positive.first())
+            .copied();
+        groups
+            .entry((e.ids as u8, tx, e.ext, e.request.clone()))
+            .or_default()
+            .push((i, answer));
+    }
+    let mut out = BTreeMap::new();
+    for ((kind, tx, ext, request), members) in groups {
+        let ids = multi_read(&request).unwrap_or_default();
+        let fits = |s: &Split| {
+            s.iter().all(|(id, len)| {
+                known
+                    .get(&(kind, tx, ext, *id))
+                    .is_none_or(|lens| lens.contains(len))
+            })
+        };
+        // each answer's splits (those that fit the single reads' lengths, when any do); None: too many to tell
+        let ways: Vec<Option<BTreeSet<Split>>> = members
+            .iter()
+            .map(|(_, r)| {
+                let all = splits(&(*r)?.data[1..], &ids)?;
+                let fitting: BTreeSet<Split> = all.iter().filter(|s| fits(s)).cloned().collect();
+                Some(if fitting.is_empty() {
+                    all.into_iter().collect()
+                } else {
+                    fitting
+                })
+            })
+            .collect();
+        let mut common: Option<BTreeSet<Split>> = None;
+        for w in ways.iter().flatten() {
+            common = Some(match common {
+                None => w.clone(),
+                Some(c) => c.intersection(w).cloned().collect(),
+            });
+        }
+        let common = common.filter(|c| !c.is_empty());
+        for ((i, answer), own) in members.into_iter().zip(&ways) {
+            let e = &ex[i];
+            let part = |ident: u16, replies: Vec<Reply>, problem: Option<String>| Exchange {
+                request: vec![0x22, (ident >> 8) as u8, ident as u8],
+                replies,
+                problem,
+                ..e.clone()
+            };
+            let Some(r) = answer else {
+                // refused or unanswered: so is each identifier
+                let parts = ids
+                    .iter()
+                    .map(|id| part(*id, e.replies.clone(), e.problem.clone()))
+                    .collect();
+                out.insert(i, Ok(parts));
+                continue;
+            };
+            let chosen = common
+                .as_ref()
+                .and_then(fullest)
+                .filter(|s| {
+                    own.as_ref()
+                        .map_or_else(|| fits_answer(&r.data[1..], s), |w| w.contains(*s))
+                })
+                .or_else(|| own.as_ref().and_then(fullest));
+            let Some(split) = chosen else {
+                let how = match own {
+                    Some(w) if w.is_empty() => "does not split into them",
+                    _ => "splits into them more than one way",
+                };
+                let why =
+                    format!("a read of several identifiers whose answer {how}: seen, not imported");
+                out.insert(i, Err(why));
+                continue;
+            };
+            let mut at = 1;
+            let mut parts = Vec::new();
+            for id in &ids {
+                match split.iter().find(|(x, _)| x == id) {
+                    Some((_, len)) => {
+                        let data = r.data[at..at + 2 + len].to_vec();
+                        at += 2 + len;
+                        let mut whole = vec![0x62];
+                        whole.extend_from_slice(&data);
+                        parts.push(part(
+                            *id,
+                            vec![Reply {
+                                from: r.from,
+                                data: whole,
+                            }],
+                            None,
+                        ));
+                    }
+                    None => parts.push(part(
+                        *id,
+                        vec![],
+                        Some("left out of the module's answer to several identifiers".into()),
+                    )),
+                }
+            }
+            out.insert(i, Ok(parts));
+        }
+    }
+    out
+}
+
 /// A request as (kind of ID, request ID, extended address, service, identifier).
 type RequestKey = (u8, u32, Option<u8>, u8, u16);
 
@@ -381,8 +625,9 @@ struct Answered {
 }
 
 /// The set a capture's exchanges give: every module that answered a data read (21, 22), one request per identifier it
-/// answered, each with one placeholder value covering the answer's bytes. Everything else seen (1A identity reads
-/// among it) is listed in `left_out` with why. The caller applies the vehicle gates (`icarus-obd`'s `moddata::gate_imported`) before writing it.
+/// answered (a 22 read of several identifiers at once split into one per identifier, `split_reads`), each with one
+/// placeholder value covering the answer's bytes. Everything else seen (1A identity reads among it) is listed in
+/// `left_out` with why. The caller applies the vehicle gates (`icarus-obd`'s `moddata::gate_imported`) before writing it.
 pub fn build(ex: &[Exchange], o: &Options) -> Result<Imported, String> {
     let mut out = Imported::default();
     let mut left: Vec<(String, String)> = Vec::new();
@@ -394,124 +639,141 @@ pub fn build(ex: &[Exchange], o: &Options) -> Result<Imported, String> {
     let mut got: Vec<Answered> = Vec::new();
     // (ids, tx, ext, service, ident) -> (what, why) for requests never answered with data
     let mut unanswered: BTreeMap<RequestKey, (String, String)> = BTreeMap::new();
-    for e in ex {
-        let Some(&sid) = e.request.first() else {
-            continue;
+    let split = split_reads(ex);
+    for (i, whole) in ex.iter().enumerate() {
+        // a read of several identifiers counts as one read of each
+        let parts = match split.get(&i) {
+            Some(Ok(parts)) => &parts[..],
+            Some(Err(why)) => {
+                leave(
+                    format!("{} {}", whole.module(), hex(&whole.request)),
+                    why.clone(),
+                );
+                continue;
+            }
+            None => std::slice::from_ref(whole),
         };
-        let what = format!(
-            "{} {}",
-            e.module(),
-            hex(&e.request[..e.request.len().min(3)])
-        );
-        if sid == 0x1A {
-            leave(
-                what,
-                "service 1A (a module's identity): seen, not imported (identity is read in a later build)".into(),
+        for e in parts {
+            let Some(&sid) = e.request.first() else {
+                continue;
+            };
+            let what = format!(
+                "{} {}",
+                e.module(),
+                hex(&e.request[..e.request.len().min(3)])
             );
-            continue;
-        }
-        if !matches!(sid, 0x21 | 0x22) {
-            leave(
-                what,
-                format!(
-                    "service {sid:02X} ({}): seen, not imported (only data reads are: 21, 22)",
-                    diag::service_name(sid)
-                ),
-            );
-            continue;
-        }
-        if e.ids == Ids::Kline {
-            leave(what, "not CAN (K-line or J1850): seen, not imported".into());
-            continue;
-        }
-        let Some(tx) = e.tx.filter(|t| !is_functional(e.ids, *t)) else {
-            leave(
-                what,
-                "sent to every module (7DF or the adapter's default): seen, not imported (one module at a time only)"
-                    .into(),
-            );
-            continue;
-        };
-        let n = 1 + ident_len(sid);
-        if e.request.len() != n {
-            leave(
-                what,
-                "not one identifier (more bytes than a single read): seen, not imported".into(),
-            );
-            continue;
-        }
-        let ident = e.request[1..n]
-            .iter()
-            .fold(0u16, |a, b| (a << 8) | u16::from(*b));
-        let key = (e.ids as u8, tx, e.ext, sid, ident);
-        let positive: Vec<&Reply> = e
-            .replies
-            .iter()
-            .filter(|r| {
-                r.data.len() >= n && r.data[0] == sid + 0x40 && r.data[1..n] == e.request[1..n]
-            })
-            .collect();
-        let usual = e.rx.or(usual_rx(e.ids, tx));
-        let Some(r) = positive
-            .iter()
-            .find(|r| r.from.is_some() && r.from == usual)
-            .or(positive.first())
-        else {
-            let why = match e
+            if sid == 0x1A {
+                leave(
+                    what,
+                    "service 1A (a module's identity): seen, not imported (identity is read in a later build)".into(),
+                );
+                continue;
+            }
+            if !matches!(sid, 0x21 | 0x22) {
+                leave(
+                    what,
+                    format!(
+                        "service {sid:02X} ({}): seen, not imported (only data reads are: 21, 22)",
+                        diag::service_name(sid)
+                    ),
+                );
+                continue;
+            }
+            let Some(tx) = e.tx.filter(|t| !is_functional(e.ids, *t)) else {
+                leave(
+                    what,
+                    "sent to every module (7DF, a functional address or the adapter's default): seen, not imported (one module at a time only)"
+                        .into(),
+                );
+                continue;
+            };
+            // a K-line or J1850 module is known by its address: its header's target byte (`81 10 F1`: 10)
+            let tx = if e.ids == Ids::Kline {
+                (tx >> 8) & 0xFF
+            } else {
+                tx
+            };
+            let n = 1 + ident_len(sid);
+            if e.request.len() != n {
+                leave(
+                    what,
+                    "not one identifier (more bytes than a single read): seen, not imported".into(),
+                );
+                continue;
+            }
+            let ident = e.request[1..n]
+                .iter()
+                .fold(0u16, |a, b| (a << 8) | u16::from(*b));
+            let key = (e.ids as u8, tx, e.ext, sid, ident);
+            let positive: Vec<&Reply> = e
                 .replies
                 .iter()
-                .find(|r| r.data.first() == Some(&0x7F) && r.data.get(1) == Some(&sid))
-            {
-                Some(r) => format!(
-                    "refused by the module (7F {sid:02X} {:02X}): not imported",
-                    r.data.get(2).copied().unwrap_or(0)
-                ),
-                None => match &e.problem {
-                    Some(p) => format!("no answer ({p}): not imported"),
-                    None => "no answer that fits it: not imported".into(),
+                .filter(|r| {
+                    r.data.len() >= n && r.data[0] == sid + 0x40 && r.data[1..n] == e.request[1..n]
+                })
+                .collect();
+            let usual = e.rx.or(usual_rx(e.ids, tx));
+            let Some(r) = positive
+                .iter()
+                .find(|r| r.from.is_some() && r.from == usual)
+                .or(positive.first())
+            else {
+                let why = match e
+                    .replies
+                    .iter()
+                    .find(|r| r.data.first() == Some(&0x7F) && r.data.get(1) == Some(&sid))
+                {
+                    Some(r) => format!(
+                        "refused by the module (7F {sid:02X} {:02X}): not imported",
+                        r.data.get(2).copied().unwrap_or(0)
+                    ),
+                    None => match &e.problem {
+                        Some(p) => format!("no answer ({p}): not imported"),
+                        None => "no answer that fits it: not imported".into(),
+                    },
+                };
+                unanswered.entry(key).or_insert((what, why));
+                continue;
+            };
+            let (rx, rx_assumed) = match r.from.or(e.rx) {
+                Some(x) => (x, false),
+                None => match usual {
+                    Some(x) => (x, true),
+                    None => {
+                        leave(what, "the answer's ID is not known: not imported".into());
+                        continue;
+                    }
                 },
             };
-            unanswered.entry(key).or_insert((what, why));
-            continue;
-        };
-        let (rx, rx_assumed) = match r.from.or(e.rx) {
-            Some(x) => (x, false),
-            None => match usual {
-                Some(x) => (x, true),
-                None => {
-                    leave(what, "the answer's ID is not known: not imported".into());
-                    continue;
+            let len = r.data.len() - n;
+            match got.iter_mut().find(|a| {
+                (a.ids, a.tx, a.rx, a.ext, a.service, a.ident) == (e.ids, tx, rx, e.ext, sid, ident)
+            }) {
+                Some(a) => {
+                    a.times += 1;
+                    a.shortest = a.shortest.min(len);
+                    a.longest = a.longest.max(len);
+                    a.masked |= e.masked;
+                    if a.answers.len() < MAX_SAMPLES && !a.answers.contains(&r.data) {
+                        a.answers.push(r.data.clone());
+                    }
                 }
-            },
-        };
-        let len = r.data.len() - n;
-        match got.iter_mut().find(|a| {
-            (a.ids, a.tx, a.rx, a.ext, a.service, a.ident) == (e.ids, tx, rx, e.ext, sid, ident)
-        }) {
-            Some(a) => {
-                a.times += 1;
-                a.shortest = a.shortest.min(len);
-                a.longest = a.longest.max(len);
-                a.masked |= e.masked;
-                if a.answers.len() < MAX_SAMPLES && !a.answers.contains(&r.data) {
-                    a.answers.push(r.data.clone());
-                }
+                None => got.push(Answered {
+                    ids: e.ids,
+                    tx,
+                    rx,
+                    ext: e.ext,
+                    service: sid,
+                    ident,
+                    answers: vec![r.data.clone()],
+                    times: 1,
+                    shortest: len,
+                    longest: len,
+                    masked: e.masked,
+                    rx_assumed,
+                    rx_odd: e.rx.is_none() && usual.is_some_and(|u| u != rx),
+                }),
             }
-            None => got.push(Answered {
-                ids: e.ids,
-                tx,
-                rx,
-                ext: e.ext,
-                service: sid,
-                ident,
-                answers: vec![r.data.clone()],
-                times: 1,
-                shortest: len,
-                longest: len,
-                masked: e.masked,
-                rx_assumed,
-                rx_odd: e.rx.is_none() && usual.is_some_and(|u| u != rx),
-            }),
         }
     }
     // a request refused or unanswered at one time but answered at another counts as answered
@@ -608,7 +870,10 @@ pub fn build(ex: &[Exchange], o: &Options) -> Result<Imported, String> {
                 modules.push(ModuleDef {
                     format: FORMAT,
                     module: ModuleHead {
-                        name: format!("module ({})", id_label(a.ids, a.tx, a.ext)),
+                        name: match a.ids {
+                            Ids::Kline => format!("module (K-line {:02X})", a.tx),
+                            _ => format!("module ({})", id_label(a.ids, a.tx, a.ext)),
+                        },
                         tx: a.tx,
                         rx: Some(a.rx),
                         ext: a.ext,
@@ -1031,6 +1296,81 @@ mod tests {
             find_vin(&[ex(0x7E0, &[0x21, 0x10], &[(0x7E8, &odd)])]),
             None
         );
+    }
+
+    #[test]
+    fn several_identifiers_at_once_and_k_line_modules_are_imported() {
+        use super::testkit::{pklg_file, Session};
+        let cap = Session::talk(&[
+            ("ATZ", "ELM327 v1.4b"),
+            ("ATH1", "OK"),
+            ("ATSH7E0", "OK"),
+            // three identifiers at once: 1234 (3 bytes, the first time with 5678's echo inside), 5678 (1), 9ABC (3)
+            (
+                "22123456789ABC",
+                "7E8 10 0E 62 12 34 01 56 78\r7E8 21 56 78 03 9A BC 04 05\r7E8 22 06 AA AA AA AA AA AA",
+            ),
+            (
+                "22 1234 5678 9ABC",
+                "7E8 10 0E 62 12 34 02 11 22\r7E8 21 56 78 04 9A BC 04 05\r7E8 22 07 AA AA AA AA AA AA",
+            ),
+            // an answer that splits more than one way, seen once
+            (
+                "2211112222",
+                "7E8 10 09 62 11 11 01 22 22\r7E8 21 22 22 05 AA AA AA AA",
+            ),
+            ("22 3333 4444", "7E8 03 7F 22 31"),
+            // K-line (ISO 14230 fast init) to the module at address 10, with headers and without
+            ("ATSP5", "OK"),
+            ("ATSH8110F1", "OK"),
+            ("2101", "83 F1 10 61 01 05 EB"),
+            ("ATH0", "OK"),
+            ("2102", "61 02 06 07"),
+            // to every module (KWP2000's functional address)
+            ("ATSHC133F1", "OK"),
+            ("2103", "61 03 01"),
+        ]);
+        let r = read(&pklg_file(&cap.packets, true)).unwrap();
+        let imp = build(&r.exchanges, &opts()).unwrap();
+        assert_eq!(imp.modules.len(), 2, "{:?}", imp.left_out);
+        let ecm = &imp.modules[0];
+        let labels: Vec<String> = ecm.requests.iter().map(|q| q.label()).collect();
+        assert_eq!(labels, vec!["22 1234", "22 5678", "22 9ABC"]);
+        let first = &ecm.requests[0];
+        assert_eq!(first.sample.as_deref(), Some("62 12 34 01 56 78"));
+        assert_eq!(first.samples, vec!["62 12 34 02 11 22"]);
+        assert_eq!(first.values[0].bits, 24);
+        assert_eq!(ecm.requests[1].sample.as_deref(), Some("62 56 78 03"));
+        assert_eq!(ecm.requests[2].sample.as_deref(), Some("62 9A BC 04 05 06"));
+        let k = &imp.modules[1];
+        assert_eq!(
+            (k.module.ids, k.module.tx, k.module.rx),
+            (Ids::Kline, 0x10, Some(0x10))
+        );
+        assert_eq!(k.module.name, "module (K-line 10)");
+        let labels: Vec<String> = k.requests.iter().map(|q| q.label()).collect();
+        assert_eq!(labels, vec!["21 01", "21 02"]);
+        assert_eq!(k.requests[1].sample.as_deref(), Some("61 02 06 07"));
+        let why = |w: &str| {
+            imp.left_out
+                .iter()
+                .find(|(x, _)| x.contains(w))
+                .map(|x| x.1.clone())
+                .unwrap_or_else(|| panic!("{w}: {:?}", imp.left_out))
+        };
+        assert!(why("22 11 11 22 22").contains("more than one way"));
+        assert!(why("7E0 22 33 33").contains("refused"));
+        assert!(why("7E0 22 44 44").contains("refused"));
+        assert!(why("C133F1 (every module) 21 03").contains("every module"));
+        // the files read back
+        let s = imp.set.as_ref().unwrap();
+        for ((_, text), m) in super::super::set_files(s, &imp.modules)
+            .iter()
+            .skip(1)
+            .zip(&imp.modules)
+        {
+            assert_eq!(&super::super::parse_module(text, "test").unwrap(), m);
+        }
     }
 
     #[test]

@@ -165,6 +165,20 @@ impl Session {
         s
     }
 
+    /// An adapter conversation from (command, answer) pairs, as `elm`'s tests write them (the carriage return and the
+    /// prompt added), on RFCOMM channel 0x41/0x40 (DLCI 2), handle 0x0B; the answers cut into ACL fragments of 10 bytes.
+    pub fn talk(pairs: &[(&str, &str)]) -> Session {
+        let mut s = Session::new();
+        s.connect(0x0B, 1, 3, 0x40, 0x41);
+        for (c, a) in pairs {
+            let cmd = uih(2, true, false, format!("{c}\r").as_bytes());
+            s.l2(true, 0x0B, 0x41, &cmd, 64);
+            let ans = uih(2, false, false, format!("{a}\r\r>").as_bytes());
+            s.l2(false, 0x0B, 0x40, &ans, 10);
+        }
+        s
+    }
+
     /// The phone's conversation with an adapter on RFCOMM channel 0x41/0x40 (DLCI 2), handle 0x0B, plus a hands-free
     /// channel on DLCI 4 and an audio-like channel (PSM 19) on handle 0x0C that must never be read.
     pub fn standard() -> Session {
