@@ -77,13 +77,13 @@ pub fn set(vin: &str, on: bool) -> Result<(), String> {
 }
 
 /// Whether a request would change the vehicle: anything but a read (OBD-II services 01 02 03 05 06 07 09 0A; KWP2000
-/// and UDS 18 19 1A 21 22), tester present (3E), and the requests that hand things back: the default session (10 01)
+/// and UDS 13 18 19 1A 21 22), tester present (3E), and the requests that hand things back: the default session (10 01)
 /// and returning an output to the module (UDS 2F .. .. 00, KWP2000 30 .. 00). Unknown requests count as changes.
 pub fn changes_vehicle(data: &[u8]) -> bool {
     !matches!(
         data,
         [0x01 | 0x02 | 0x03 | 0x05 | 0x06 | 0x07 | 0x09 | 0x0A, ..]
-            | [0x18 | 0x19 | 0x1A | 0x21 | 0x22 | 0x3E, ..]
+            | [0x13 | 0x18 | 0x19 | 0x1A | 0x21 | 0x22 | 0x3E, ..]
             | [0x10, 0x01]
             | [0x2F, _, _, 0x00]
             | [0x30, _, 0x00]

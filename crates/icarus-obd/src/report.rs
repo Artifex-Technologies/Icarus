@@ -9,7 +9,7 @@ use crate::garage::{self, Described};
 use crate::j1979::{self, DtcKind, FreezeFrame, Monitors};
 use crate::link::Link;
 use crate::lookup;
-use crate::uds::{self, Dialect, ModuleDtc};
+use crate::uds;
 use crate::vehicles::{self, ModuleAddr, Profile};
 use crate::vin::{self, VinInfo};
 use std::fmt::Write;
@@ -19,7 +19,7 @@ use std::path::PathBuf;
 pub type ModuleFound = (
     ModuleAddr,
     Vec<(&'static str, String)>,
-    Option<(Dialect, Vec<ModuleDtc>)>,
+    crate::uds::CodesRead,
 );
 
 #[derive(Clone, Default)]
@@ -325,13 +325,16 @@ pub fn markdown(d: &Diagnosis) -> String {
                 let _ = writeln!(o, "- {what}: {v}");
             }
             match codes {
-                None => {
-                    let _ = writeln!(o, "- trouble codes: the module would not say");
+                Err(why) => {
+                    let _ = writeln!(
+                        o,
+                        "- trouble codes: none of Icarus's requests gave them ({why})"
+                    );
                 }
-                Some((_, list)) if list.is_empty() => {
+                Ok((_, list)) if list.is_empty() => {
                     let _ = writeln!(o, "- no trouble codes");
                 }
-                Some((_, list)) => {
+                Ok((_, list)) => {
                     let _ = writeln!(o);
                     for c in list {
                         code_block(&mut o, &c.code, &c.states.join(", "), d);

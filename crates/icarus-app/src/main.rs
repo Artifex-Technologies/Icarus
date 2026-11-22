@@ -1288,10 +1288,14 @@ impl App {
                         }
                     });
                 match &m.dtcs {
-                    None => {
-                        ui.label(RichText::new("It would not give its trouble codes.").weak());
+                    Err(why) => {
+                        ui.label(
+                            RichText::new("None of Icarus's requests gave its trouble codes.")
+                                .weak(),
+                        )
+                        .on_hover_text(why);
                     }
-                    Some((d, codes)) => {
+                    Ok((d, codes)) => {
                         let lang = if *d == Dialect::Uds { "UDS" } else { "KWP2000" };
                         if codes.is_empty() {
                             ui.label(

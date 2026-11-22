@@ -338,16 +338,16 @@ fn vehicle_modules() -> Result<String, String> {
             continue;
         }
         match uds::module_dtcs(&mut elm, m.tx, m.rx()).map_err(e)? {
-            None => {
+            Err(why) => {
                 o += &format!(
-                    "{:03X} {}: answered, but would not give its codes.\n",
+                    "{:03X} {}: answered, but none of Icarus's requests gave its codes ({why}).\n",
                     m.tx, m.name
                 )
             }
-            Some((_, codes)) if codes.is_empty() => {
+            Ok((_, codes)) if codes.is_empty() => {
                 o += &format!("{:03X} {}: no codes.\n", m.tx, m.name)
             }
-            Some((_, codes)) => {
+            Ok((_, codes)) => {
                 o += &format!("{:03X} {}:\n", m.tx, m.name);
                 for c in codes {
                     o += &code_line(

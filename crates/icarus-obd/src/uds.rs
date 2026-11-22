@@ -19,6 +19,7 @@ const READ_ONLY: &[(u8, &str)] = &[
     (0x07, "OBD pending codes"),
     (0x09, "OBD vehicle information"),
     (0x0A, "OBD permanent codes"),
+    (0x13, "KWP2000 read trouble codes"),
     (0x18, "KWP2000 read trouble codes by status"),
     (0x19, "UDS read trouble code information"),
     (0x1A, "KWP2000 read ECU identification"),
@@ -242,6 +243,34 @@ pub fn parse_uds_dtcs(d: &[u8]) -> Option<Vec<ModuleDtc>> {
     )
 }
 
+/// ISO 14230 `13` answer: `53 <count>` and the codes, two bytes each, or three with a status byte (both are in use).
+pub fn parse_kwp13_dtcs(d: &[u8]) -> Option<Vec<ModuleDtc>> {
+    if d.len() < 2 || d[0] != 0x53 {
+        return None;
+    }
+    let (n, rest) = (d[1] as usize, &d[2..]);
+    let size = match n {
+        0 => return Some(Vec::new()),
+        _ if rest.len() == n * 2 => 2,
+        _ if rest.len() == n * 3 => 3,
+        _ => return None,
+    };
+    Some(
+        rest.chunks(size)
+            .filter(|c| c[..2] != [0, 0])
+            .map(|c| {
+                let status = c.get(2).copied();
+                ModuleDtc {
+                    code: dtc(c[0], c[1]),
+                    failure_type: None,
+                    status: status.unwrap_or(0),
+                    states: status.map(kwp_states).unwrap_or_else(|| vec!["stored"]),
+                }
+            })
+            .collect(),
+    )
+}
+
 /// KWP2000 `18` answer: `58 <count> (<2 bytes DTC> <status>)*`.
 pub fn parse_kwp_dtcs(d: &[u8]) -> Option<Vec<ModuleDtc>> {
     if d.len() < 2 || d[0] != 0x58 {
@@ -253,26 +282,29 @@ pub fn parse_kwp_dtcs(d: &[u8]) -> Option<Vec<ModuleDtc>> {
             .0
             .iter()
             .filter(|c| c[..2] != [0, 0])
-            .map(|c| {
-                let mut states = Vec::new();
-                if c[2] & 0x20 != 0 {
-                    states.push("stored");
-                }
-                if c[2] & 0x40 != 0 {
-                    states.push("present now");
-                }
-                if c[2] & 0x80 != 0 {
-                    states.push("warning light requested");
-                }
-                ModuleDtc {
-                    code: dtc(c[0], c[1]),
-                    failure_type: None,
-                    status: c[2],
-                    states,
-                }
+            .map(|c| ModuleDtc {
+                code: dtc(c[0], c[1]),
+                failure_type: None,
+                status: c[2],
+                states: kwp_states(c[2]),
             })
             .collect(),
     )
+}
+
+/// A KWP2000 status byte in words.
+fn kwp_states(s: u8) -> Vec<&'static str> {
+    let mut states = Vec::new();
+    if s & 0x20 != 0 {
+        states.push("stored");
+    }
+    if s & 0x40 != 0 {
+        states.push("present now");
+    }
+    if s & 0x80 != 0 {
+        states.push("warning light requested");
+    }
+    states
 }
 
 /// Which diagnostic language a module answered in.
@@ -282,23 +314,63 @@ pub enum Dialect {
     Kwp,
 }
 
-/// A module's trouble codes: UDS first, KWP2000 when the module does not know UDS's service.
-pub fn module_dtcs(
-    elm: &mut dyn Link,
-    tx: u16,
-    rx: u16,
-) -> Result<Option<(Dialect, Vec<ModuleDtc>)>, ObdError> {
-    if let Some(a) = ask(elm, tx, rx, &[0x19, 0x02, 0xFF])? {
-        if let Some(v) = parse_uds_dtcs(&a.data) {
-            return Ok(Some((Dialect::Uds, v)));
+/// A module's codes as read: the dialect and the codes, or, when no request gave them, what each request got
+/// ("19 02 FF: refused, service not supported; 13: no answer").
+pub type CodesRead = Result<(Dialect, Vec<ModuleDtc>), String>;
+
+/// The read-only ways of asking a module for its codes, in order: UDS `19 02` with the status mask FF, then 2F, 09 and 08
+/// (a module may refuse a mask it does not support with "request out of range"); KWP2000 `18` (status 02, then 00, every
+/// group), then ISO 14230's `13` with and without the group (several makers' CAN modules, Toyota's among them, answer
+/// only one of these). Each one is tried only when the one before was refused or not understood.
+const CODE_REQUESTS: &[(Dialect, &[u8])] = &[
+    (Dialect::Uds, &[0x19, 0x02, 0xFF]),
+    (Dialect::Uds, &[0x19, 0x02, 0x2F]),
+    (Dialect::Uds, &[0x19, 0x02, 0x09]),
+    (Dialect::Uds, &[0x19, 0x02, 0x08]),
+    (Dialect::Kwp, &[0x18, 0x02, 0xFF, 0x00]),
+    (Dialect::Kwp, &[0x18, 0x00, 0xFF, 0x00]),
+    (Dialect::Kwp, &[0x13, 0xFF, 0x00]),
+    (Dialect::Kwp, &[0x13]),
+];
+
+fn hex_req(r: &[u8]) -> String {
+    r.iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A module's trouble codes, by the first request in `CODE_REQUESTS` that gives them. Once the module refuses UDS's
+/// service outright ("service not supported", 11), the other UDS masks are skipped.
+pub fn module_dtcs(elm: &mut dyn Link, tx: u16, rx: u16) -> Result<CodesRead, ObdError> {
+    let mut tried: Vec<String> = Vec::new();
+    let mut skip_uds = false;
+    for (dialect, req) in CODE_REQUESTS {
+        if skip_uds && *dialect == Dialect::Uds {
+            continue;
         }
-    }
-    if let Some(a) = ask(elm, tx, rx, &[0x18, 0x02, 0xFF, 0x00])? {
-        if let Some(v) = parse_kwp_dtcs(&a.data) {
-            return Ok(Some((Dialect::Kwp, v)));
+        let got = ask(elm, tx, rx, req)?;
+        let parsed = got.as_ref().and_then(|a| match req[0] {
+            0x19 => parse_uds_dtcs(&a.data),
+            0x18 => parse_kwp_dtcs(&a.data),
+            _ => parse_kwp13_dtcs(&a.data),
+        });
+        if let Some(v) = parsed {
+            return Ok(Ok((*dialect, v)));
         }
+        let what = match got.as_ref().and_then(|a| a.refusal()) {
+            Some((_, code)) => {
+                if req[0] == 0x19 && code == 0x11 {
+                    skip_uds = true;
+                }
+                format!("refused, {}", nrc(code))
+            }
+            None if got.is_some() => "an answer Icarus could not read".to_string(),
+            None => "no answer".to_string(),
+        };
+        tried.push(format!("{}: {what}", hex_req(req)));
     }
-    Ok(None)
+    Ok(Err(tried.join("; ")))
 }
 
 /// The standard UDS identification values (ISO 14229 data identifiers F187-F197).
@@ -513,7 +585,10 @@ mod tests {
                 found.push(m.tx);
             }
         }
-        assert_eq!(found, vec![0x700, 0x701, 0x780, 0x7B0, 0x7C0, 0x7E0, 0x7E1]);
+        assert_eq!(
+            found,
+            vec![0x700, 0x701, 0x780, 0x7B0, 0x7C0, 0x7C4, 0x7E0, 0x7E1]
+        );
         let sent_on = sent_on(&sent.lock().unwrap());
         assert!(
             sent_on.is_disjoint(&skip),
@@ -557,7 +632,10 @@ mod tests {
                 found.push(m.tx);
             }
         }
-        assert_eq!(found, vec![0x700, 0x701, 0x780, 0x7B0, 0x7C0, 0x7E0, 0x7E1]);
+        assert_eq!(
+            found,
+            vec![0x700, 0x701, 0x780, 0x7B0, 0x7C0, 0x7C4, 0x7E0, 0x7E1]
+        );
         for (rx, tx) in [
             (0x708, 0x700),
             (0x709, 0x701),
@@ -579,6 +657,27 @@ mod tests {
     }
 
     #[test]
+    fn iso14230_code_answers() {
+        // two bytes per code, or three with a status byte; a count that fits neither is not read
+        let two = parse_kwp13_dtcs(&[0x53, 0x02, 0x94, 0x21, 0x01, 0x71]).unwrap();
+        assert_eq!(
+            two.iter().map(|c| c.code.as_str()).collect::<Vec<_>>(),
+            ["B1421", "P0171"]
+        );
+        let three = parse_kwp13_dtcs(&[0x53, 0x01, 0x52, 0x41, 0x60]).unwrap();
+        assert_eq!(
+            (three[0].code.as_str(), three[0].states.clone()),
+            ("C1241", vec!["stored", "present now"])
+        );
+        assert_eq!(parse_kwp13_dtcs(&[0x53, 0x00]).unwrap().len(), 0);
+        assert!(parse_kwp13_dtcs(&[0x53, 0x02, 0x94, 0x21, 0x01]).is_none());
+        assert!(parse_kwp13_dtcs(&[0x7F, 0x13, 0x11]).is_none());
+        assert!(
+            check_read_only(&[0x13]).is_ok() && !crate::lock::changes_vehicle(&[0x13, 0xFF, 0x00])
+        );
+    }
+
+    #[test]
     fn scanning_the_simulated_toyota() {
         let mut elm = Elm::connect(Box::new(SimCar::new())).unwrap();
         let all = crate::vehicles::builtin();
@@ -591,7 +690,10 @@ mod tests {
             .filter(|m| present(&mut elm, m.tx, m.rx()).unwrap())
             .map(|m| m.tx)
             .collect();
-        assert_eq!(found, vec![0x7E0, 0x7E1, 0x700, 0x701, 0x7B0, 0x780, 0x7C0]);
+        assert_eq!(
+            found,
+            vec![0x7E0, 0x7E1, 0x700, 0x701, 0x7B0, 0x780, 0x7C0, 0x7C4]
+        );
         let id = module_identity(&mut elm, 0x7E0, 0x7E0 + 8).unwrap();
         assert!(
             id.contains(&("part number", "89661-ICARUS".to_string())),
@@ -612,6 +714,21 @@ mod tests {
             (d, codes.len()),
             (Dialect::Uds, 0),
             "a 'response pending' is waited out, not taken as the answer"
+        );
+        // the transmission refuses the status mask FF ("request out of range") and gives its codes to mask 2F
+        let (d, codes) = module_dtcs(&mut elm, 0x7E1, 0x7E9).unwrap().unwrap();
+        assert_eq!((d, codes.len()), (Dialect::Uds, 0));
+        // the air conditioning refuses UDS and KWP2000's 18 and answers ISO 14230's 13
+        let (d, codes) = module_dtcs(&mut elm, 0x7C4, 0x7CC).unwrap().unwrap();
+        assert_eq!(
+            (d, codes[0].code.as_str(), codes[0].states.clone()),
+            (Dialect::Kwp, "B1421", vec!["stored"])
+        );
+        // a module that answers none: every request named with what it got
+        let why = module_dtcs(&mut elm, 0x7A1, 0x7A9).unwrap().unwrap_err();
+        assert!(
+            why.starts_with("19 02 FF: no answer") && why.ends_with("13: no answer"),
+            "{why}"
         );
         // after module requests, an OBD broadcast reaches every module again
         assert_eq!(crate::j1979::read(&mut elm, 0x0C).unwrap().len(), 1);

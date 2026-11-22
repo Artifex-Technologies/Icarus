@@ -367,6 +367,9 @@ icarus obd module 7B0 --adapter A            # one module, by its request ID
 `scan` and `module` work like a dealer tool (Techstream, FORScan): they talk to each module directly in UDS (ISO 14229) or
 the older KWP2000 that many Toyota modules still use, not only to the engine's standard OBD-II side. A guard in the code lets
 only reading services out: clearing codes, writing, actuator tests and programming are refused until the safety steps exist.
+A module's codes are asked for in every read-only form in turn (UDS `19 02` with the status masks FF, 2F, 09 and 08;
+KWP2000 `18` with status 02 and 00; ISO 14230 `13` with and without the group), since modules refuse the forms they do not
+support; when none gives them, Icarus shows what each request got (no answer, or the module's refusal and its reason).
 
 **Vehicles.** Icarus is for any make: what it knows about each one (where its modules answer, its quirks) is a small TOML
 file in `crates/icarus-obd/vehicles/`, picked by the VIN. Built in: Toyota/Lexus, Subaru, Ford/Lincoln, GM, Stellantis,

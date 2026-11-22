@@ -710,8 +710,8 @@ fn print_module(elm: &mut Elm, m: &vehicles::ModuleAddr) -> Result<(), String> {
         println!("     {what:<17} {value}");
     }
     match uds::module_dtcs(elm, tx, rx).map_err(e)? {
-        None => println!("     trouble codes     (the module would not say)"),
-        Some((dialect, codes)) => {
+        Err(why) => println!("     trouble codes     none of Icarus's requests gave them\n                       ({why})"),
+        Ok((dialect, codes)) => {
             let lang = if dialect == uds::Dialect::Uds {
                 "UDS"
             } else {
@@ -1439,9 +1439,9 @@ fn obd_clear(elm: &mut Elm, args: &Args) -> Result<(), String> {
             if let Some(why) = clear::refused(tx, rx, &name) {
                 return Err(why);
             }
-            let Some((d, codes)) = uds::module_dtcs(elm, tx, rx).map_err(e)? else {
-                return Err(format!("{tx:03X} did not give its codes"));
-            };
+            let (d, codes) = uds::module_dtcs(elm, tx, rx)
+                .map_err(e)?
+                .map_err(|why| format!("{tx:03X} did not give its codes ({why})"))?;
             println!(
                 "{tx:03X} has {} code(s): {}",
                 codes.len(),

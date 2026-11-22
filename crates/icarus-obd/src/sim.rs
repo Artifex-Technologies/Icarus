@@ -430,8 +430,10 @@ impl SimCar {
         vec![first]
     }
 
-    /// One module's answer to a request sent to it alone: the engine and transmission speak UDS, the ABS only KWP2000 (as
-    /// many Toyota modules do), the airbag and instrument cluster UDS. Anything else is "not supported" (7F) or silence.
+    /// One module's answer to a request sent to it alone: the engine and transmission speak UDS (the transmission refuses
+    /// the code status mask FF and takes 2F), the ABS only KWP2000 (as many Toyota modules do), the airbag and instrument
+    /// cluster UDS, the air conditioning only ISO 14230's `13` for its codes. Anything else is "not supported" (7F) or
+    /// silence.
     fn module(&mut self, tx: u16, req: &[u8]) -> Option<Vec<u8>> {
         let refuse = |code: u8| Some(vec![0x7F, req[0], code]);
         let (part, uds, codes): (&[u8], bool, &[u8]) = match tx {
@@ -443,6 +445,7 @@ impl SimCar {
             0x7B0 => (b"89540-ICARUS", false, &[0x52, 0x41, 0x60]),
             0x780 => (b"89170-ICARUS", true, &[]),
             0x7C0 => (b"83800-ICARUS", true, &[]),
+            0x7C4 => (b"88650-ICARUS", false, &[0x94, 0x21]),
             _ => return None,
         };
         let codes: &[u8] = if self.cleared.contains(&tx) {
@@ -504,6 +507,11 @@ impl SimCar {
             ([0x01, pid], _) if tx == 0x7E0 => self
                 .engine_pid(*pid)
                 .map(|d| [&[0x41, *pid][..], &d].concat()),
+            ([0x19, 0x02, 0xFF], true) if tx == 0x7E1 => refuse(0x31),
+            ([0x18, ..], false) if tx == 0x7C4 => refuse(0x11),
+            ([0x13, ..], false) if tx == 0x7C4 => {
+                Some([&[0x53, (codes.len() / 2) as u8][..], codes].concat())
+            }
             ([0x19, 0x02, mask], true) => {
                 if tx == 0x7C0 && self.meter_busy {
                     self.meter_busy = false;

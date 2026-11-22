@@ -6,7 +6,7 @@ use icarus_obd::garage::{self, Described};
 use icarus_obd::j1979::{self, DtcKind, FreezeFrame, Monitors};
 use icarus_obd::port::Target;
 use icarus_obd::settings::{self, SettingDef};
-use icarus_obd::uds::{self, Dialect, ModuleDtc};
+use icarus_obd::uds::{self, Dialect};
 use icarus_obd::vehicles::{self, ModuleAddr, Profile};
 use icarus_obd::vin::{self, VinInfo};
 use icarus_obd::{actuator, clear, learning, report};
@@ -141,7 +141,7 @@ fn view(a: &icarus_obd::bus::Analyzer, now: f64, running: bool, ended: Option<St
 pub struct ModuleView {
     pub addr: ModuleAddr,
     pub identity: Vec<(&'static str, String)>,
-    pub dtcs: Option<(Dialect, Vec<ModuleDtc>)>,
+    pub dtcs: uds::CodesRead,
 }
 
 pub enum Event {
