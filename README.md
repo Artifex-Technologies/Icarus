@@ -119,6 +119,10 @@ Taller tires: how far off the speedometer and odometer are (both cases: speed me
 transmission output, where a regear counts too), what the stock and installed axle ratios act like, and which ratios bring
 the stock feel back.
 
+Saved for a vehicle (the Tools page's Save for this vehicle, or `icarus garage tires VIN P265/65R17 LT285/70R17 --at
+transmission --gear 3.91 --installed 4.88`), its speed is shown corrected beside its own reading: on the Live data page,
+and as a column of its own in `icarus obd live`. The settings are in `~/.config/icarus/tires.toml`, by VIN.
+
 ## GPS
 
 Any GPS receiver that speaks NMEA 0183 (nearly all do): a USB one (`/dev/ttyACM0`, 9600 baud unless `@baud` is given), a

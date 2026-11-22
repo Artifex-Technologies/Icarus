@@ -271,8 +271,117 @@ pub fn set(vin: &str, name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A vehicle's tires against stock, for correcting its speed reading (`icarus garage tires`, the Tools page), kept by VIN
+/// in `~/.config/icarus/tires.toml` on this computer only.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TireSetting {
+    pub stock: String,
+    pub installed: String,
+    /// The vehicle measures speed at the transmission output (a regear counts), not at the wheels.
+    #[serde(default)]
+    pub at_transmission: bool,
+    #[serde(default)]
+    pub stock_ratio: Option<f64>,
+    #[serde(default)]
+    pub installed_ratio: Option<f64>,
+}
+
+impl TireSetting {
+    /// What the vehicle's speed reading is multiplied by for the real speed.
+    pub fn factor(&self) -> Result<f64, String> {
+        let (a, b) = (
+            icarus_core::tires::Tire::parse(&self.stock)?,
+            icarus_core::tires::Tire::parse(&self.installed)?,
+        );
+        Ok(icarus_core::tires::speed_factor(
+            a,
+            b,
+            self.at_transmission,
+            self.stock_ratio,
+            self.installed_ratio,
+        ))
+    }
+}
+
+pub fn tires_path() -> Option<PathBuf> {
+    crate::vehicles::user_dir().and_then(|d| d.parent().map(|p| p.join("tires.toml")))
+}
+
+fn tires_in(file: &Path) -> BTreeMap<String, TireSetting> {
+    std::fs::read_to_string(file)
+        .ok()
+        .and_then(|t| toml::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+/// The tire setting of the vehicle with this VIN, if one was saved.
+pub fn tires(vin: &str) -> Option<TireSetting> {
+    tires_path().and_then(|p| tires_in(&p).remove(&vin.trim().to_uppercase()))
+}
+
+/// Saves (Some) or forgets (None) a vehicle's tire setting in `file`; the sizes must parse.
+pub fn set_tires_in(file: &Path, vin: &str, t: Option<TireSetting>) -> Result<(), String> {
+    let mut all = tires_in(file);
+    match t {
+        Some(t) => {
+            t.factor()?;
+            all.insert(vin.trim().to_uppercase(), t);
+        }
+        None => {
+            all.remove(&vin.trim().to_uppercase());
+        }
+    }
+    let body = toml::to_string(&all).map_err(|e| e.to_string())?;
+    if let Some(d) = file.parent() {
+        std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
+    }
+    let tmp = file.with_extension("tmp");
+    std::fs::write(
+        &tmp,
+        format!("# Icarus: each vehicle's tires against stock, by VIN, for its corrected speed. On this computer only.\n{body}"),
+    )
+    .and_then(|_| std::fs::rename(&tmp, file))
+    .map_err(|e| format!("{}: {e}", file.display()))
+}
+
+pub fn set_tires(vin: &str, t: Option<TireSetting>) -> Result<(), String> {
+    set_tires_in(&tires_path().ok_or("no config folder")?, vin, t)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tire_settings_by_vin() {
+        let dir = std::env::temp_dir().join(format!("icarus-tires-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let f = dir.join("tires.toml");
+        let t = TireSetting {
+            stock: "P265/65R17".into(),
+            installed: "LT285/70R17".into(),
+            at_transmission: false,
+            stock_ratio: Some(3.91),
+            installed_ratio: Some(4.88),
+        };
+        set_tires_in(&f, "1abcdefgh12345678", Some(t.clone())).unwrap();
+        assert_eq!(tires_in(&f)["1ABCDEFGH12345678"], t);
+        assert!(
+            (t.factor().unwrap() - 1.0703).abs() < 0.001,
+            "{}",
+            t.factor().unwrap()
+        );
+        let bad = TireSetting {
+            installed: "huge".into(),
+            ..t
+        };
+        assert!(
+            set_tires_in(&f, "1ABCDEFGH12345678", Some(bad)).is_err(),
+            "a size that does not parse is refused"
+        );
+        set_tires_in(&f, "1ABCDEFGH12345678", None).unwrap();
+        assert!(tires_in(&f).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
 
     #[test]

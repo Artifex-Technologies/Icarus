@@ -266,6 +266,10 @@ struct App {
     t_gear: String,
     t_installed: String,
     t_speed: String,
+    /// The vehicle measures speed at the transmission output (a regear counts), for the tire setting saved per vehicle.
+    t_at_transmission: bool,
+    /// The connected vehicle's saved tire setting and what its speed reading is multiplied by for the real speed.
+    tires: Option<(icarus_obd::garage::TireSetting, f64)>,
     s_gauge: String,
     s_gps: String,
     /// The GPS source (`/dev/ttyACM0`, `tcp:HOST:PORT`, `sim`...), what it said last (and over how many seconds), and
@@ -373,6 +377,8 @@ impl App {
             t_gear: "3.91".into(),
             t_installed: "4.88".into(),
             t_speed: "65".into(),
+            t_at_transmission: false,
+            tires: None,
             s_gauge: String::new(),
             s_gps: String::new(),
             gps_src: start
@@ -641,6 +647,7 @@ impl App {
                         }
                     }
                     self.info = Some(*info);
+                    self.refresh_tires();
                     self.modules.clear();
                     self.history.clear();
                     self.selftests = None;
@@ -766,6 +773,7 @@ impl App {
                     self.status = msg;
                     self.error = None;
                     self.info = Some(*info);
+                    self.refresh_tires();
                     self.modules.clear();
                     self.scan_note =
                         "Codes were cleared: scan again to see the modules now.".into();
@@ -1238,7 +1246,17 @@ impl App {
         }
     }
 
-    /// Whether this vehicle's Read-only switch is on.
+    /// The connected vehicle's saved tire setting, read again (after connecting, or saving one).
+    fn refresh_tires(&mut self) {
+        self.tires = self
+            .info
+            .as_ref()
+            .and_then(|i| i.vin.as_deref())
+            .and_then(icarus_obd::garage::tires)
+            .and_then(|t| t.factor().ok().map(|f| (t, f)));
+    }
+
+    /// Whether this vehicle's Read-Only switch is on.
     fn is_read_only(&self, vin: &str) -> bool {
         self.read_only.contains(&vin.trim().to_uppercase())
     }
@@ -1551,6 +1569,13 @@ impl App {
                                 );
                                 ui.label(logs::shown(d.unit, 0.0).1);
                             });
+                            if let (0x0D, Some((_, f)), Some(v)) = (*p, &self.tires, last) {
+                                let (x, unit) = logs::shown(d.unit, v * f);
+                                ui.label(
+                                    RichText::new(format!("{x:.1} {unit} corrected for the tires (x{f:.3})"))
+                                        .color(pal.accent),
+                                );
+                            }
                             if let Some(h) = h {
                                 graph(ui, pal, h);
                             }
@@ -2439,6 +2464,39 @@ impl App {
                     ui.add_space(6.0);
                     for line in icarus_core::tires::explain(&c, speed, gear, installed) {
                         ui.label(line);
+                    }
+                    if let Some(vin) = self.info.as_ref().and_then(|i| i.vin.clone()) {
+                        ui.add_space(6.0);
+                        ui.checkbox(
+                            &mut self.t_at_transmission,
+                            "This vehicle measures speed at the transmission output (a regear counts too)",
+                        );
+                        ui.horizontal(|ui| {
+                            if ui.button("Save for this vehicle").on_hover_text("Live data then shows its speed corrected for these tires").clicked() {
+                                let t = icarus_obd::garage::TireSetting {
+                                    stock: self.t_stock.trim().to_string(),
+                                    installed: self.t_new.trim().to_string(),
+                                    at_transmission: self.t_at_transmission,
+                                    stock_ratio: gear,
+                                    installed_ratio: installed,
+                                };
+                                match icarus_obd::garage::set_tires(&vin, Some(t)) {
+                                    Ok(()) => self.status = "Tires saved: Live data shows the corrected speed.".into(),
+                                    Err(e) => self.error = Some(e),
+                                }
+                                self.refresh_tires();
+                            }
+                            if self.tires.is_some() && ui.button("Forget").clicked() {
+                                let _ = icarus_obd::garage::set_tires(&vin, None);
+                                self.refresh_tires();
+                            }
+                            if let Some((t, f)) = &self.tires {
+                                ui.label(
+                                    RichText::new(format!("saved: {} on stock {}, speed x{f:.3}", t.installed, t.stock))
+                                        .weak(),
+                                );
+                            }
+                        });
                     }
                 }
                 (Err(e), _) | (_, Err(e)) => {

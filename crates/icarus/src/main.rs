@@ -130,6 +130,9 @@ Vehicles:
   icarus vehicles                            the makes Icarus knows (one editable file each)
   icarus garage [VIN \"2017 Toyota Tacoma 3.5L V6\"]
                                              name a vehicle (searches and parts links use it), or list the named ones
+  icarus garage tires VIN STOCK INSTALLED [--at wheels|transmission] [--gear 3.91 --installed 4.88]
+                                             save a vehicle's tires (and regear) for its corrected speed in obd live
+                                             and Live data; VIN off forgets it
   icarus garage history VIN                  when each trouble code came and went on this vehicle (every reading of its
                                              codes is kept in its folder, Logs/codes-history.tsv)
   icarus garage read-only VIN on|off         a vehicle's Read-Only switch: on, Icarus clears, tests and changes nothing
@@ -1892,6 +1895,44 @@ fn cmd_garage(a: &[String]) -> Result<(), String> {
             }
             Ok(())
         }
+        [what, v, rest @ ..] if what == "tires" => {
+            let i = vin::decode(v)?;
+            if rest == ["off"] {
+                garage::set_tires(&i.vin, None)?;
+                println!("{}: tire setting forgotten.", i.vin);
+                return Ok(());
+            }
+            let args = parse_args(rest, &["at", "gear", "installed"])?;
+            let [stock, installed] = args.pos.as_slice() else {
+                return Err("usage: icarus garage tires VIN STOCK INSTALLED [--at wheels|transmission] [--gear STOCK_RATIO --installed NEW_RATIO], or VIN off".into());
+            };
+            let ratio = |k: &str| {
+                args.opt(k)
+                    .map(|v| {
+                        v.parse::<f64>()
+                            .map_err(|_| format!("--{k} needs a ratio like 3.91"))
+                    })
+                    .transpose()
+            };
+            let t = garage::TireSetting {
+                stock: stock.clone(),
+                installed: installed.clone(),
+                at_transmission: match args.opt("at") {
+                    None | Some("wheels") => false,
+                    Some("transmission") => true,
+                    Some(o) => return Err(format!("--at wheels or transmission, not {o}")),
+                },
+                stock_ratio: ratio("gear")?,
+                installed_ratio: ratio("installed")?,
+            };
+            let f = t.factor()?;
+            garage::set_tires(&i.vin, Some(t))?;
+            println!(
+                "{}: saved. Its speed reading times {f:.3} is the real speed (icarus obd live shows it corrected).",
+                i.vin
+            );
+            Ok(())
+        }
         [what, v] if what == "history" => {
             let i = vin::decode(v)?;
             let h = icarus_obd::history::load(&i.vin);
@@ -1983,6 +2024,16 @@ fn obd_live(elm: &mut Elm, args: &Args) -> Result<(), String> {
         .opt("count")
         .map(|v| v.parse::<u64>().map_err(|_| "--count needs a number"))
         .transpose()?;
+    // the vehicle's saved tires (icarus garage tires): its speed, corrected, in a column of its own
+    let factor = if pids.contains(&0x0D) {
+        j1979::vin(elm)
+            .ok()
+            .flatten()
+            .and_then(|v| garage::tires(&v))
+            .and_then(|t| t.factor().ok())
+    } else {
+        None
+    };
     let mut csv = args
         .opt("csv")
         .map(|p| std::fs::File::create(p).map_err(|e| format!("{p}: {e}")))
@@ -1994,6 +2045,12 @@ fn obd_live(elm: &mut Elm, args: &Args) -> Result<(), String> {
             format!("{} [{}]", d.name, d.unit)
         })
         .collect();
+    let mut names = names;
+    if let Some(f) = factor {
+        names.push(format!(
+            "Vehicle speed, corrected for the tires (x{f:.3}) [km/h]"
+        ));
+    }
     if let Some(f) = csv.as_mut() {
         writeln!(
             f,
@@ -2021,16 +2078,23 @@ fn obd_live(elm: &mut Elm, args: &Args) -> Result<(), String> {
         let t0 = Instant::now();
         // up to six values a request on CAN; the engine's answer when it gives one, else the first module's
         let all = j1979::read_many(elm, &pids).map_err(|x| x.to_string())?;
-        let row: Vec<String> = pids
+        let value = |p: u8| {
+            all.iter()
+                .find(|(q, _)| *q == p)
+                .and_then(|(_, r)| r.iter().find(|x| x.from == "7E8").or(r.first()))
+                .map(|x| x.value)
+        };
+        let mut row: Vec<String> = pids
             .iter()
-            .map(|p| {
-                all.iter()
-                    .find(|(q, _)| q == p)
-                    .and_then(|(_, r)| r.iter().find(|x| x.from == "7E8").or(r.first()))
-                    .map(|x| format!("{:.2}", x.value))
-                    .unwrap_or_default()
-            })
+            .map(|p| value(*p).map(|v| format!("{v:.2}")).unwrap_or_default())
             .collect();
+        if let Some(f) = factor {
+            row.push(
+                value(0x0D)
+                    .map(|v| format!("{:.2}", v * f))
+                    .unwrap_or_default(),
+            );
+        }
         let t = format!("{:.2}", start.elapsed().as_secs_f64());
         println!("{t}, {}", row.join(", "));
         // a module left out of a value's answer is said as it happens (once), not only when the watch ends

@@ -135,6 +135,23 @@ pub fn change(
     }
 }
 
+/// What the vehicle's own speed reading is multiplied by for the real speed: where the vehicle measures speed at the
+/// wheels, only the tires count; at the transmission output (`at_transmission`), a regear (the stock `gear` and the
+/// `installed` axle ratio) counts too.
+pub fn speed_factor(
+    stock: Tire,
+    new: Tire,
+    at_transmission: bool,
+    gear: Option<f64>,
+    installed: Option<f64>,
+) -> f64 {
+    let ratio = new.diameter / stock.diameter;
+    match (at_transmission, gear, installed) {
+        (true, Some(g), Some(i)) if i > 0.0 => g * ratio / i,
+        _ => ratio,
+    }
+}
+
 /// The change in words, one line each (the command line and the window show the same).
 pub fn explain(c: &Change, speed: f64, gear: Option<f64>, installed: Option<f64>) -> Vec<String> {
     let mut v = vec![
@@ -180,6 +197,26 @@ pub fn explain(c: &Change, speed: f64, gear: Option<f64>, installed: Option<f64>
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_real_speed_from_the_vehicle_s() {
+        let (stock, new) = (
+            Tire::parse("P265/65R17").unwrap(),
+            Tire::parse("LT285/70R17").unwrap(),
+        );
+        let c = change(stock, new, 65.0, Some(3.91), Some(4.88));
+        // at the wheels: what the vehicle shows at a real 65, times the factor, is 65 again
+        let w = speed_factor(stock, new, false, Some(3.91), Some(4.88));
+        assert!((c.shown_at_actual * w - 65.0).abs() < 1e-9);
+        // at the transmission output with the regear: the shaft reading, times the factor, is the real speed
+        let t = speed_factor(stock, new, true, Some(3.91), Some(4.88));
+        let shaft = 65.0 * c.shaft_reading_factor.unwrap();
+        assert!((shaft * t - 65.0).abs() < 1e-9);
+        assert!(
+            (speed_factor(stock, new, true, None, None) - w).abs() < 1e-12,
+            "no regear: the tires only"
+        );
+    }
     use super::*;
 
     #[test]
