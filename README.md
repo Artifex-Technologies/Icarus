@@ -278,6 +278,7 @@ idevicebtlogger -f pcap obdlink.pcap                     # while the app runs on
 icarus import btlog obdlink.pcap --make toyota --transcript obdlink.csv
 icarus import buslog drive.log --make toyota             # a bus log; either name reads either kind of file
 icarus data obdlink --sample                             # each identifier and the answers seen
+icarus data name obdlink 7E0 RAW_22_1234 --name "Coolant temperature" --byte 1 --bits 8 --add -40 --unit °C
 ```
 
 It gives a transcript (CSV: time, module, request, answer, to match against a screen recording of the app) and a

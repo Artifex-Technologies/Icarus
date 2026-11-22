@@ -99,11 +99,22 @@ after the gates gets no file in the set (it is listed with the reasons).
 
 1. Find the moment in the screen recording where the app shows the value, and the rows of the transcript at that time
    (`clock_utc`): the identifier whose answer bytes follow the value on the screen is the one.
-2. Edit its module file in `~/.config/icarus/data/SET/` (for example `7E0.toml`): replace the placeholder
-   `[[request.value]]` with one value per number on the screen: `name`, `byte` (from 0, after the identifier's echo),
-   `bits`, `mul`/`div`/`add`, `unit`. The samples stay, so the new values can be checked against them.
-3. `icarus data check ~/.config/icarus/data/SET/7E0.toml --make toyota` checks the file, and `icarus data SET --sample`
-   shows what each sample answer decodes to.
+2. Name it with `icarus data name`, one value per number on the screen: where it sits (`--byte`, from 0 after the
+   identifier's echo; `--bit`, `--bits`, `--signed`) and how it scales (`--mul`, `--div`, `--add`, `--unit`). Without
+   `--keep` the placeholder itself becomes the named value; with `--keep --id NEW_ID` it stays and the named value is
+   added beside it (one answer, several values). A layout makes it a number unless `--kind text` or `--kind hex` says
+   otherwise. The module file is checked as Icarus checks every module file and written back (nothing is written when
+   it does not pass); the samples stay, and what each decodes to is shown:
+
+   ```sh
+   icarus data name obdlink 7E0 RAW_22_1234 --keep --id ECT --name "Coolant temperature" --byte 1 --bits 8 --add -40 --unit °C
+   icarus data name obdlink 7E0 RAW_22_1234 --id MODE --name "Mode" --bits 8 --kind hex
+   ```
+
+   A value can also be written by hand in its module file in `~/.config/icarus/data/SET/` (for example `7E0.toml`:
+   `name`, `byte`, `bits`, `mul`/`div`/`add`, `unit`), then checked with
+   `icarus data check ~/.config/icarus/data/SET/7E0.toml --make toyota`.
+3. `icarus data SET --sample` shows what each sample answer decodes to.
 4. On the vehicle, `icarus obd data 7E0 --set SET --adapter A` reads it live; `icarus obd data --check 7E0 VALUE_ID` marks it
    as checked once it matched a gauge or the app.
 

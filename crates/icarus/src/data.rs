@@ -424,9 +424,10 @@ fn import_capture(args: &Args) -> Result<(), String> {
     let root = moddata::user_dir().ok_or("no config folder")?;
     let dir = moddata::write_set(&root, &l.imp, args.opt("replace").is_some())?;
     say!(
-        "Written to {}. To name a value once you know what it is: edit its module file there (name, unit, byte, bits, \
-         mul/div/add), check it with icarus data check FILE.toml, and see it decode the samples with icarus data {} --sample",
+        "Written to {}. To name a value once you know what it is: icarus data name {} MODULE RAW_... --name TEXT (with \
+         --byte, --bits, --mul/--div/--add, --unit), and see it decode the samples with icarus data {} --sample",
         dir.display(),
+        set.name,
         set.name
     );
     Ok(())
@@ -480,13 +481,22 @@ fn years(y: &[[u16; 2]]) -> String {
         .join(", ")
 }
 
-/// `icarus data [SET] [--module ID] [--find TEXT] [--sample] [--refused]`, `icarus data check FILE.toml [--make NAME]`
+/// The options `icarus data` takes with a value.
+const DATA_OPTIONS: [&str; 13] = [
+    "module", "find", "make", "name", "id", "byte", "bit", "bits", "mul", "div", "add", "unit",
+    "kind",
+];
+
+/// `icarus data [SET] [--module ID] [--find TEXT] [--sample] [--refused]`, `icarus data check FILE.toml [--make NAME]`,
+/// `icarus data name SET MODULE VALUE_ID --name TEXT ...`
 pub fn cmd_data(a: &[String]) -> Result<(), String> {
-    let args = parse_args(a, &["module", "find", "make"])?;
+    let args = parse_args(a, &DATA_OPTIONS)?;
     let all = profiles();
     let user = moddata::user_dir();
-    if args.pos.first().map(String::as_str) == Some("check") {
-        return data_check(&args, &all);
+    match args.pos.first().map(String::as_str) {
+        Some("check") => return data_check(&args, &all),
+        Some("name") => return data_name(&args),
+        _ => {}
     }
     let Some(name) = args.pos.first() else {
         let (sets, problems) = moddata::load_all(user.as_deref(), &all);
@@ -581,21 +591,9 @@ pub fn cmd_data(a: &[String]) -> Result<(), String> {
                 print_value(v);
             }
             if args.opt("sample").is_some() {
-                for (i, d) in r.samples_data()?.iter().enumerate() {
-                    if let Outcome::Values(rs) = moddata::decode_all(r, d, None) {
-                        for x in rs.iter().filter(|x| vals.iter().any(|v| v.id == x.id)) {
-                            println!(
-                                "      sample{}: {:<20} {}",
-                                if i == 0 {
-                                    String::new()
-                                } else {
-                                    format!(" {}", i + 1)
-                                },
-                                x.id,
-                                x.text(units::us_customary())
-                            );
-                        }
-                    }
+                let ids: Vec<&str> = vals.iter().map(|v| v.id.as_str()).collect();
+                for l in sample_lines(r, &ids, units::us_customary())? {
+                    println!("{l}");
                 }
             }
         }
@@ -609,6 +607,252 @@ pub fn cmd_data(a: &[String]) -> Result<(), String> {
     if !s.set.source.attribution.is_empty() {
         println!("\n{}", s.set.source.attribution);
     }
+    Ok(())
+}
+
+/// What each sample answer of `r` decodes to, for the values `ids`, as `icarus data SET --sample` shows it.
+fn sample_lines(r: &md::RequestDef, ids: &[&str], us: bool) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    for (i, d) in r.samples_data()?.iter().enumerate() {
+        if let Outcome::Values(rs) = moddata::decode_all(r, d, None) {
+            for x in rs.iter().filter(|x| ids.contains(&x.id.as_str())) {
+                out.push(format!(
+                    "      sample{}: {:<20} {}",
+                    if i == 0 {
+                        String::new()
+                    } else {
+                        format!(" {}", i + 1)
+                    },
+                    x.id,
+                    x.text(us)
+                ));
+            }
+        }
+    }
+    Ok(out)
+}
+
+const NAME_USAGE: &str =
+    "usage: icarus data name SET MODULE VALUE_ID --name TEXT [--id NEW_ID] [--keep] [--byte N] [--bit N] [--bits N] \
+     [--signed] [--mul X] [--div X] [--add X] [--unit U] [--kind number|text|hex]";
+
+/// A value named by `name_value`: the module file written, the module as read back, and where the value is in it.
+struct Named {
+    set: String,
+    path: std::path::PathBuf,
+    module: ModuleDef,
+    request: usize,
+    id: String,
+}
+
+/// Names (and lays out) a value of a set learned from a capture in `root` (the user's data folder) and writes its module
+/// file back, checked as Icarus checks every module file when it reads it. Without `--keep` the value itself is renamed
+/// and laid out anew; with it, the value stays and a new one (`--id`) is added beside it, for an answer that holds
+/// several values. A layout (`--bit`, `--bits`, `--signed`, `--mul`, `--div`, `--add`, `--unit`) makes it a number
+/// unless `--kind` says otherwise. The value stays not checked: that is for the vehicle (`icarus obd data --check`).
+fn name_value(root: &std::path::Path, args: &Args, today: &str) -> Result<Named, String> {
+    let [_, set, module, id] = args.pos.as_slice() else {
+        return Err(NAME_USAGE.into());
+    };
+    let name = args.opt("name").ok_or(NAME_USAGE)?;
+    md::check_set_name(set)?;
+    let dir = root.join(set);
+    if !dir.join("set.toml").is_file() {
+        return Err(format!(
+            "no set {set:?} in {} (icarus data lists the sets; a built-in one is never changed)",
+            root.display()
+        ));
+    }
+    let (info, _, _) = moddata::read_dir(&dir)?;
+    if !matches!(
+        info.source.from.as_str(),
+        "Bluetooth capture" | "bus capture"
+    ) {
+        return Err(format!(
+            "{set} came from {}, not from a capture: icarus data name names a capture's values (edit this set's files by \
+             hand, then icarus data check FILE.toml)",
+            info.source.from
+        ));
+    }
+    // the module's file: the one whose module is MODULE ("7E0", "750.40", or its request ID) and holds VALUE_ID
+    let wanted_tx = hex_id(module).ok();
+    let mut found = Vec::new();
+    let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+        .map_err(|x| format!("{}: {x}", dir.display()))?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "toml") && !p.ends_with("set.toml"))
+        .collect();
+    paths.sort();
+    for p in paths {
+        let Ok(text) = std::fs::read_to_string(&p) else {
+            continue;
+        };
+        let Ok(m) = md::parse_module(&text, &p.display().to_string()) else {
+            continue; // a file Icarus cannot read is listed by icarus data, not named in
+        };
+        let h = &m.module;
+        let this =
+            h.label().eq_ignore_ascii_case(module) || (h.ext.is_none() && wanted_tx == Some(h.tx));
+        let at = m.requests.iter().enumerate().find_map(|(ri, r)| {
+            r.values
+                .iter()
+                .position(|v| v.id.eq_ignore_ascii_case(id))
+                .map(|vi| (ri, vi))
+        });
+        if let (true, Some(at)) = (this, at) {
+            found.push((p, m, at));
+        }
+    }
+    let (path, mut m, (ri, vi)) = match found.len() {
+        0 => {
+            return Err(format!(
+                "{set} has no value {id} in module {module} (icarus data {set} --module {module} lists them)"
+            ))
+        }
+        1 => found.remove(0),
+        _ => {
+            let files: Vec<String> = found.iter().map(|f| f.0.display().to_string()).collect();
+            return Err(format!(
+                "{module} {id} is in several files ({}): edit the one you mean by hand",
+                files.join(", ")
+            ));
+        }
+    };
+    let old = m.requests[ri].values[vi].clone();
+    let keep = args.opt("keep").is_some();
+    let mut v = old.clone();
+    match args.opt("id") {
+        Some(new) => v.id = new.to_string(),
+        None if keep => {
+            return Err("--keep keeps the value and adds a new one: give it an --id".into())
+        }
+        None => {}
+    }
+    v.name = name.to_string();
+    let int = |k: &str| {
+        args.opt(k)
+            .map(|s| {
+                s.parse::<usize>()
+                    .map_err(|_| format!("--{k} needs a whole number, not {s:?}"))
+            })
+            .transpose()
+    };
+    let num = |k: &str| {
+        args.opt(k)
+            .map(|s| {
+                s.parse::<f64>()
+                    .map_err(|_| format!("--{k} needs a number, not {s:?}"))
+            })
+            .transpose()
+    };
+    if let Some(b) = int("byte")? {
+        v.byte = b;
+    }
+    let mut layout = false;
+    if let Some(b) = int("bit")? {
+        v.bit = u8::try_from(b).map_err(|_| "--bit is 0-7".to_string())?;
+        layout = true;
+    }
+    let bits = int("bits")?;
+    if let Some(b) = bits {
+        v.bits = u16::try_from(b).map_err(|_| format!("--bits {b} is too many"))?;
+        layout = true;
+    }
+    if args.opt("signed").is_some() {
+        v.signed = true;
+        layout = true;
+    }
+    for (k, field) in [
+        ("mul", &mut v.mul),
+        ("div", &mut v.div),
+        ("add", &mut v.add),
+    ] {
+        if let Some(x) = num(k)? {
+            *field = x;
+            layout = true;
+        }
+    }
+    if let Some(u) = args.opt("unit") {
+        v.unit = u.to_string();
+        layout = true;
+    }
+    let kind = match args.opt("kind") {
+        Some("number") => Some(md::ValueKind::Number),
+        Some("text") => Some(md::ValueKind::Text),
+        Some("hex") => Some(md::ValueKind::Hex),
+        Some(_) => return Err(
+            "--kind is number, text or hex (a state value needs its states: edit the file by hand)"
+                .into(),
+        ),
+        None => layout.then_some(md::ValueKind::Number),
+    };
+    if let Some(k) = kind {
+        if k == md::ValueKind::Number && old.kind != k && bits.is_none() {
+            return Err(format!(
+                "{} covers the whole answer ({} bits): give the number's width with --bits (and --byte where it starts)",
+                old.id, old.bits
+            ));
+        }
+        v.kind = k;
+    }
+    v.checked = false;
+    v.note = if keep {
+        format!(
+            "named by hand on {today} from the bytes of {}; not checked",
+            old.id
+        )
+    } else if old.note.contains("not named, not checked") {
+        old.note.replace(
+            "not named, not checked",
+            &format!("named by hand on {today} (was {}), not checked", old.id),
+        )
+    } else if old.note.contains("named by hand") {
+        old.note.clone()
+    } else {
+        format!("named by hand on {today}; not checked")
+    };
+    let new_id = v.id.clone();
+    if keep {
+        m.requests[ri].values.push(v);
+    } else {
+        m.requests[ri].values[vi] = v;
+    }
+    let what = path.display().to_string();
+    md::validate(&mut m).map_err(|x| format!("{what}: {x}; nothing written"))?;
+    let text = md::module_to_toml(&m);
+    // as Icarus will read it back
+    let back = md::parse_module(&text, &what).map_err(|x| format!("{x}; nothing written"))?;
+    let tmp = path.with_extension("toml.new");
+    std::fs::write(&tmp, &text).map_err(|x| format!("{}: {x}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).map_err(|x| format!("{what}: {x}"))?;
+    Ok(Named {
+        set: set.clone(),
+        path,
+        module: back,
+        request: ri,
+        id: new_id,
+    })
+}
+
+/// `icarus data name SET MODULE VALUE_ID --name TEXT ...` (see `name_value`).
+fn data_name(args: &Args) -> Result<(), String> {
+    let root = moddata::user_dir().ok_or("no config folder")?;
+    let n = name_value(&root, args, &today())?;
+    let r = &n.module.requests[n.request];
+    let label = n.module.module.label();
+    println!("{label} {}: written to {}", r.label(), n.path.display());
+    if let Some(v) = r.values.iter().find(|v| v.id == n.id) {
+        print_value(v);
+    }
+    for l in sample_lines(r, &[n.id.as_str()], units::us_customary())? {
+        println!("{l}");
+    }
+    println!(
+        "Not checked yet: icarus data {} --sample shows every value; once it matches a gauge or the app on the vehicle, \
+         icarus obd data --check {:X} {} --adapter A",
+        n.set, n.module.module.tx, n.id
+    );
     Ok(())
 }
 
@@ -1618,6 +1862,117 @@ mod tests {
    0.600       7B0  02 21 05 00 00 00 00 00
    0.610       7B8  03 7F 21 12 00 00 00 00
 ";
+
+    #[test]
+    fn a_placeholder_of_a_capture_set_is_named_and_decodes_its_samples() {
+        let root = std::env::temp_dir().join(format!("icarus-name-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let all = vehicles::builtin();
+        let l = learn(CAPTURE.as_bytes(), "truck.log", None, None, false, &all).unwrap();
+        moddata::write_set(&root, &l.imp, false).unwrap();
+        let name = |words: &[&str]| {
+            let a: Vec<String> = words.iter().map(|s| s.to_string()).collect();
+            name_value(&root, &parse_args(&a, &DATA_OPTIONS).unwrap(), "2026-11-21")
+        };
+        // 22 1234 answered 01 02: the second byte is a temperature 40 below its raw value (a new value beside the
+        // placeholder), the first a mode (the placeholder itself, narrowed to its byte)
+        let n = name(&[
+            "name",
+            "truck",
+            "7E0",
+            "RAW_22_1234",
+            "--keep",
+            "--id",
+            "ECT",
+            "--name",
+            "Coolant temperature",
+            "--byte",
+            "1",
+            "--bits",
+            "8",
+            "--add",
+            "-40",
+            "--unit",
+            "°C",
+        ])
+        .unwrap();
+        assert_eq!((n.id.as_str(), n.module.module.tx), ("ECT", 0x7E0));
+        name(&[
+            "name",
+            "truck",
+            "7e0",
+            "raw_22_1234",
+            "--id",
+            "MODE",
+            "--name",
+            "Mode",
+            "--bits",
+            "8",
+            "--kind",
+            "hex",
+        ])
+        .unwrap();
+        // as icarus data truck --sample shows it, from the files as Icarus reads them
+        let s = moddata::load_set("truck", Some(&root), &all).unwrap();
+        let m = s.modules.iter().find(|m| m.module.tx == 0x7E0).unwrap();
+        let r = m.requests.iter().find(|r| r.ident == 0x1234).unwrap();
+        let ids: Vec<&str> = r.values.iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(ids, vec!["MODE", "ECT"]);
+        let ect = &r.values[1];
+        assert_eq!(
+            (ect.name.as_str(), ect.byte, ect.bits),
+            ("Coolant temperature", 1, 8)
+        );
+        assert!(
+            !ect.checked && ect.note.contains("named by hand"),
+            "{}",
+            ect.note
+        );
+        assert!(
+            r.values[0].note.contains("was RAW_22_1234"),
+            "{}",
+            r.values[0].note
+        );
+        let lines = sample_lines(r, &ids, false).unwrap();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("ECT") && l.contains("-38 °C")),
+            "{lines:?}"
+        );
+        assert!(lines.iter().any(|l| l.contains("MODE")), "{lines:?}");
+        // what is refused, with nothing written
+        let e = |words: &[&str]| name(words).err().unwrap_or_default();
+        assert!(e(&["name", "truck", "7E0", "NOPE", "--name", "x"]).contains("no value NOPE"));
+        assert!(
+            e(&["name", "truck", "7E0", "ECT", "--name", "x", "--byte", "9"])
+                .contains("nothing written")
+        );
+        assert!(e(&[
+            "name",
+            "truck",
+            "7E0",
+            "RAW_22_F190",
+            "--name",
+            "x",
+            "--unit",
+            "km"
+        ])
+        .contains("--bits"));
+        assert!(e(&["name", "truck", "7E0", "ECT", "--keep", "--name", "x"]).contains("--id"));
+        assert!(e(&["name", "sim", "700", "SIM_ECT", "--name", "x"]).contains("built-in"));
+        std::fs::create_dir_all(root.join("hand")).unwrap();
+        std::fs::write(
+            root.join("hand/set.toml"),
+            "format = 1\nname = \"hand\"\n\n[source]\nfrom = \"hand\"\n",
+        )
+        .unwrap();
+        assert!(e(&["name", "hand", "7E0", "X", "--name", "y"]).contains("not from a capture"));
+        let again = moddata::load_set("truck", Some(&root), &all).unwrap();
+        assert_eq!(again.modules, s.modules, "a refused naming changes nothing");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn a_capture_becomes_a_gated_set_and_a_transcript_without_the_vin() {

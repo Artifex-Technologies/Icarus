@@ -89,6 +89,12 @@ Module data (definition files; nothing is sent to a vehicle):
                                              sample answers a file carries)
   icarus data check FILE.toml [--make NAME]  whether a hand-written module file is right, and what Icarus would send
                                              (with the make's profile, as on the vehicle)
+  icarus data name SET MODULE VALUE_ID --name TEXT [--id NEW_ID] [--keep] [--byte N] [--bit N] [--bits N] [--signed]
+                   [--mul X] [--div X] [--add X] [--unit U] [--kind number|text|hex]
+                                             name a value of a set learned from a capture (its placeholder RAW_...):
+                                             where it sits in the answer and how it scales; --keep keeps the placeholder
+                                             and adds the named value beside it (one answer, several values). The file
+                                             is checked and written back; the samples show what it decodes to
 
 Bus (watching only: nothing is sent onto the bus):
   icarus bus watch (--adapter A | --can can0) [--seconds N] [--raw]
@@ -226,6 +232,8 @@ fn parse_args(a: &[String], with_value: &[&str]) -> Result<Args, String> {
             "--check",
             "--keep-vin",
             "--position",
+            "--keep",
+            "--signed",
         ]
         .contains(&a[i].as_str())
         {
