@@ -34,7 +34,9 @@ it with HOME/XDG_STATE_HOME pointed at a scratch folder. There is no CI workflow
   committed; tests use small files written for them.
 - **Writes.** Icarus is meant to do more than read (my decision, 2026-11-08): actuator tests, clearing codes, changing a
   module's settings, coding and flashing all belong in it. Each kind of write has its own module and allow-list (actuator
-  tests in `crates/icarus-obd/src/actuator.rs`, clearing in `clear.rs`, settings in `settings.rs`) and the same safeguards:
+  tests in `crates/icarus-obd/src/actuator.rs`, clearing in `clear.rs`, settings in `settings.rs`, service routines in
+  `service.rs`) and the same safeguards (each calls `lock::writes_allowed`, and the adapter link refuses changes to a
+  Read-Only vehicle underneath):
   the value or image there before is read and kept first, with a way back; only what was learned on my own vehicle or
   verified for it (no guessed IDs in a real vehicle's profile: an unverified ID could drive something else); conditions
   (parked, engine off where it matters, voltage held up); wired for anything that writes memory; the airbag modules never.

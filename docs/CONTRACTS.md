@@ -22,7 +22,7 @@ cables). `VERSION` is Icarus's own version. Used by: Labyrinth OS's `icarus-git`
 
 ### Vehicle profiles (`crates/icarus-obd/vehicles/*.toml`, `~/.config/icarus/vehicles/`)
 
-One TOML file per make (module addresses, quirks, `[codes]`, `[[test]]`, `[[setting]]`), picked by the VIN; a user file of the
+One TOML file per make (module addresses, quirks, `[codes]`, `[[test]]`, `[[setting]]`, `[[service]]`), picked by the VIN; a user file of the
 same name replaces a built-in one. Addresses from public sources carry `checked = false` until seen on a vehicle.
 Used by: Icarus itself, and anyone writing down a module found on a vehicle.
 
