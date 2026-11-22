@@ -318,15 +318,18 @@ impl State {
             }
             (id, bytes(rest)?)
         } else {
+            // no spaces: the header, with ATD1 the length digit, then the bytes; an 11-bit header's three digits make the
+            // line odd without the length digit and even with it
             let s = toks.first()?;
+            let dlc = usize::from(self.dlc);
             let head = if self.can29() {
                 8
-            } else if s.len() % 2 == 1 {
+            } else if s.len() % 2 != dlc % 2 {
                 3
             } else {
                 return None;
             };
-            let skip = head + usize::from(self.dlc);
+            let skip = head + dlc;
             if s.len() < skip || (s.len() - skip) % 2 != 0 {
                 return None;
             }
@@ -786,6 +789,46 @@ mod tests {
                 data: vec![0x61, 0x01, 0x0A]
             }
         );
+    }
+
+    #[test]
+    fn the_length_digit_without_spaces_on_eleven_bit_can() {
+        // ATD1 shows each frame's length (DLC) as one digit after the header; with ATS0 nothing stands between them
+        let packed = |s: &str| s.replace(' ', "");
+        let single = packed("7E8 5 04 62 12 34 05");
+        let long = format!(
+            "{}\r{}",
+            packed("7E8 8 10 0B 62 12 35 01 02 03"),
+            packed("7E8 8 21 04 05 06 07 08 AA AA")
+        );
+        let c = talk(&[
+            ("ATH1", "OK"),
+            ("ATS0", "OK"),
+            ("ATD1", "OK"),
+            ("ATSH7E0", "OK"),
+            ("221234", single.as_str()),
+            ("221235", long.as_str()),
+            ("ATS1", "OK"),
+            ("221236", "7E8 8 04 62 12 36 07 00 00 00"),
+        ]);
+        let e = &c.exchanges;
+        assert_eq!(e.len(), 3);
+        assert_eq!(
+            e[0].replies,
+            vec![Reply {
+                from: Some(0x7E8),
+                data: vec![0x62, 0x12, 0x34, 0x05]
+            }]
+        );
+        assert_eq!(
+            e[1].replies,
+            vec![Reply {
+                from: Some(0x7E8),
+                data: vec![0x62, 0x12, 0x35, 1, 2, 3, 4, 5, 6, 7, 8]
+            }]
+        );
+        assert_eq!(e[2].replies[0].data, vec![0x62, 0x12, 0x36, 0x07]);
+        assert!(e.iter().all(|x| x.problem.is_none()), "{e:?}");
     }
 
     #[test]
