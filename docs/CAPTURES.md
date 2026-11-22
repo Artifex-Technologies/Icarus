@@ -122,8 +122,10 @@ after the gates gets no file in the set (it is listed with the reasons).
   carry in each direction (the two sides choose their IDs apart, and reuse them: an SDP query and the RFCOMM channel after
   it often both get 0x40), or, for a channel opened before the log began, by RFCOMM frames whose checksums
   hold; RFCOMM data frames (UIH) with or without a credit byte; Apple's iAP2 link packets on an MFi accessory's channel
-  (such as the OBDLink MX+ with an iPhone): both checksums checked, the external-accessory session's bytes taken out, a
-  packet sent twice read once; Bluetooth LE adapters from ATT writes and notifications.
+  (such as the OBDLink MX+ with an iPhone): both checksums checked, the external-accessory session's bytes taken out
+  (sessions told by each packet's session byte; the control session, whose messages start `40 40`, left out whole, also
+  a message of it split over several packets), a packet sent twice read once; Bluetooth LE adapters from ATT writes and
+  notifications.
 - **The adapter's language** (ELM327 and STN): commands end at a carriage return, answers at the `>` prompt; the settings
   that change requests and answers are followed once the adapter answered OK (`ATZ`/`ATD`/`ATWS`, `ATSP`/`ATTP` and
   `ATDPN`'s answer, `ATSH` with 3, 6 or 8 digits (6 under automatic protocol: 29-bit CAN when they start DA or DB,

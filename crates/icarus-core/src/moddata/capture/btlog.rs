@@ -28,8 +28,10 @@
 //! carries a credit byte before the data, which is left out. An MFi accessory such as the OBDLink MX+ talks to an iPhone
 //! app inside Apple's iAP2 link packets on its RFCOMM channel: where a stream holds them (FF 5A, a length, control,
 //! sequence and acknowledgement numbers, a session, a header checksum, then the payload and its checksum, both checksums
-//! adding up to zero), the external-accessory session's bytes (after its two-byte session number) are taken out, and a
-//! packet sent again with the same sequence number is read once. Bluetooth LE adapters are read from ATT writes (the app)
+//! adding up to zero), the external-accessory session's bytes (after its two-byte session number) are taken out (the
+//! session told by each packet's session byte: the control session, whose messages start `40 40`, is left out whole,
+//! also where a message runs on over several packets), and a packet sent again with the same sequence number is read
+//! once. Bluetooth LE adapters are read from ATT writes (the app)
 //! and notifications (the adapter) on each LE connection.
 //!
 //! A stream is the adapter's conversation when one side sends `>` prompts and the other side's lines look like AT, ST and
@@ -525,6 +527,9 @@ impl L2cap {
 }
 
 /// The external-accessory bytes inside Apple's iAP2 link packets, when a side's stream holds them (None: it does not).
+/// Each packet's header names its session; a session whose messages start `40 40` is the control session, and so is
+/// every packet of it, also the rest of a control message split over several packets. Link packets that set up or
+/// reset the link (SYN, RST) carry no session's data.
 fn iap2(pieces: &[Piece]) -> Option<Vec<Piece>> {
     let mut all = Vec::new();
     let mut owner = Vec::new();
@@ -533,7 +538,9 @@ fn iap2(pieces: &[Piece]) -> Option<Vec<Piece>> {
         owner.resize(all.len(), i);
     }
     let sum = |b: &[u8]| b.iter().fold(0u8, |a, x| a.wrapping_add(*x));
-    let (mut out, mut found, mut last) = (Vec::new(), false, None);
+    // the link packets with a whole payload: (where it starts, its length with the header and checksum)
+    let mut packets = Vec::new();
+    let mut found = false;
     let mut i = 0;
     while i + 9 <= all.len() {
         if all[i] == 0xFF && all[i + 1] == 0x5A {
@@ -541,27 +548,45 @@ fn iap2(pieces: &[Piece]) -> Option<Vec<Piece>> {
             if len >= 9 && i + len <= all.len() && sum(&all[i..i + 9]) == 0 {
                 found = true;
                 if len > 10 && sum(&all[i + 9..i + len]) == 0 {
-                    let payload = &all[i + 9..i + len - 1];
-                    let seq = all[i + 5];
-                    if last != Some(seq) {
-                        last = Some(seq);
-                        // the control session's messages start 40 40; an accessory session's data has its number first
-                        if payload.len() > 2 && payload[..2] != [0x40, 0x40] {
-                            let p = &pieces[owner[i + len - 1]];
-                            out.push(Piece {
-                                seq: p.seq,
-                                clock: p.clock,
-                                side_a: p.side_a,
-                                bytes: payload[2..].to_vec(),
-                            });
-                        }
-                    }
+                    packets.push((i, len));
                 }
                 i += len;
                 continue;
             }
         }
         i += 1;
+    }
+    const SYN: u8 = 0x80;
+    const RST: u8 = 0x10;
+    let data = |&(i, _): &(usize, usize)| all[i + 4] & (SYN | RST) == 0;
+    let session = |&(i, _): &(usize, usize)| all[i + 7];
+    let payload = |&(i, len): &(usize, usize)| &all[i + 9..i + len - 1];
+    let control: HashSet<u8> = packets
+        .iter()
+        .filter(|p| data(p) && payload(p).starts_with(&[0x40, 0x40]))
+        .map(session)
+        .collect();
+    let mut out = Vec::new();
+    let mut last = None;
+    for p in &packets {
+        let (i, len) = *p;
+        let seq = all[i + 5];
+        // a packet sent again (the same sequence number) is read once
+        if last == Some(seq) {
+            continue;
+        }
+        last = Some(seq);
+        let bytes = payload(p);
+        // an accessory session's data has its two-byte number first
+        if data(p) && !control.contains(&session(p)) && bytes.len() > 2 {
+            let from = &pieces[owner[i + len - 1]];
+            out.push(Piece {
+                seq: from.seq,
+                clock: from.clock,
+                side_a: from.side_a,
+                bytes: bytes[2..].to_vec(),
+            });
+        }
     }
     found.then_some(out)
 }
@@ -979,6 +1004,34 @@ mod tests {
         assert_eq!(e.len(), 1, "a resent packet is read once");
         assert_eq!(e[0].request, vec![0x22, 0x12, 0x34]);
         assert_eq!(e[0].replies[0].data, vec![0x62, 0x12, 0x34, 0x07]);
+    }
+
+    #[test]
+    fn a_control_message_split_over_link_packets_gives_no_accessory_bytes() {
+        let piece = |seq: usize, bytes: Vec<u8>| Piece {
+            seq,
+            clock: 0.0,
+            side_a: true,
+            bytes,
+        };
+        // the control session (1): one message of 18 bytes over two link packets, the second's bytes printable
+        let mut rest = vec![0x00, 0x01];
+        rest.extend_from_slice(b"2101\r\x07");
+        let mut ea = vec![0x00, 0x01];
+        ea.extend_from_slice(b"221234\r");
+        let pieces = vec![
+            piece(
+                0,
+                iap2_packet(1, 1, &[0x40, 0x40, 0x00, 0x12, 0x1D, 0x00, 1, 2, 3, 4]),
+            ),
+            piece(1, iap2_packet(2, 1, &rest)),
+            // the accessory's session (2)
+            piece(2, iap2_packet(3, 2, &ea)),
+        ];
+        let out = iap2(&pieces).unwrap();
+        let bytes: Vec<u8> = out.iter().flat_map(|p| p.bytes.clone()).collect();
+        assert_eq!(bytes, b"221234\r", "{:?}", String::from_utf8_lossy(&bytes));
+        assert_eq!(out[0].seq, 2);
     }
 
     #[test]
