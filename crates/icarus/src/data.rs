@@ -653,82 +653,15 @@ fn data_check(args: &Args, all: &[vehicles::Profile]) -> Result<(), String> {
     Ok(())
 }
 
-/// The set for this vehicle: `wanted` (`--set`), else the one its state names, else the only one that fits. Nothing is
-/// guessed: with the make, model year or model unknown, a set that names one does not fit (it is named with --set), and
-/// the simulated vehicle's set is refused on any other vehicle however it is named.
-fn choose<'a>(
-    sets: &'a [Loaded],
-    wanted: Option<&str>,
-    state: &State,
-    make: Option<&str>,
-    year: Option<u16>,
-    model: Option<&str>,
-    vin: Option<&str>,
-) -> Result<&'a Loaded, String> {
-    if let Some(n) = wanted.or(state.set.as_deref()) {
-        if let Some(why) = moddata::set_refused(n, vin) {
-            return Err(why);
-        }
-        return sets
-            .iter()
-            .find(|s| s.set.name == n)
-            .ok_or_else(|| format!("no module-data set named {n:?} (icarus data lists them)"));
-    }
-    let fit = moddata::sets_for(sets, make, year, model, vin);
-    match fit.as_slice() {
-        [one] => Ok(one),
-        [] => {
-            let mut unknown = Vec::new();
-            if make.is_none() {
-                unknown.push("make (--make NAME)");
-            }
-            if year.is_none() {
-                unknown.push("model year (--year YYYY)");
-            }
-            if model.is_none() {
-                unknown.push("model (name the vehicle: icarus garage VIN \"2017 Toyota Tacoma\")");
-            }
-            Err(format!(
-                "no module-data set fits this vehicle ({} {}{}){}: import one with icarus import obdb FILE.json (the \
-                 vehicle's signal set from github.com/OBDb, downloaded), or name one with --set",
-                year.map(|y| y.to_string()).unwrap_or_default(),
-                make.unwrap_or("unknown make"),
-                model.map(|m| format!(" {m}")).unwrap_or_default(),
-                if unknown.is_empty() {
-                    String::new()
-                } else {
-                    format!(
-                        "; its {} is not known, and a set is never guessed",
-                        unknown.join(", ")
-                    )
-                }
-            ))
-        }
-        many => {
-            Err(format!(
-            "several sets fit ({}): choose one with --set NAME (it is remembered for this vehicle)",
-            many.iter().map(|s| s.set.name.as_str()).collect::<Vec<_>>().join(", ")
-        ))
-        }
-    }
-}
+use icarus_obd::vehicledata::choose;
 
-/// The chosen set as used on this vehicle (`Loaded::on_vehicle`: the gates decided by the vehicle's make too), with a note
-/// when the set is for another make or the vehicle's make is not known.
+/// The chosen set as used on this vehicle, its note (another make, or an unknown one) said on stderr.
 fn on_vehicle(set: &Loaded, all: &[vehicles::Profile], make: Option<&str>) -> Loaded {
-    match make {
-        Some(m) if !m.eq_ignore_ascii_case(&set.set.make) => eprintln!(
-            "note: the set {:?} is for {:?}, this vehicle is {m:?}: the stricter of the two makes' airbag gates holds",
-            set.set.name, set.set.make
-        ),
-        None if !set.set.make.is_empty() => eprintln!(
-            "note: this vehicle's make is not known (--make NAME): a module of unknown kind in the set {:?} gets no data \
-             request, since it could be the airbag module",
-            set.set.name
-        ),
-        _ => {}
+    let (set, note) = icarus_obd::vehicledata::on_vehicle(set, all, make);
+    if let Some(n) = note {
+        eprintln!("note: {n}");
     }
-    set.on_vehicle(all, make)
+    set
 }
 
 /// A CSV column: (module request ID, value id) and its heading.

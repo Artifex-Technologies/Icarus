@@ -28,6 +28,8 @@ pub enum Cmd {
     LiveRotate(Vec<u8>),
     /// Read everything again and save a report (with every module when true).
     Report(bool),
+    /// Read each module's own values once (icarus_obd::vehicledata): every module of the set that fits, read only.
+    ModuleData,
     /// Start an actuator test (value for percent tests); it runs while TestHold keeps coming (at least every 0.5 s).
     TestStart {
         def: actuator::TestDef,
@@ -158,6 +160,8 @@ pub enum Event {
         unreachable: Vec<String>,
     },
     ReportSaved(String),
+    /// Each module's own values, or why they could not be read.
+    ModuleData(Result<Box<icarus_obd::vehicledata::VehicleValues>, String>),
     SelfTests(Vec<icarus_obd::mode06::TestResult>),
     Charging(icarus_obd::charging::Check),
     Bus(Box<BusView>),
@@ -300,6 +304,15 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
                     Ok(p) => send(Event::ReportSaved(p.display().to_string())),
                     Err(m) => send(Event::Failed(m)),
                 }
+            }
+            Some(Cmd::ModuleData) => {
+                let Some(e) = elm.as_mut() else { continue };
+                live.clear();
+                send(Event::Status("Reading each module's own values...".into()));
+                let us = icarus_core::moddata::units::us_customary();
+                send(Event::ModuleData(
+                    icarus_obd::vehicledata::read(e, &profiles, None, us).map(Box::new),
+                ));
             }
             Some(Cmd::Clear(target)) => {
                 let Some(e) = elm.as_mut() else { continue };

@@ -225,7 +225,8 @@ model and year, so they come from watching a tool on my own vehicle. `sim:off` h
 What a dealer tool shows as a module's data list (Techstream, DDT2000): transmission fluid temperature, knock correction,
 wheel speeds... values the standard OBD-II list does not have. Icarus reads them, for any make, from definition files: each
 says which read-only request to send a module and what the bytes of its answer mean. Icarus ships no third-party data; you
-import a file you downloaded:
+import a file you downloaded. The window reads them too (Modules page: Module data, "Read module data"), and so can Sarina
+or another assistant (`icarus mcp`'s `module_data`), with the same set chosen the same way and the same gates:
 
 ```sh
 icarus import obdb ~/Downloads/Toyota-Tacoma/signalsets/v3/default.json   # an OBDb signal set (github.com/OBDb)

@@ -36,6 +36,13 @@ fn tool_list() -> Value {
             "inputSchema": {"type": "object", "properties": {}}
         },
         {
+            "name": "module_data",
+            "description": "Each module's own values (a dealer tool's data list: transmission temperature, knock correction, wheel speeds, tire pressures...), read once from the vehicle with the module-data set that fits it (imported from OBDb or ABRP, or the simulator's). Read-only: data reads only (services 21 and 22), paced, airbag modules identity only. Optional: one module by its ID (701, 750.2A).",
+            "inputSchema": {"type": "object", "properties": {
+                "module": {"type": "string", "description": "optional: one module, e.g. 701 or 750.2A"}
+            }}
+        },
+        {
             "name": "learning_sessions",
             "description": "What Icarus saw while another diagnostic tool worked on one of my vehicles: the marks I made, the settings and output tests it learned, what it saw but could not learn, every message in words. Without a file: the list and the newest session; with one: that session. Read-only.",
             "inputSchema": {"type": "object", "properties": {
@@ -318,6 +325,13 @@ fn vehicle_check() -> Result<String, String> {
     Ok(o)
 }
 
+/// `module_data` on a connected vehicle: the values as text, with the set's attribution.
+fn module_data_on(elm: &mut Elm, module: Option<&str>) -> Result<String, String> {
+    let all = vehicles::load(vehicles::user_dir().as_deref()).0;
+    let us = icarus_core::moddata::units::us_customary();
+    Ok(icarus_obd::vehicledata::read(elm, &all, module, us)?.text())
+}
+
 fn vehicle_modules() -> Result<String, String> {
     let mut elm = connect()?;
     let e = |x: icarus_obd::elm::ObdError| x.to_string();
@@ -405,6 +419,7 @@ fn call(name: &str, args: &Value) -> Result<String, String> {
         "vehicle_check" => vehicle_check(),
         "drive_logs" => drive_logs(args["file"].as_str()),
         "vehicle_modules" => vehicle_modules(),
+        "module_data" => module_data_on(&mut connect()?, s("module").as_deref()),
         "learning_sessions" => learning_sessions(s("file").as_deref()),
         "tires_gears" => {
             let stock =
@@ -497,6 +512,7 @@ mod tests {
         "explain_code",
         "vehicle_check",
         "vehicle_modules",
+        "module_data",
         "learning_sessions",
         "drive_logs",
         "tires_gears",
@@ -547,6 +563,13 @@ mod tests {
             .contains("acts like a 4.56"));
         let r = handle(&json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "clear_codes", "arguments": {}}})).unwrap();
         assert_eq!(r["result"]["isError"], true);
+        // module data, read-only, from the simulated vehicle
+        let mut elm = Elm::connect(Box::new(icarus_obd::sim::SimCar::new())).unwrap();
+        let text = module_data_on(&mut elm, Some("701")).unwrap();
+        assert!(
+            text.contains("Module data from the set sim") && text.contains("701"),
+            "{text}"
+        );
         let r = handle(&json!({"jsonrpc": "2.0", "id": 5, "method": "resources/list"})).unwrap();
         assert_eq!(r["error"]["code"], -32601);
     }

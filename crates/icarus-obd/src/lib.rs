@@ -33,5 +33,6 @@ pub mod settings;
 pub mod sim;
 pub mod socketcan;
 pub mod uds;
+pub mod vehicledata;
 pub mod vehicles;
 pub mod vin;

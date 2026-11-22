@@ -36,7 +36,7 @@ bidirectional shop scanner, a tuning suite and a bus analyser: on Linux, for man
 | Feature | Icarus |
 | --- | --- |
 | Find every module, read its identity and trouble codes (UDS and KWP2000) | done (`obd scan`, `obd module`), read-only, tested on the simulated vehicle |
-| Each module's own live data (Toyota: KWP2000 `21` local identifiers and UDS `22`; e.g. transmission fluid temperature) | build 1 done 2026-11-14, tested on the simulated vehicle: the definition format (`icarus-core` `moddata`: TOML sets, one formula for every source, three bit orders), the OBDb importer (`icarus import obdb`, the user's downloaded file, attribution shown), reading (`icarus obd data`: 21/22 only, gates at load and at send, paced, per-vehicle state), ISO-TP checks (lost, repeated or missing frames are errors). |
+| Each module's own live data (Toyota: KWP2000 `21` local identifiers and UDS `22`; e.g. transmission fluid temperature) | build 1 done 2026-11-14, tested on the simulated vehicle: the definition format (`icarus-core` `moddata`: TOML sets, one formula for every source, three bit orders), the OBDb importer (`icarus import obdb`, the user's downloaded file, attribution shown), reading (`icarus obd data`: 21/22 only, gates at load and at send, paced, per-vehicle state), ISO-TP checks (lost, repeated or missing frames are errors). Build 2 done 2026-11-21: the window's Module data card and `icarus mcp`'s `module_data` (`icarus_obd::vehicledata`: the set chosen as `obd data` chooses it, each module read once, the state kept). |
 | Many makes, not one vehicle: a TOML profile per make (module addresses, quirks), picked by the VIN; user files add or correct | done: 12 makes + generic; addresses from public sources, each `checked = false` until seen on a vehicle |
 | Code descriptions, where to start, parts usually involved, look-up and parts links, freeze frame, saved reports | done 2026-11-07 (standard codes in Icarus's words; maker codes per profile `[codes]`) |
 | Clear codes | done 2026-11-07: asks first, engine off, a report saved before; OBD-II 04, UDS/KWP 14 per module; logged |
@@ -100,7 +100,7 @@ A module is bricked when a write stops halfway or puts the wrong thing in. Icaru
   saved as files only).
 - Not supported yet: BMW's gateway (its answers carry the tester's address, not the module's), clearing codes of modules
   behind a gateway (Toyota's give their identity, codes and module data, read only), 29-bit module IDs (Honda) and
-  GM's body range, Ford's medium-speed CAN, Mode 06 on older protocols, module data in the window and through `icarus mcp`,
+  GM's body range, Ford's medium-speed CAN, Mode 06 on older protocols,
   DDT2000 and DBC files, diagnostics through SocketCAN adapters (they watch the bus only), A2L definitions, service functions (relearns, resets, TPMS, injector coding).
 
 ## Interfaces

@@ -113,6 +113,8 @@ struct Start {
     adapter: Option<String>,
     page: Option<Page>,
     scan: bool,
+    /// `--module-data`: read each module's own values once connected.
+    module_data: bool,
     live: bool,
     /// `--record`: record a drive (every value the vehicle offers) once connected.
     record: bool,
@@ -135,6 +137,7 @@ impl Start {
             match a[i].as_str() {
                 "--connect" => s.connect = true,
                 "--scan" => s.scan = true,
+                "--module-data" => s.module_data = true,
                 "--live" => s.live = true,
                 "--record" => s.record = true,
                 "--bus" => s.bus = true,
@@ -208,6 +211,9 @@ struct App {
     /// A report with every module's codes too.
     report_all: bool,
     last_report: Option<String>,
+    /// Each module's own values as last read (Modules page), and whether a reading is under way.
+    module_data: Option<Result<icarus_obd::vehicledata::VehicleValues, String>>,
+    reading_data: bool,
     /// Actuator tests: the percent chosen per test, the one held now, the last thing said, the watched value.
     test_values: HashMap<String, f64>,
     holding: Option<String>,
@@ -326,6 +332,8 @@ impl App {
             name_edit: String::new(),
             report_all: true,
             last_report: None,
+            module_data: None,
+            reading_data: false,
             test_values: HashMap::new(),
             holding: None,
             release_needed: false,
@@ -639,6 +647,11 @@ impl App {
                     self.setting_views.clear();
                     self.settings_asked = false;
                     self.refresh_sessions();
+                    self.module_data = None;
+                    if std::mem::take(&mut self.start.module_data) {
+                        self.reading_data = true;
+                        let _ = self.tx.send(Cmd::ModuleData);
+                    }
                     if std::mem::take(&mut self.start.scan) {
                         self.scanning = true;
                         let _ = self.tx.send(Cmd::Scan {
@@ -760,6 +773,14 @@ impl App {
                 Event::ReportSaved(p) => {
                     self.status = format!("Report saved: {p}");
                     self.last_report = Some(p);
+                }
+                Event::ModuleData(r) => {
+                    self.reading_data = false;
+                    self.status = match &r {
+                        Ok(v) => format!("Module data read with the set {}.", v.set),
+                        Err(_) => "Module data could not be read.".into(),
+                    };
+                    self.module_data = Some(r.map(|b| *b));
                 }
                 Event::Reading { pid, value, at } => {
                     if let Some(r) = self.recorder.as_mut() {
@@ -1261,6 +1282,56 @@ impl App {
             ui.label(RichText::new(&self.scan_note).weak());
         }
         ui.add_space(8.0);
+        card(ui, pal, "Module data", |ui| {
+            ui.label(RichText::new("Each module's own values (a dealer tool's data list), from the module-data set that fits this vehicle (icarus import obdb or abrp). Read only: data reads, paced; airbag modules identity only.").weak());
+            ui.horizontal(|ui| {
+                if self.reading_data {
+                    ui.spinner();
+                } else if ui.button("Read module data").clicked() {
+                    self.reading_data = true;
+                    self.live_on = false;
+                    let _ = self.tx.send(Cmd::ModuleData);
+                }
+            });
+            match &self.module_data {
+                None => {}
+                Some(Err(why)) => {
+                    ui.colored_label(pal.amber, why);
+                }
+                Some(Ok(v)) => {
+                    for n in &v.notes {
+                        ui.label(RichText::new(n).small().weak());
+                    }
+                    for m in &v.modules {
+                        egui::CollapsingHeader::new(format!("{}  {}", m.label, m.name))
+                            .id_salt(("module-data", &m.label))
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                egui::Grid::new(("md", &m.label))
+                                    .num_columns(2)
+                                    .spacing(vec2(16.0, 2.0))
+                                    .show(ui, |ui| {
+                                        for (name, val, checked) in &m.values {
+                                            ui.label(name);
+                                            ui.label(if *checked {
+                                                format!("{val}  (checked)")
+                                            } else {
+                                                val.clone()
+                                            });
+                                            ui.end_row();
+                                        }
+                                    });
+                                for n in &m.notes {
+                                    ui.label(RichText::new(n).small().weak());
+                                }
+                            });
+                    }
+                    if !v.attribution.is_empty() {
+                        ui.label(RichText::new(&v.attribution).small().color(pal.dim));
+                    }
+                }
+            }
+        });
         let mut links: Vec<String> = Vec::new();
         let all = icarus_obd::vehicles::load(icarus_obd::vehicles::user_dir().as_deref()).0;
         let chosen = icarus_obd::vehicles::find(&all, &self.profile_choice)
