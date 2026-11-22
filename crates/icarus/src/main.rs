@@ -1957,21 +1957,18 @@ fn obd_live(elm: &mut Elm, args: &Args) -> Result<(), String> {
     let mut n = 0u64;
     loop {
         let t0 = Instant::now();
-        let mut row = Vec::new();
-        for p in &pids {
-            // the engine's answer when it gives one, else the first module's
-            let v = match j1979::read(elm, *p) {
-                Ok(r) => r
-                    .iter()
-                    .find(|x| x.from == "7E8")
-                    .or(r.first())
+        // up to six values a request on CAN; the engine's answer when it gives one, else the first module's
+        let all = j1979::read_many(elm, &pids).map_err(|x| x.to_string())?;
+        let row: Vec<String> = pids
+            .iter()
+            .map(|p| {
+                all.iter()
+                    .find(|(q, _)| q == p)
+                    .and_then(|(_, r)| r.iter().find(|x| x.from == "7E8").or(r.first()))
                     .map(|x| format!("{:.2}", x.value))
-                    .unwrap_or_default(),
-                Err(icarus_obd::elm::ObdError::NoData) => String::new(),
-                Err(x) => return Err(x.to_string()),
-            };
-            row.push(v);
-        }
+                    .unwrap_or_default()
+            })
+            .collect();
         let t = format!("{:.2}", start.elapsed().as_secs_f64());
         println!("{t}, {}", row.join(", "));
         // a module left out of a value's answer is said as it happens (once), not only when the watch ends

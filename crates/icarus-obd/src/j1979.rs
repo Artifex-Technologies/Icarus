@@ -4,7 +4,7 @@
 //!
 //! Each value carries a short "about" so the numbers teach something while you watch them.
 
-use crate::elm::{Answer, ObdError};
+use crate::elm::{Answer, ObdError, Protocol};
 use crate::link::Link;
 
 /// One entry per answering module: its header, what it most likely is, and what it said.
@@ -190,6 +190,142 @@ pub fn read(elm: &mut dyn Link, n: u8) -> Result<Vec<Reading>, ObdError> {
             })
         })
         .collect())
+}
+
+/// Data bytes after the PID in a service 01 answer (SAE J1979), for every PID Icarus decodes and the bit maps; None for
+/// the rest. Several values in one answer are split by these lengths.
+pub fn data_len(pid: u8) -> Option<usize> {
+    Some(match pid {
+        0x00 | 0x20 | 0x40 | 0x60 | 0x80 | 0xA0 | 0xC0 | 0x01 | 0x41 => 4,
+        0x02 | 0x03 => 2,
+        0x04..=0x0B
+        | 0x0D..=0x0F
+        | 0x11..=0x13
+        | 0x1C..=0x1E
+        | 0x2C..=0x30
+        | 0x33
+        | 0x45..=0x4C
+        | 0x51
+        | 0x52
+        | 0x5A..=0x5C
+        | 0x5F
+        | 0x61
+        | 0x62
+        | 0x84
+        | 0x8E => 1,
+        0x0C
+        | 0x10
+        | 0x14..=0x1B
+        | 0x1F
+        | 0x21..=0x23
+        | 0x31
+        | 0x32
+        | 0x3C..=0x3F
+        | 0x42..=0x44
+        | 0x4D
+        | 0x4E
+        | 0x53..=0x59
+        | 0x5D
+        | 0x5E
+        | 0x63
+        | 0x65
+        | 0x9E
+        | 0xA2 => 2,
+        0x67 => 3,
+        0x24..=0x2B | 0x34..=0x3B | 0x4F | 0x50 | 0x9D | 0xA6 => 4,
+        0x64 | 0x66 => 5,
+        0x78 | 0x79 => 9,
+        _ => return None,
+    })
+}
+
+/// One module's answer to a service 01 request for several PIDs (`41 <pid> <data> <pid> <data>...`), split by the PIDs'
+/// lengths; None when it does not split exactly (an unknown PID, or bytes left over or missing).
+fn split_answer(d: &[u8]) -> Option<Vec<(u8, &[u8])>> {
+    if d.first() != Some(&0x41) {
+        return None;
+    }
+    let (mut i, mut out) = (1, Vec::new());
+    while i < d.len() {
+        let p = d[i];
+        let n = data_len(p)?;
+        out.push((p, d.get(i + 1..i + 1 + n)?));
+        i += 1 + n;
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// The most PIDs one service 01 request may carry (SAE J1979, CAN).
+pub const PIDS_PER_REQUEST: usize = 6;
+
+/// Several live values at once: on CAN, up to six PIDs in one service 01 request, each module's answer split by the
+/// PIDs' lengths (one wait for the modules' answers instead of six); on older protocols, which allow one PID a request,
+/// one at a time. An answer that does not split exactly is not read, and a group a module refuses is asked again one PID
+/// at a time. Returns each PID asked (that Icarus knows) with its readings, in the order asked.
+pub fn read_many(elm: &mut dyn Link, pids: &[u8]) -> Result<Vec<(u8, Vec<Reading>)>, ObdError> {
+    let known: Vec<u8> = pids.iter().copied().filter(|p| pid(*p).is_some()).collect();
+    let mut out: Vec<(u8, Vec<Reading>)> = known.iter().map(|p| (*p, Vec::new())).collect();
+    fn one(elm: &mut dyn Link, p: u8, out: &mut [(u8, Vec<Reading>)]) -> Result<(), ObdError> {
+        match read(elm, p) {
+            Ok(r) => {
+                if let Some(slot) = out.iter_mut().find(|o| o.0 == p) {
+                    slot.1 = r;
+                }
+                Ok(())
+            }
+            Err(ObdError::NoData) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+    let can = matches!(
+        elm.protocol(),
+        Protocol::Can11At500 | Protocol::Can29At500 | Protocol::Can11At250 | Protocol::Can29At250
+    );
+    if !can {
+        for &p in &known {
+            one(elm, p, &mut out)?;
+        }
+        return Ok(out);
+    }
+    for group in known.chunks(PIDS_PER_REQUEST) {
+        if group.len() == 1 {
+            one(elm, group[0], &mut out)?;
+            continue;
+        }
+        let answers = match elm.request(&[&[0x01][..], group].concat()) {
+            Ok(a) => a,
+            Err(ObdError::NoData) => continue,
+            Err(e) => return Err(e),
+        };
+        let mut refused = false;
+        for a in &answers {
+            if a.refusal().is_some() {
+                refused = true;
+                continue;
+            }
+            let Some(parts) = split_answer(&a.data) else {
+                continue;
+            };
+            for (p, bytes) in parts {
+                let (Some(def), Some(slot)) = (pid(p), out.iter_mut().find(|o| o.0 == p)) else {
+                    continue;
+                };
+                if let Some(value) = def.decode(bytes) {
+                    slot.1.push(Reading {
+                        from: a.from.clone(),
+                        module: a.module(),
+                        value,
+                    });
+                }
+            }
+        }
+        if refused {
+            for &p in group {
+                one(elm, p, &mut out)?;
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// The service 01 PIDs each module offers (from the PID 00/20/40... bit maps).
@@ -577,6 +713,73 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         assert!(PIDS.iter().all(|p| seen.insert(p.pid)), "each PID once");
         assert!(PIDS.windows(2).all(|w| w[0].pid < w[1].pid), "in order");
+    }
+
+    #[test]
+    fn several_values_in_one_answer() {
+        assert!(
+            PIDS.iter().all(|p| data_len(p.pid).is_some()),
+            "every PID Icarus decodes has a length"
+        );
+        let parts = split_answer(&[0x41, 0x0C, 0x1A, 0xF8, 0x0D, 0x48, 0x05, 0x7B]).unwrap();
+        assert_eq!(
+            parts,
+            vec![
+                (0x0C, &[0x1A, 0xF8][..]),
+                (0x0D, &[0x48][..]),
+                (0x05, &[0x7B][..])
+            ]
+        );
+        assert!(split_answer(&[0x41, 0x0C, 0x1A]).is_none(), "bytes missing");
+        assert!(
+            split_answer(&[0x41, 0x0D, 0x48, 0x00]).is_none(),
+            "a byte left over (no PID 00 of one byte)"
+        );
+        assert!(
+            split_answer(&[0x41, 0xFE, 0x01]).is_none(),
+            "an unknown PID"
+        );
+        assert!(split_answer(&[0x7F, 0x01, 0x12]).is_none());
+    }
+
+    #[test]
+    fn twelve_values_in_two_requests_on_can() {
+        use crate::sim::recording::Recorder;
+        use crate::sim::SimCar;
+        let pids = [
+            0x04, 0x05, 0x06, 0x07, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x42,
+        ];
+        let (port, sent) = Recorder::new(SimCar::new());
+        let mut elm = crate::elm::Elm::connect(Box::new(port)).unwrap();
+        sent.lock().unwrap().clear();
+        let many = read_many(&mut elm, &pids).unwrap();
+        let requests: Vec<String> = sent
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|l| l.trim_end_matches('\r').to_string())
+            .filter(|l| l.starts_with("01"))
+            .collect();
+        assert_eq!(
+            requests,
+            ["01040506070B0C", "010D0E0F101142"],
+            "two requests of six"
+        );
+        assert_eq!(
+            many.iter().map(|m| m.0).collect::<Vec<_>>(),
+            pids,
+            "in the order asked"
+        );
+        assert!(many.iter().all(|(_, r)| !r.is_empty()), "{many:?}");
+        // the same values as one at a time (the simulated engine's values hold still except speed-like ones)
+        let speed = many.iter().find(|m| m.0 == 0x0D).unwrap();
+        assert_eq!(
+            speed.1.len(),
+            2,
+            "the engine and the transmission both answer PID 0D"
+        );
+        let coolant = many.iter().find(|m| m.0 == 0x05).unwrap().1[0].value;
+        assert_eq!(coolant, read(&mut elm, 0x05).unwrap()[0].value);
     }
 
     #[test]

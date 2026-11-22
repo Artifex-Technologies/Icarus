@@ -600,6 +600,27 @@ impl SimCar {
     fn broadcast(&mut self, req: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
         let mut msgs: Vec<(&'static str, Vec<u8>)> = Vec::new();
         match req {
+            [0x01, pids @ ..] if pids.len() > 1 => {
+                // several PIDs (CAN, up to six): one answer per module with each PID it has, in the order asked
+                let mut engine = vec![0x41];
+                for p in pids {
+                    if let Some(d) = self.engine_pid(*p) {
+                        engine.push(*p);
+                        engine.extend(d);
+                    }
+                }
+                if engine.len() > 1 {
+                    msgs.push(("7E8", engine));
+                }
+                let tcm: Vec<u8> = pids
+                    .iter()
+                    .filter(|p| TCM_PIDS.contains(p))
+                    .flat_map(|p| [*p, 0])
+                    .collect();
+                if !tcm.is_empty() {
+                    msgs.push(("7E9", [&[0x41][..], &tcm].concat()));
+                }
+            }
             [0x01, pid] => {
                 if let Some(d) = self.engine_pid(*pid) {
                     msgs.push(("7E8", [&[0x41, *pid][..], &d].concat()));

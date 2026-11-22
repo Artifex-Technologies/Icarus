@@ -364,6 +364,11 @@ icarus obd scan  --adapter A --make toyota   # every module (ABS, airbags, clust
 icarus obd module 7B0 --adapter A            # one module, by its request ID
 ```
 
+Live values (`obd live`, Live data and Record in the window) go up to six to a request on CAN vehicles, as SAE J1979
+allows: one wait for the modules' answers instead of six, each answer split by the values' known lengths (one that does
+not split exactly is not read, and a module that refuses several at once is asked one value at a time). Older protocols
+allow one value a request.
+
 `scan` and `module` work like a dealer tool (Techstream, FORScan): they talk to each module directly in UDS (ISO 14229) or
 the older KWP2000 that many Toyota modules still use, not only to the engine's standard OBD-II side. A guard in the code lets
 only reading services out: clearing codes, writing, actuator tests and programming are refused until the safety steps exist.

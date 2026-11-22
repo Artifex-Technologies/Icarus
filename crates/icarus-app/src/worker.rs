@@ -523,9 +523,10 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
                     sweep.push(rotate[rotate_at % rotate.len()]);
                     rotate_at += 1;
                 }
-                for &pid in &sweep {
-                    match j1979::read(e, pid) {
-                        Ok(r) => {
+                // up to six values a request on CAN (j1979::read_many)
+                match j1979::read_many(e, &sweep) {
+                    Ok(all) => {
+                        for (pid, r) in all {
                             if let Some(x) = r.iter().find(|x| x.from == "7E8").or(r.first()) {
                                 send(Event::Reading {
                                     pid,
@@ -534,12 +535,11 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
                                 });
                             }
                         }
-                        Err(ObdError::NoData) => {}
-                        Err(err) => {
-                            live.clear();
-                            send(Event::Failed(err.to_string()));
-                            break;
-                        }
+                    }
+                    Err(ObdError::NoData) => {}
+                    Err(err) => {
+                        live.clear();
+                        send(Event::Failed(err.to_string()));
                     }
                 }
             }
