@@ -149,8 +149,20 @@ impl<D: PassThru> PassThruLink<D> {
     }
 }
 
+impl<D: PassThru> PassThruLink<D> {
+    /// The backstop under every write path, as on the ELM327 and CAN links: a request that would change the vehicle goes
+    /// only when its Read-Only switch is off.
+    fn read_only_check(&mut self, data: &[u8]) -> Result<(), ObdError> {
+        if crate::lock::changes_vehicle(data) {
+            crate::lock::writes_allowed(self).map_err(ObdError::ReadOnly)?;
+        }
+        Ok(())
+    }
+}
+
 impl<D: PassThru> Link for PassThruLink<D> {
     fn request(&mut self, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
+        self.read_only_check(data)?;
         self.exchange(
             OBD_FUNCTIONAL,
             |id| (0x7E8..=0x7EF).contains(&id),
@@ -160,6 +172,7 @@ impl<D: PassThru> Link for PassThruLink<D> {
     }
 
     fn request_to(&mut self, tx: u32, rx: u32, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
+        self.read_only_check(data)?;
         if tx > 0x7FF || rx > 0x7FF {
             return Err(ObdError::Adapter(format!(
                 "{tx:X}/{rx:X} are not 11-bit CAN IDs"
@@ -292,6 +305,19 @@ mod tests {
 
     fn link() -> PassThruLink<SimPassThru> {
         PassThruLink::connect(SimPassThru::new(SimCar::new())).unwrap()
+    }
+
+    #[test]
+    fn a_read_only_vehicle_is_never_changed_over_j2534() {
+        crate::lock::switch_for_test(&[crate::sim::VIN]);
+        let mut l = link();
+        assert!(matches!(l.request(&[0x04]), Err(ObdError::ReadOnly(_))));
+        assert!(matches!(
+            l.request_to(0x7C0, 0x7C8, &[0x2E, 0xA0, 0x01, 0x00]),
+            Err(ObdError::ReadOnly(_))
+        ));
+        assert!(l.request(&[0x01, 0x0C]).is_ok(), "reads go");
+        crate::lock::switch_for_test(&[]);
     }
 
     #[test]
