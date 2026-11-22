@@ -605,8 +605,8 @@ fn end_test(
 
 fn connect(spec: &str, profiles: &[Profile]) -> Result<(Elm, Info), String> {
     let target = Target::parse(spec)?;
-    let port = target.open().map_err(|e| format!("{spec}: {e}"))?;
-    let mut elm = Elm::connect(port).map_err(|e| e.to_string())?;
+    let (mut elm, _) =
+        icarus_obd::elm::connect_target(&target).map_err(|e| format!("{spec}: {e}"))?;
     let info = gather(&mut elm, profiles)?;
     Ok((elm, info))
 }

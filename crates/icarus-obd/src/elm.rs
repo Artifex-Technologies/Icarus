@@ -10,6 +10,66 @@ use std::fmt;
 use std::io;
 use std::time::{Duration, Instant};
 
+/// Serial speeds an ELM327 or STN adapter is found at, most likely first: OBDLink's USB cables (EX, SX) at 115200, the
+/// ELM327's own 38400, then the faster and slower ones some clones use.
+pub const SERIAL_SPEEDS: [u32; 5] = [115_200, 38_400, 500_000, 230_400, 9_600];
+
+/// Opens the adapter `target` names and speaks to it (`Elm::connect`). A serial adapter that does not answer, or answers
+/// nonsense, at its speed is tried at the other usual ones (`SERIAL_SPEEDS`): only the adapter is spoken to, never the
+/// vehicle. The note says which speed answered when it was not the one given (an OBDLink EX at 115200 behind a `/dev/ttyUSB0`
+/// that meant 38400).
+pub fn connect_target(target: &crate::port::Target) -> Result<(Elm, Option<String>), String> {
+    use crate::port::Target;
+    match target {
+        Target::Serial { path, baud } => connect_serial(path, *baud, &mut |b| {
+            Target::Serial {
+                path: path.clone(),
+                baud: b,
+            }
+            .open()
+        }),
+        t => {
+            let port = t.open().map_err(|e| e.to_string())?;
+            Elm::connect(port)
+                .map(|e| (e, None))
+                .map_err(|e| e.to_string())
+        }
+    }
+}
+
+/// `connect_target` for a serial port, opened at a speed by `open` (a missing port or no permission is said at once).
+fn connect_serial(
+    path: &str,
+    first: u32,
+    open: &mut dyn FnMut(u32) -> io::Result<Box<dyn Port>>,
+) -> Result<(Elm, Option<String>), String> {
+    let mut tried: Vec<u32> = vec![];
+    let mut first_err: Option<ObdError> = None;
+    for baud in std::iter::once(first).chain(SERIAL_SPEEDS.into_iter().filter(|b| *b != first)) {
+        let port = open(baud).map_err(|e| format!("{path}: {e}"))?;
+        match Elm::connect(port) {
+            Ok(elm) => {
+                let note = (baud != first).then(|| {
+                    format!("{path} answered at {baud} baud, not {first} ({path}@{baud} names it)")
+                });
+                return Ok((elm, note));
+            }
+            Err(e @ (ObdError::Timeout(_) | ObdError::Adapter(_))) => {
+                tried.push(baud);
+                first_err.get_or_insert(e);
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    let speeds: Vec<String> = tried.iter().map(|b| b.to_string()).collect();
+    Err(format!(
+        "{}; {path} was tried at {} baud. An OBDLink EX or SX takes its power from the vehicle: it answers only when plugged \
+         into the OBD port",
+        first_err.map(|e| e.to_string()).unwrap_or_default(),
+        speeds.join(", ")
+    ))
+}
+
 #[derive(Debug)]
 pub enum ObdError {
     Io(io::Error),
@@ -262,9 +322,17 @@ impl Elm {
     }
 
     /// Sends one command and returns the answer's lines (without the echo, "SEARCHING..." and blank lines).
-    pub fn command(&mut self, cmd: &str, timeout: Duration) -> Result<Vec<String>, ObdError> {
+    /// Whatever is left from before (a late answer) goes before a command, for half a second at most: an adapter still in
+    /// monitor mode streams until it is sent a character, and a port that never went quiet held Icarus up for good.
+    fn drain_left_over(&mut self) -> Result<(), ObdError> {
         let mut junk = [0u8; 256];
-        while self.port.recv(&mut junk, Duration::ZERO)? > 0 {}
+        let quiet_by = Instant::now() + Duration::from_millis(500);
+        while self.port.recv(&mut junk, Duration::ZERO)? > 0 && Instant::now() < quiet_by {}
+        Ok(())
+    }
+
+    pub fn command(&mut self, cmd: &str, timeout: Duration) -> Result<Vec<String>, ObdError> {
+        self.drain_left_over()?;
         self.port.send(format!("{cmd}\r").as_bytes())?;
         let deadline = Instant::now() + timeout;
         let mut text = Vec::new();
@@ -570,8 +638,7 @@ impl Elm {
     /// sent after the command is the one that ends monitoring, which the adapter does not put on the bus.
     fn watch(&mut self, mut each: impl FnMut(&str) -> bool) -> Result<String, ObdError> {
         let cmd = if self.stn.is_some() { "STMA" } else { "ATMA" };
-        let mut junk = [0u8; 256];
-        while self.port.recv(&mut junk, Duration::ZERO)? > 0 {}
+        self.drain_left_over()?;
         self.port.send(format!("{cmd}\r").as_bytes())?;
         let mut buf: Vec<u8> = Vec::new();
         let mut tmp = [0u8; 2048];
@@ -977,6 +1044,98 @@ fn parse_sized(lines: &[String], protocol: Protocol, frame: usize) -> Result<Par
 
 #[cfg(test)]
 mod tests {
+    /// A serial port at one speed: the simulated car where the adapter answers; elsewhere a garbled reply to each command
+    /// (a wrong speed), or bytes that never stop (an adapter left in monitor mode).
+    struct AtSpeed {
+        car: Option<crate::sim::SimCar>,
+        reply: Vec<u8>,
+        streams: bool,
+    }
+    fn at_speed(answers: bool) -> Box<dyn crate::port::Port> {
+        Box::new(AtSpeed {
+            car: answers.then(crate::sim::SimCar::new),
+            reply: vec![],
+            streams: false,
+        })
+    }
+    impl crate::port::Port for AtSpeed {
+        fn send(&mut self, data: &[u8]) -> io::Result<()> {
+            match &mut self.car {
+                Some(c) => c.send(data),
+                None => {
+                    self.reply = b"?\r\r>".to_vec();
+                    Ok(())
+                }
+            }
+        }
+        fn recv(&mut self, buf: &mut [u8], timeout: Duration) -> io::Result<usize> {
+            if let Some(c) = &mut self.car {
+                return c.recv(buf, timeout);
+            }
+            if self.streams {
+                buf[..8].copy_from_slice(b"7E8 03 4");
+                return Ok(8);
+            }
+            if self.reply.is_empty() {
+                std::thread::sleep(timeout.min(Duration::from_millis(20)));
+                return Ok(0);
+            }
+            let n = self.reply.len().min(buf.len());
+            buf[..n].copy_from_slice(&self.reply[..n]);
+            self.reply.drain(..n);
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn a_port_that_never_goes_quiet_does_not_hold_icarus_up() {
+        let t = Instant::now();
+        let streaming = Box::new(AtSpeed {
+            car: None,
+            reply: vec![],
+            streams: true,
+        });
+        assert!(super::Elm::connect(streaming).is_err());
+        assert!(t.elapsed() < Duration::from_secs(8), "{:?}", t.elapsed());
+    }
+
+    #[test]
+    fn a_serial_adapter_is_found_at_another_usual_speed() {
+        // an OBDLink EX answers at 115200 only; asked for 38400 first (a bare /dev/ttyUSB0), it is found and said so
+        let mut asked = vec![];
+        let (elm, note) = super::connect_serial("/dev/ttyUSB0", 38_400, &mut |b| {
+            asked.push(b);
+            Ok(at_speed(b == 115_200))
+        })
+        .unwrap();
+        assert_eq!(asked, [38_400, 115_200]);
+        assert!(note.unwrap().contains("answered at 115200 baud, not 38400"));
+        assert!(!crate::link::Link::adapter(&elm).is_empty());
+        // at its own speed: no note, nothing else tried
+        let mut asked = vec![];
+        let (_, note) = super::connect_serial("/dev/ttyUSB0", 115_200, &mut |b| {
+            asked.push(b);
+            Ok(at_speed(b == 115_200))
+        })
+        .unwrap();
+        assert_eq!((asked, note), (vec![115_200], None));
+        // nothing answers at any speed (an OBDLink EX off the vehicle): every speed tried, and why it may be silent
+        let e = super::connect_serial("/dev/ttyUSB0", 38_400, &mut |_| Ok(at_speed(false)))
+            .err()
+            .unwrap();
+        assert!(
+            e.contains("38400, 115200, 500000, 230400, 9600")
+                && e.contains("power from the vehicle"),
+            "{e}"
+        );
+        // a port that cannot be opened is said at once
+        let e = super::connect_serial("/dev/ttyUSB9", 38_400, &mut |_| {
+            Err(io::Error::from(io::ErrorKind::NotFound))
+        })
+        .err()
+        .unwrap();
+        assert!(e.starts_with("/dev/ttyUSB9:"), "{e}");
+    }
 
     #[test]
     fn address_bytes_behind_a_gateway() {

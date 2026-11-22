@@ -180,10 +180,9 @@ fn connect() -> Result<Elm, String> {
     let spec = std::env::var("ICARUS_ADAPTER").ok().filter(|a| !a.trim().is_empty()).or_else(remembered_adapter).ok_or_else(|| {
         "no adapter: set ICARUS_ADAPTER in this server's definition (e.g. bt:AA:BB:CC:DD:EE:FF), or connect once in the window".to_string()
     })?;
-    let port = Target::parse(&spec)?
-        .open()
-        .map_err(|e| format!("{spec}: {e}"))?;
-    Elm::connect(port).map_err(|e| e.to_string())
+    icarus_obd::elm::connect_target(&Target::parse(&spec)?)
+        .map(|(elm, _)| elm)
+        .map_err(|e| format!("{spec}: {e}"))
 }
 
 fn code_line(code: &str, extra: &str, profile: Option<&vehicles::Profile>) -> String {

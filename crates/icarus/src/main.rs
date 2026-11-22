@@ -794,10 +794,12 @@ fn connect(args: &Args) -> Result<Box<dyn Link>, String> {
             .map(|l| Box::new(l) as Box<dyn Link>)
             .map_err(|x| x.to_string());
     }
-    let port = target.open().map_err(|e| format!("{spec}: {e}"))?;
-    Elm::connect(port)
-        .map(|l| Box::new(l) as Box<dyn Link>)
-        .map_err(|e| e.to_string())
+    let (elm, note) =
+        icarus_obd::elm::connect_target(&target).map_err(|e| format!("{spec}: {e}"))?;
+    if let Some(n) = note {
+        eprintln!("note: {n}");
+    }
+    Ok(Box::new(elm) as Box<dyn Link>)
 }
 
 /// The Linux CAN interface to watch: `--can can0`, or `--adapter can0` / `can:can0`.
@@ -813,9 +815,13 @@ fn can_interface(args: &Args) -> Option<String> {
 /// An ELM327/STN adapter itself, for what only an adapter does (its monitor mode).
 fn connect_elm(args: &Args) -> Result<Elm, String> {
     let (spec, target) = adapter_target(args)?;
-    let port = target.open().map_err(|e| format!("{spec}: {e}"))?;
     eprintln!("connecting to {spec}...");
-    Elm::connect(port).map_err(|e| e.to_string())
+    let (elm, note) =
+        icarus_obd::elm::connect_target(&target).map_err(|e| format!("{spec}: {e}"))?;
+    if let Some(n) = note {
+        eprintln!("note: {n}");
+    }
+    Ok(elm)
 }
 
 /// Prints the notes on modules left out of broadcasts' answers (`Link::take_dropped`): every command that shows a
