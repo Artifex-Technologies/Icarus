@@ -68,6 +68,13 @@ pub fn session_text(
     for x in &a.learned {
         t += &format!("```toml\n{}```\n\n", bus::to_toml(x));
     }
+    t += "\n## Service routines learned\n\n";
+    if a.services.is_empty() {
+        t += "None.\n";
+    }
+    for x in &a.services {
+        t += &format!("```toml\n{}```\n\n", crate::service::to_toml(x));
+    }
     t += "\n## Seen but not learned\n\n";
     if a.notes.is_empty() {
         t += "Nothing.\n";

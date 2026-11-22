@@ -146,6 +146,10 @@ Trouble codes:
                                              it up and to find parts (no vehicle needed)
   icarus obd codes --adapter A               the vehicle's codes, each explained, and the freeze frame
   icarus obd tests --adapter A               actuator tests known for this vehicle (fan, throttle, pumps...)
+  icarus obd services --adapter A            service routines known for this vehicle (relearns, resets, TPMS, coding)
+  icarus obd service \"NAME\" --adapter A --yes
+                                             run one (its conditions, the battery and the Read-Only switch checked
+                                             first; coding only over a cable; logged)
   icarus obd test NAME --adapter A [--value PERCENT] [--seconds N] [--yes]
                                              run one: asks first, checks its conditions, stops after N seconds or Ctrl+C
                                              and hands control back to the module (sim:off = the simulated engine off)
@@ -684,6 +688,8 @@ fn cmd_obd(a: &[String]) -> Result<(), String> {
         Some("data") => data::obd_data(&args),
         Some("report") => with(&|e| obd_report(e, &args)),
         Some("tests") => with(&obd_tests),
+        Some("services") => with(&obd_services),
+        Some("service") => obd_service(&args),
         Some("clear") => with(&|e| obd_clear(e, &args)),
         Some("selftests") => with(&obd_selftests),
         Some("charging") => with(&|e| obd_charging(e, &args)),
@@ -1150,6 +1156,101 @@ fn obd_codes(elm: &mut Elm) -> Result<(), String> {
         }
     }
     println!("\nicarus obd scan reads every module's own codes (ABS, airbags, body...); icarus obd report saves all of it.");
+    Ok(())
+}
+
+/// The service routines known for the connected vehicle.
+fn vehicle_services(elm: &mut Elm) -> Result<Vec<icarus_obd::service::ServiceDef>, String> {
+    let all = profiles();
+    let vin = j1979::vin(elm).map_err(e)?;
+    let profile = vin.as_deref().and_then(|v| vehicles::for_vin(&all, v));
+    Ok(vehicles::services_for(profile, vin.as_deref()))
+}
+
+fn obd_services(elm: &mut Elm) -> Result<(), String> {
+    let list = vehicle_services(elm)?;
+    if list.is_empty() {
+        println!(
+            "No service routines are known for this vehicle yet: their IDs are the maker's own. They go in the vehicle's \
+             profile as [[service]] entries, learned by watching another tool (icarus learn) or from the maker's service \
+             information."
+        );
+    }
+    for s in &list {
+        let conds: Vec<&str> = s.conditions.iter().map(|c| c.describe()).collect();
+        println!(
+            "{}  ({:03X}, routine {:04X}{}{})",
+            s.name,
+            s.module,
+            s.routine,
+            if s.wired { ", wired only" } else { "" },
+            if s.checked {
+                ""
+            } else {
+                ", not yet checked on a vehicle"
+            }
+        );
+        if !conds.is_empty() {
+            println!("    needs: {}", conds.join(", "));
+        }
+        if !s.warning.is_empty() {
+            println!("    {}", s.warning);
+        }
+    }
+    Ok(())
+}
+
+/// `icarus obd service "NAME" --adapter A --yes`: runs one of the vehicle's service routines (without --yes, says what it
+/// would do and stops).
+fn obd_service(args: &Args) -> Result<(), String> {
+    let [name] = args.pos.as_slice() else {
+        return Err(
+            "usage: icarus obd service \"NAME\" --adapter A [--yes]   (names: icarus obd services)"
+                .into(),
+        );
+    };
+    let spec = args
+        .opt("adapter")
+        .map(str::to_string)
+        .or_else(|| std::env::var("ICARUS_ADAPTER").ok())
+        .unwrap_or_default();
+    let wired = Target::parse(&spec).map(|t| t.wired()).unwrap_or(false);
+    let mut elm = connect(args)?;
+    let list = vehicle_services(&mut elm)?;
+    let s = list
+        .iter()
+        .find(|s| s.name.eq_ignore_ascii_case(name))
+        .ok_or(format!(
+            "no service routine {name:?} for this vehicle (icarus obd services)"
+        ))?;
+    println!(
+        "{}: routine {:04X} in {:03X}{}.",
+        s.name,
+        s.routine,
+        s.module,
+        if s.checked {
+            ""
+        } else {
+            " (not yet checked on a vehicle)"
+        }
+    );
+    if !s.warning.is_empty() {
+        println!("{}", s.warning);
+    }
+    if args.opt("yes").is_none() {
+        println!("Nothing sent. Run it with --yes once the vehicle is ready (icarus obd services says what it needs).");
+        return Ok(());
+    }
+    actuator::catch_interrupt();
+    let status = icarus_obd::service::run(&mut elm, s, wired)?;
+    println!(
+        "Done{}. Every run is in ~/.local/state/icarus/actions.log.",
+        if status.is_empty() {
+            String::new()
+        } else {
+            format!(": the module answered {status}")
+        }
+    );
     Ok(())
 }
 
@@ -1694,6 +1795,12 @@ fn cmd_bus(a: &[String]) -> Result<(), String> {
         println!("\nTests seen run by another tool (add them to the vehicle's file, ~/.config/icarus/vehicles/MAKE.toml, after checking what each drives):\n");
         for t in &an.learned {
             println!("{}", bus::to_toml(t));
+        }
+    }
+    if !an.services.is_empty() {
+        println!("\nService routines seen started by another tool (add them to the vehicle's file after checking what each does):\n");
+        for s in &an.services {
+            println!("{}", icarus_obd::service::to_toml(s));
         }
     }
     Ok(())

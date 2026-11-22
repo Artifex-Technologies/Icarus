@@ -37,6 +37,8 @@ pub struct SimCar {
     monitoring: Option<u64>,
     /// Module settings (`sim::settings`): (module, identifier) -> value.
     settings: std::collections::HashMap<(u16, u16), Vec<u8>>,
+    /// Service routines started (module, routine), whose results are then ready (`sim::services`).
+    routines: std::collections::HashSet<(u16, u16)>,
     /// CAN auto-formatting (ATCAF, on by default): requests get ISO-TP's length byte added, and in monitor mode a frame whose
     /// first byte is 01-07 is read as an ISO-TP single frame and cut to that length, as a real adapter does.
     caf: bool,
@@ -88,6 +90,7 @@ impl SimCar {
             driven: Default::default(),
             cleared: Default::default(),
             monitoring: None,
+            routines: Default::default(),
             settings: [((0x7C0, 0xA001), vec![0x01]), ((0x7B0, 0x20), vec![0x00])]
                 .into_iter()
                 .collect(),
@@ -542,6 +545,29 @@ impl SimCar {
                 }
                 Some(vec![0x70, 0x10, *param])
             }
+            // service routines: the engine's throttle relearn (FF00: extended session, engine off; its result 02 when
+            // asked for), the cluster's oil life reset (0203)
+            ([0x31, 0x01, 0xFF, 0x00], true) if tx == 0x7E0 => {
+                if !self.extended.contains(&tx) {
+                    return refuse(0x7F);
+                }
+                if self.engine_on {
+                    return refuse(0x22);
+                }
+                self.routines.insert((tx, 0xFF00));
+                Some(vec![0x71, 0x01, 0xFF, 0x00, 0x01])
+            }
+            ([0x31, 0x03, 0xFF, 0x00], true) if tx == 0x7E0 => {
+                if self.routines.contains(&(tx, 0xFF00)) {
+                    Some(vec![0x71, 0x03, 0xFF, 0x00, 0x02])
+                } else {
+                    refuse(0x24)
+                }
+            }
+            ([0x31, 0x01, 0x02, 0x03], true) if tx == 0x7C0 => {
+                Some(vec![0x71, 0x01, 0x02, 0x03, 0x00])
+            }
+            ([0x31, ..], true) => refuse(0x31),
             ([0x3E, 0x00], true) => Some(vec![0x7E, 0x00]),
             ([0x3E, 0x00], false) => refuse(0x12),
             ([0x3E, 0x01], false) => Some(vec![0x7E]),
@@ -1017,6 +1043,43 @@ pub fn settings() -> Vec<crate::settings::SettingDef> {
 
 /// The simulated vehicle's actuator tests. Their identifiers (F001-F004 on the engine computer, 10 on the ABS module) exist only
 /// in this simulation: they are never in a real vehicle's profile.
+/// The simulated vehicle's service routines (made-up routine IDs): a throttle relearn in the engine, an oil life reset in
+/// the cluster.
+pub fn services() -> Vec<crate::service::ServiceDef> {
+    use crate::actuator::Condition::*;
+    use crate::service::ServiceDef;
+    vec![
+        ServiceDef {
+            name: "Throttle relearn (simulated)".into(),
+            module: 0x7E0,
+            rx: None,
+            routine: 0xFF00,
+            params: vec![],
+            extended: true,
+            results: true,
+            conditions: vec![EngineOff, Stationary],
+            max_seconds: 30,
+            wired: false,
+            warning: "Ignition on, engine off, pedal untouched until it finishes.".into(),
+            checked: true,
+        },
+        ServiceDef {
+            name: "Oil life reset (simulated)".into(),
+            module: 0x7C0,
+            rx: None,
+            routine: 0x0203,
+            params: vec![],
+            extended: false,
+            results: false,
+            conditions: vec![Stationary],
+            max_seconds: 10,
+            wired: false,
+            warning: String::new(),
+            checked: true,
+        },
+    ]
+}
+
 pub fn tests() -> Vec<crate::actuator::TestDef> {
     use crate::actuator::{Condition::*, Control, Protocol, TestDef};
     let t = |name: &str,

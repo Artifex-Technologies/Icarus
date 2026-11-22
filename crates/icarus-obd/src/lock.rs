@@ -257,6 +257,8 @@ mod tests {
         let v = s.values.values().next().unwrap().clone();
         let log = std::env::temp_dir().join(format!("icarus-lock-log-{}", std::process::id()));
         read_only(crate::settings::change(&mut car(), &s, &v, &log).map(|_| ()));
+        let r = crate::sim::services().remove(0);
+        read_only(crate::service::run(&mut car(), &r, true).map(|_| ()));
         assert!(!log.exists(), "nothing was logged as changed");
     }
 }

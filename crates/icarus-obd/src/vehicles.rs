@@ -30,6 +30,9 @@ pub struct Profile {
     /// Module settings (`[[setting]]` entries; see `settings`).
     #[serde(default, rename = "setting")]
     pub settings: Vec<crate::settings::SettingDef>,
+    /// Service routines (`[[service]]` entries; see `service`).
+    #[serde(default, rename = "service")]
+    pub services: Vec<crate::service::ServiceDef>,
     /// The file's name without `.toml` (how `--make` picks it).
     #[serde(skip)]
     pub id: String,
@@ -114,6 +117,11 @@ pub fn parse(id: &str, source: &str, text: &str) -> Result<Profile, String> {
     for s in &p.settings {
         if let Some(why) = s.refused() {
             return Err(format!("{source}: setting \"{}\" refused: {why}", s.name));
+        }
+    }
+    for s in &p.services {
+        if let Some(why) = s.refused() {
+            return Err(format!("{source}: service \"{}\" refused: {why}", s.name));
         }
     }
     for w in &p.wmi {
@@ -308,6 +316,18 @@ pub fn tests_for(profile: Option<&Profile>, vin: Option<&str>) -> Vec<crate::act
     let mut v: Vec<_> = profile.map(|p| p.tests.clone()).unwrap_or_default();
     if vin == Some(crate::sim::VIN) {
         v.extend(crate::sim::tests());
+    }
+    v
+}
+
+/// The service routines for a vehicle: its profile's, and the simulated vehicle's own when it is the simulation.
+pub fn services_for(
+    profile: Option<&Profile>,
+    vin: Option<&str>,
+) -> Vec<crate::service::ServiceDef> {
+    let mut v: Vec<_> = profile.map(|p| p.services.clone()).unwrap_or_default();
+    if vin == Some(crate::sim::VIN) {
+        v.extend(crate::sim::services());
     }
     v
 }

@@ -31,6 +31,7 @@ pub mod passthru;
 pub mod port;
 pub mod power_guard;
 pub mod report;
+pub mod service;
 pub mod settings;
 pub mod sim;
 pub mod socketcan;

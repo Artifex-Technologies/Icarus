@@ -204,6 +204,26 @@ time limit, warning, a live value to watch). Their IDs are each maker's own, so 
 marked `checked = false` until seen working; none are in the built-in profiles yet. `sim:off` (the simulated vehicle,
 ignition on and engine off) has five to try: fan, throttle, fuel pump, EVAP vent valve, ABS pump.
 
+## Service functions (relearns, resets, TPMS, coding)
+
+A maker's routines a module runs (UDS routine control, `31`): throttle, idle and steering-angle relearns, oil life and
+battery resets, TPMS sensor IDs, injector coding. Each is a `[[service]]` entry in the vehicle's profile (module, routine
+ID, its parameters, whether it needs the extended session, whether to wait for its result, its conditions, `wired` for
+coding). None are built in for a real make: a routine ID is each maker's own, and an unverified one could start anything,
+so they come from the maker's service information or from watching another tool run one on my own vehicle (`icarus learn`
+/ the Learning page turns a routine the tool starts into an unchecked entry).
+
+```sh
+icarus obd services --adapter A                                   # the vehicle's routines, and what each needs
+icarus obd service "Throttle relearn (simulated)" --adapter sim:off --yes   # runs one (without --yes: says what it would do)
+```
+
+Running one checks first: the definition (never an airbag module), the Read-Only switch, a cable for coding, the battery
+at 12 V or more, its conditions (engine off, parked...). Only the session (10 01/03), tester present and that routine's
+own start, stop and result requests go out; its result is asked for until the module gives it or the time limit stops it;
+the default session comes back whatever happened, and every run is in `~/.local/state/icarus/actions.log`. `sim:off` has
+two to try.
+
 ## Module settings
 
 What dealer tools call customizations: a feature a module keeps switched on or off, or a value it keeps (a chime, a lock

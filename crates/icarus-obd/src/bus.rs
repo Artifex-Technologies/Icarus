@@ -173,6 +173,8 @@ pub struct Analyzer {
     pub log: VecDeque<String>,
     /// Actuator tests seen run by another tool.
     pub learned: Vec<TestDef>,
+    /// Service routines seen started by another tool (`31 01`), unchecked.
+    pub services: Vec<crate::service::ServiceDef>,
     /// Module settings seen changed by another tool (the module accepted the write).
     pub settings: Vec<SettingDef>,
     /// The last value each (module, identifier, KWP2000?) was read as, and writes waiting for the module's answer.
@@ -323,14 +325,10 @@ impl Analyzer {
                 "{id:03X}: security access (level {level:02X}): the tool unlocked the module first. Icarus never does this, so \
                  what the tool did next may need it"
             )),
-            [0x31, kind, hi, lo, ..] => self.note(format!(
-                "{id:03X}: routine {hi:02X}{lo:02X} ({}): a service function or coding step; Icarus does not learn routines",
-                match kind {
-                    0x01 => "start",
-                    0x02 => "stop",
-                    0x03 => "result",
-                    _ => "?",
-                }
+            // a routine's start is learned as a service entry (`learn`); its stop and results are only noted
+            [0x31, kind @ (0x02 | 0x03), hi, lo, ..] => self.note(format!(
+                "{id:03X}: routine {hi:02X}{lo:02X} ({}): part of a service function the tool ran",
+                if *kind == 0x02 { "stop" } else { "result" }
             )),
             [0x3D, ..] => self.note(format!("{id:03X}: a write to memory by address: never learned")),
             [0x34 | 0x36, ..] => self.note(format!("{id:03X}: programming (a download to the module): flashing, never learned")),
@@ -403,6 +401,42 @@ impl Analyzer {
     /// An output-control request from another tool becomes a test (the most cautious conditions, unchecked).
     fn learn(&mut self, tx: u16, msg: &[u8]) {
         self.learn_setting(tx, msg);
+        // a routine another tool started: a service entry, unchecked, with the most cautious conditions
+        if let [0x31, 0x01, hi, lo, params @ ..] = msg {
+            let routine = u16::from_be_bytes([*hi, *lo]);
+            if params.len() <= 8
+                && !self
+                    .services
+                    .iter()
+                    .any(|s| s.module == tx && s.routine == routine)
+            {
+                let s = crate::service::ServiceDef {
+                    name: self.name_for(format!("Learned: routine {routine:04X} on {tx:03X}"), false),
+                    module: tx,
+                    rx: None,
+                    routine,
+                    params: params.to_vec(),
+                    extended: true,
+                    results: true,
+                    conditions: vec![Condition::EngineOff, Condition::Stationary],
+                    max_seconds: 30,
+                    wired: false,
+                    warning: format!(
+                        "Learned by watching another tool ({}): find out what it does before relying on it.",
+                        crate::report::now()
+                    ),
+                    checked: false,
+                };
+                match s.refused() {
+                    None => {
+                        self.name_for(String::new(), true);
+                        self.services.push(s);
+                    }
+                    Some(why) => self.note(format!("{tx:03X} routine {routine:04X}: {why}")),
+                }
+            }
+            return;
+        }
         let (protocol, out, state) = match msg {
             [0x2F, hi, lo, 0x03, state @ ..] if !state.is_empty() && state.len() <= 4 => {
                 (Protocol::Uds, u16::from_be_bytes([*hi, *lo]), state)
@@ -639,15 +673,21 @@ mod tests {
             ]
         );
         assert!(a.log[0].contains("mark: Seat belt chime off"));
-        assert_eq!(a.notes.len(), 3, "{:?}", a.notes);
+        assert_eq!(a.notes.len(), 2, "{:?}", a.notes);
+        assert!(a.notes[0].contains("security access"));
         assert!(
-            a.notes[0].contains("security access") && a.notes[1].contains("routine FF00 (start)")
-        );
-        assert!(
-            a.notes[2].contains("7B0 refused the tool's write data (KWP2000)"),
+            a.notes[1].contains("7B0 refused the tool's write data (KWP2000)"),
             "{:?}",
             a.notes
         );
+        // the routine the tool started is learned as a service entry, unchecked, with the most cautious conditions
+        assert_eq!(a.services.len(), 1);
+        let r = &a.services[0];
+        assert_eq!(
+            (r.module, r.routine, r.name.as_str(), r.checked),
+            (0x7E0, 0xFF00, "Learned: routine FF00 on 7E0", false)
+        );
+        assert!(r.conditions.contains(&Condition::EngineOff) && r.refused().is_none());
         assert_eq!(
             a.marks,
             vec![
