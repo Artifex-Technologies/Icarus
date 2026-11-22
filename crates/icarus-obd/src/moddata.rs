@@ -280,9 +280,11 @@ pub fn reachable(m: &ModuleDef) -> Result<(), &'static str> {
         Ids::Kline => return Err("not reachable yet: K-line"),
         Ids::Can11 => {}
     }
-    if h.ext.is_some() {
+    // behind a gateway: reached when the module answers with its own address byte first (Toyota's 750), not when the
+    // answers carry another one (BMW's tester address F1)
+    if h.ext.is_some() && h.tester.is_some_and(|t| Some(t) != h.ext) {
         return Err(
-            "not reachable yet: extended addressing (an address byte in front of each message)",
+            "not reachable yet: a gateway whose answers carry another address byte than the request's",
         );
     }
     if h.bus
@@ -735,14 +737,10 @@ pub fn read_request(
     // `reachable` and the gates hold both to 11 bits
     let (tx, rx) = (m.module.tx as u16, m.module.rx() as u16);
     let nap = pacer.sleep;
-    let ask = |link: &mut dyn Link| match uds::read_data_with(
-        link,
-        tx,
-        rx,
-        r.service,
-        r.ident,
-        &mut |d| nap(d),
-    ) {
+    let ext = m.module.ext;
+    let ask = |link: &mut dyn Link| match uds::at(link, ext, |l| {
+        uds::read_data_with(l, tx, rx, r.service, r.ident, &mut |d| nap(d))
+    }) {
         Ok(DataAnswer::Data(d)) => decode_all(r, &d, scope.year),
         Ok(DataAnswer::Refused(c)) => Outcome::Refused(c),
         Ok(DataAnswer::Silent) => Outcome::Silent,
@@ -1487,6 +1485,38 @@ mod tests {
     }
 
     #[test]
+    fn module_data_through_the_gateway() {
+        // OBDb's Tacoma layout: the tire pressure module at 750 with address byte 2A, answering with 2A first
+        let m = md::parse_module(
+            "format = 1\n[module]\nname = \"tire pressure\"\ntx = 0x750\nrx = 0x758\next = 0x2A\ntester = 0x2A\nkind = \"tpms\"\n\
+             [[request]]\nservice = 0x22\nident = 0x2021\n\
+             [[request.value]]\nid = \"TID_1\"\nname = \"Tire 1 position\"\nbyte = 0\nbits = 8\n",
+            "t",
+        )
+        .unwrap();
+        assert!(reachable(&m).is_ok());
+        let profiles = crate::vehicles::builtin();
+        let gates = Gates::new(&profiles, std::slice::from_ref(&m), "toyota");
+        let mut elm = Elm::connect(Box::new(SimCar::new())).unwrap();
+        let o = read_request(
+            &mut elm,
+            &mut pacer(),
+            &gates,
+            &m,
+            &m.requests[0],
+            &Scope::default(),
+        );
+        let Outcome::Values(v) = o else {
+            panic!("{o:?}")
+        };
+        assert_eq!(v[0].shown, Shown::Number(1.0));
+        // normal addressing afterwards: the engine's own data still reads
+        assert!(crate::uds::module_dtcs(&mut elm, 0x7E0, 0x7E8)
+            .unwrap()
+            .is_ok());
+    }
+
+    #[test]
     fn only_reading_services_and_reachable_modules() {
         let gates = Gates::new(&[], &[], "");
         let mut m = module("0x7A0", "");
@@ -1502,7 +1532,7 @@ mod tests {
             .unwrap()
             .contains("identity only"));
         for (extra, why) in [
-            ("ext = 0x40", "extended addressing"),
+            ("ext = 0x40\ntester = 0xF1", "another address byte"),
             ("bus = \"ms-can\"", "second CAN bus"),
             ("ids = \"kline\"", "K-line"),
         ] {

@@ -259,9 +259,10 @@ services 21 and 22 only, built by Icarus from the identifier (files carry no raw
 identification, which is kept for a later build and never sent today); never on 7DF or any answer ID; airbag and occupant
 modules identity only, and on a make whose profile names no airbag module, a module of unknown kind gets nothing either;
 nothing that needs a diagnostic session is sent (Icarus opens none); at least 50 ms between any two sends, a busy module
-slowed, a refused request, one that keeps failing or a silent module dropped. Module data from modules behind an
-extended address (Toyota's 750 body and TPMS), on 29-bit IDs or K-line is listed as not reachable yet (a scan does reach
-Toyota's modules behind 750: identity and codes, read only). `--adapter sim` has a set of
+slowed, a refused request, one that keeps failing or a silent module dropped. Modules behind a gateway that answer
+with their own address byte first (Toyota's 750: tire pressure 2A, as OBDb's Tacoma set has it) are read through the
+adapter's extended addressing; a gateway whose answers carry another byte (BMW's), 29-bit IDs and K-line are listed as
+not reachable yet. `--adapter sim` has a set of
 its own (made-up identifiers on 700, 701 and 7E0) to try it on.
 
 ## Learning module data from a capture

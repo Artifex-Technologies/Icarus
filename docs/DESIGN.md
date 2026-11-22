@@ -98,8 +98,8 @@ A module is bricked when a write stops halfway or puts the wrong thing in. Icaru
 - No maker's actuator test or setting IDs are known yet: they are learned on a vehicle by watching another tool.
 - Icarus does not read or write an ECU's memory, and knows no ECU family's checksum description yet (edited images are
   saved as files only).
-- Not supported yet: BMW's gateway (its answers carry the tester's address, not the module's), clearing or module data
-  for modules behind a gateway (Toyota's body modules give their identity and codes, read only), 29-bit module IDs (Honda) and
+- Not supported yet: BMW's gateway (its answers carry the tester's address, not the module's), clearing codes of modules
+  behind a gateway (Toyota's give their identity, codes and module data, read only), 29-bit module IDs (Honda) and
   GM's body range, Ford's medium-speed CAN, Mode 06 on older protocols, module data in the window and through `icarus mcp`,
   DDT2000 and DBC files, diagnostics through SocketCAN adapters (they watch the bus only), A2L definitions, service functions (relearns, resets, TPMS, injector coding).
 

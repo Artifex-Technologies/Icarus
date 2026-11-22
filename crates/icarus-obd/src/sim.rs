@@ -626,6 +626,10 @@ impl SimCar {
                 Some(vec![0x61, 0xA7, 60, 0x80])
             }
             ([0x22, 0xF1, 0x87], true) => Some([&[0x62, 0xF1, 0x87][..], part].concat()),
+            // the tire pressure module behind the gateway: each tire's position (1-4), then pressures in 0.1 psi steps
+            ([0x22, 0x20, 0x21], true) if tx == 0x752A => {
+                Some(vec![0x62, 0x20, 0x21, 1, 2, 3, 4, 0x01, 0x5E, 0x01, 0x60])
+            }
             ([0x22, 0xF1, 0x88], true) => {
                 Some([&[0x62, 0xF1, 0x88][..], b"ICARUS-SW-0001"].concat())
             }
