@@ -183,7 +183,7 @@ impl SimCar {
     }
 
     /// OBD-II's broadcast ID on this vehicle's CAN.
-    fn functional(&self) -> u32 {
+    pub(crate) fn functional(&self) -> u32 {
         if self.make == Make::Honda {
             0x18DB_33F1
         } else {
@@ -206,6 +206,14 @@ impl SimCar {
             t if t > 0x7FF => (t & 0xFFFF_0000) | ((t & 0xFF) << 8) | ((t >> 8) & 0xFF),
             t @ 0x240..=0x24F if self.make == Make::Gm => t + 0x400,
             t => t + 8,
+        }
+    }
+
+    /// Where the module asked at `to` answers from, the gateway's modules included (750 from 758).
+    pub(crate) fn answer_id_of(&self, to: u32) -> u32 {
+        match self.gateway() {
+            Some(g) if g == to => g + 8,
+            _ => self.answer_id(to),
         }
     }
 
@@ -594,6 +602,43 @@ impl SimCar {
             return [vec![first], self.module(tx, req).into_iter().collect()].concat();
         }
         vec![first]
+    }
+
+    /// The gateway whose modules take an address byte first in each frame (Toyota's 750), on this layout.
+    pub fn gateway(&self) -> Option<u32> {
+        (self.make == Make::Toyota).then_some(0x750)
+    }
+
+    /// Every message a request sent on CAN ID `to` (with the address byte `ext` first, for a module behind the gateway)
+    /// brings back, for a simulated CAN interface: (answer ID, the address byte, message). OBD-II's broadcast is answered by
+    /// every module that has an answer; a module that says "response pending" (7F xx 78) follows it with its answer.
+    pub fn can_answers(
+        &mut self,
+        to: u32,
+        ext: Option<u8>,
+        req: &[u8],
+    ) -> Vec<(u32, Option<u8>, Vec<u8>)> {
+        self.tick += 1;
+        if to == self.functional() && ext.is_none() {
+            return self
+                .broadcast(req)
+                .into_iter()
+                .map(|(h, p)| (self.obd_answer_id(h), None, p))
+                .collect();
+        }
+        let (key, from) = match (self.gateway(), ext) {
+            (Some(g), Some(a)) if g == to => (0x7500 | a as u32, g + 8),
+            (_, None) => (to, self.answer_id(to)),
+            _ => return vec![],
+        };
+        let Some(first) = self.module(key, req) else {
+            return vec![];
+        };
+        let mut out = vec![(from, ext, first.clone())];
+        if first.len() >= 3 && first[0] == 0x7F && first[2] == 0x78 {
+            out.extend(self.module(key, req).map(|p| (from, ext, p)));
+        }
+        out
     }
 
     /// One module's answer to a request sent to it alone: the engine and transmission speak UDS (the transmission refuses

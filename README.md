@@ -135,7 +135,7 @@ Use in the speedometer check). Positions are shown only with `--position` and ar
 
 ## The bus
 
-`icarus bus watch --adapter A` (the OBDLink's monitor mode) or `--can can0` (a Linux CAN interface such as a CANable),
+`icarus bus watch --adapter A` (the OBDLink's monitor mode) or `--can can0` / `--adapter can0` (a Linux CAN interface such as a CANable),
 or the Bus page: every ID with its rate and last bytes, the bytes that just changed lit up (press a pedal or a switch and
 watch which byte follows), and diagnostic messages between a tool and the modules put in words. Watching only: nothing
 is sent onto the bus. What another tool does while Icarus watches is learned (next section).
@@ -414,8 +414,16 @@ The adapter `A` is one of:
 | `bt:AA:BB:CC:DD:EE:FF` | a paired Bluetooth adapter such as the OBDLink MX+ (RFCOMM channel 1; `#2` picks another) |
 | `/dev/ttyUSB0[@115200]` | a USB adapter (38400 baud unless given) |
 | `tcp:192.168.0.10:35000` | a Wi-Fi adapter |
+| `can:can0` (or just `can0`, `vcan0`) | a Linux CAN interface (SocketCAN), such as a CANable set up with `ip link set can0 up type can bitrate 500000` |
 
-`ICARUS_ADAPTER` sets a default. Pair a Bluetooth adapter once with `bluetoothctl` (`scan on`, `pair`, `trust`); Icarus
+`ICARUS_ADAPTER` sets a default.
+
+Through a CAN interface Icarus speaks ISO 15765-2 (ISO-TP) itself over raw frames, with no ELM327 in between and no kernel
+`can-isotp` module: OBD-II's broadcast on `7DF` (or `18DB33F1`; it tries 11-bit CAN, then 29-bit), each module at its own
+IDs, long answers and requests put together and split with flow control both ways, "response pending" waited out, a
+message that stops halfway reported, never kept short. The `obd` commands work the same (`icarus obd info --adapter can0`);
+the interface cannot measure the battery, and its bit rate is whatever `ip link` set. As on every link, a request that
+would change a vehicle switched to Read-Only is refused before any frame is sent. Pair a Bluetooth adapter once with `bluetoothctl` (`scan on`, `pair`, `trust`); Icarus
 connects to it directly, no `rfcomm bind` needed.
 
 ## Build
@@ -432,7 +440,7 @@ Rust (stable), Linux. Dependencies: `roxmltree` (XML) and `libc`.
 | Crate | What |
 | --- | --- |
 | `crates/icarus-core` | ROM images (original + edited, diff), definitions (tables, values, switches), formulas, the TunerPro `.xdf` reader; module-data definitions, their decoder, the OBDb importer and the capture importers (Bluetooth logs, bus logs); ISO-TP |
-| `crates/icarus-obd` | adapters (USB, Bluetooth, Wi-Fi, simulated), the ELM327/STN language, the standard OBD-II services |
+| `crates/icarus-obd` | adapters (USB, Bluetooth, Wi-Fi, simulated), the ELM327/STN language, Linux CAN interfaces with Icarus's own ISO-TP, the standard OBD-II services |
 | `crates/icarus` | the `icarus` command |
 | `crates/icarus-app` | the window (egui, Yggdrasil's look from yggdrasil-ui); a worker thread owns the adapter |
 

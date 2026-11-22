@@ -1,6 +1,6 @@
 //! Linux's own CAN interfaces (SocketCAN): USB CAN adapters such as a CANable show up as `can0`, set up once with
-//! `sudo ip link set can0 up type can bitrate 500000`. Icarus reads frames from them for the bus monitor; it never writes to
-//! the socket (watching only, like the adapter's monitor mode).
+//! `sudo ip link set can0 up type can bitrate 500000`. The bus monitor only reads frames from them (it never writes to the
+//! socket, like the adapter's monitor mode); diagnostics (`canlink`, `--adapter can:can0`) send requests through them.
 
 use crate::bus::Frame;
 use std::io;
@@ -79,9 +79,31 @@ pub fn decode(raw: &[u8; 16], at: f64) -> Option<Frame> {
     })
 }
 
+/// The kernel's `struct can_frame` for a classic data frame (at most 8 bytes; a 29-bit ID when `f.ext`).
+pub fn encode(f: &Frame) -> io::Result<[u8; 16]> {
+    let max = if f.ext { 0x1FFF_FFFF } else { 0x7FF };
+    if f.id > max || f.data.len() > 8 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("not a CAN frame: ID {:X}, {} bytes", f.id, f.data.len()),
+        ));
+    }
+    let mut raw = [0u8; 16];
+    let id = if f.ext { f.id | CAN_EFF_FLAG } else { f.id };
+    raw[..4].copy_from_slice(&id.to_ne_bytes());
+    raw[4] = f.data.len() as u8;
+    raw[8..8 + f.data.len()].copy_from_slice(&f.data);
+    Ok(raw)
+}
+
 impl CanSocket {
     /// The next frame, waiting up to `timeout` (None: none came, or it was not a data frame).
     pub fn read(&self, timeout: Duration, at: f64) -> io::Result<Option<Frame>> {
+        Ok(self.read_raw(timeout)?.and_then(|raw| decode(&raw, at)))
+    }
+
+    /// The next frame as the kernel gives it, waiting up to `timeout`.
+    fn read_raw(&self, timeout: Duration) -> io::Result<Option<[u8; 16]>> {
         let mut p = libc::pollfd {
             fd: self.0.as_raw_fd(),
             events: libc::POLLIN,
@@ -99,11 +121,42 @@ impl CanSocket {
         if n < 0 {
             return Err(io::Error::last_os_error());
         }
-        Ok(if n as usize == raw.len() {
-            decode(&raw, at)
-        } else {
-            None
-        })
+        Ok((n as usize == raw.len()).then_some(raw))
+    }
+}
+
+/// A CAN interface carries the diagnostic link's frames (`canlink`): every frame written is one `struct can_frame`.
+impl crate::canlink::Frames for CanSocket {
+    fn send(&mut self, f: &Frame) -> io::Result<()> {
+        let raw = encode(f)?;
+        let n = unsafe { libc::write(self.0.as_raw_fd(), raw.as_ptr().cast(), raw.len()) };
+        if n < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if n as usize != raw.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "the CAN interface took part of a frame",
+            ));
+        }
+        Ok(())
+    }
+
+    fn recv(&mut self, timeout: Duration) -> io::Result<Option<Frame>> {
+        // remote and error frames are skipped without ending the wait
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            let Some(raw) = self.read_raw(left)? else {
+                return Ok(None);
+            };
+            if let Some(f) = decode(&raw, 0.0) {
+                return Ok(Some(f));
+            }
+            if left.is_zero() {
+                return Ok(None);
+            }
+        }
     }
 }
 
@@ -131,6 +184,33 @@ mod tests {
         assert_eq!((e.id, e.ext), (0x18DA_F110, true));
         raw[..4].copy_from_slice(&(0x123u32 | CAN_ERR_FLAG).to_ne_bytes());
         assert!(decode(&raw, 0.0).is_none(), "error frames are not data");
+        // what Icarus writes reads back the same; IDs and lengths a classic frame cannot carry are refused
+        for f in [
+            Frame {
+                id: 0x7DF,
+                ext: false,
+                data: vec![0x02, 0x01, 0x00, 0, 0, 0, 0, 0],
+                at: 0.0,
+            },
+            Frame {
+                id: 0x18DA_10F1,
+                ext: true,
+                data: vec![0x03, 0x22, 0xF1, 0x87],
+                at: 0.0,
+            },
+        ] {
+            assert_eq!(decode(&encode(&f).unwrap(), 0.0).unwrap(), f);
+        }
+        let bad = |id, ext, n| {
+            encode(&Frame {
+                id,
+                ext,
+                data: vec![0; n],
+                at: 0.0,
+            })
+            .is_err()
+        };
+        assert!(bad(0x800, false, 1) && bad(0x2000_0000, true, 1) && bad(0x7E0, false, 9));
         assert_eq!(
             std::mem::size_of::<SockaddrCan>(),
             24,

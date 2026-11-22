@@ -17,6 +17,7 @@ pub trait Port {
 ///   `/dev/ttyUSB0` or `/dev/ttyUSB0@115200`   a USB adapter (38400 baud unless given)
 ///   `bt:AA:BB:CC:DD:EE:FF` or `...#2`         a paired Bluetooth adapter, RFCOMM channel 1 unless given
 ///   `tcp:192.168.0.10:35000`       a Wi-Fi adapter
+///   `can:can0`, or just `can0`/`vcan0`        a Linux CAN interface (SocketCAN: a CANable), spoken to directly
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
     /// The simulated vehicle: engine running (`sim`) or ignition on, engine off (`sim:off`).
@@ -32,14 +33,23 @@ pub enum Target {
         channel: u8,
     },
     Tcp(String),
+    /// A Linux CAN interface by name (`can0`): diagnostics over SocketCAN (`canlink`), or watching the bus.
+    Can(String),
+}
+
+/// Whether `s` is a CAN interface's usual name: `can` or `vcan` and a number.
+fn can_name(s: &str) -> bool {
+    let digits = s.strip_prefix("vcan").or_else(|| s.strip_prefix("can"));
+    digits.is_some_and(|d| !d.is_empty() && d.len() <= 3 && d.chars().all(|c| c.is_ascii_digit()))
 }
 
 impl Target {
     /// A cable all the way: what anything that writes a module's memory needs (a dropped wireless link mid-write can leave
-    /// the module half-written). A serial port named `rfcomm` is Bluetooth; the simulation counts as wired.
+    /// the module half-written). A serial port named `rfcomm` is Bluetooth; the simulation and a CAN interface (a USB CAN
+    /// adapter) count as wired.
     pub fn wired(&self) -> bool {
         match self {
-            Target::Sim { .. } => true,
+            Target::Sim { .. } | Target::Can(_) => true,
             Target::Serial { path, .. } => !path.contains("rfcomm"),
             Target::Bluetooth { .. } | Target::Tcp(_) => false,
         }
@@ -50,6 +60,23 @@ impl Target {
             return Ok(Target::Sim {
                 engine_on: s == "sim",
             });
+        }
+        if let Some(ifn) = s.strip_prefix("can:") {
+            // a network interface name: at most 15 characters, no slashes or spaces
+            if ifn.is_empty()
+                || ifn.len() > 15
+                || !ifn
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+            {
+                return Err(format!(
+                    "can: needs a CAN interface's name, e.g. can:can0, not {ifn:?}"
+                ));
+            }
+            return Ok(Target::Can(ifn.to_string()));
+        }
+        if can_name(s) {
+            return Ok(Target::Can(s.to_string()));
         }
         if let Some(rest) = s.strip_prefix("tcp:") {
             if !rest.contains(':') {
@@ -87,11 +114,19 @@ impl Target {
                 baud,
             });
         }
-        Err(format!("unknown adapter {s:?}: use sim, /dev/ttyUSB0[@baud], bt:AA:BB:CC:DD:EE:FF[#channel] or tcp:host:port"))
+        Err(format!("unknown adapter {s:?}: use sim, /dev/ttyUSB0[@baud], bt:AA:BB:CC:DD:EE:FF[#channel], tcp:host:port or can:can0"))
     }
 
+    /// The byte stream to an ELM327/STN adapter. A CAN interface is not one: it is reached frame by frame
+    /// (`socketcan::open`, `canlink::CanLink`).
     pub fn open(&self) -> io::Result<Box<dyn Port>> {
         Ok(match self {
+            Target::Can(ifn) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{ifn} is a CAN interface, not an ELM327 adapter: this needs an OBD adapter (sim, /dev/ttyUSB0, bt:, tcp:)"),
+                ))
+            }
             Target::Sim { engine_on: true } => Box::new(crate::sim::SimCar::new()),
             Target::Sim { engine_on: false } => Box::new(crate::sim::SimCar::engine_off()),
             Target::Serial { path, baud } => Box::new(open_serial(path, *baud)?),
@@ -324,6 +359,19 @@ mod tests {
             Target::parse("tcp:192.168.0.10:35000").unwrap(),
             Target::Tcp("192.168.0.10:35000".into())
         );
+        // a CAN interface: by name alone when it looks like one, or after can:
+        for (s, ifn) in [
+            ("can0", "can0"),
+            ("vcan0", "vcan0"),
+            ("can:slcan0", "slcan0"),
+        ] {
+            assert_eq!(Target::parse(s).unwrap(), Target::Can(ifn.into()), "{s}");
+        }
+        assert!(Target::parse("can0").unwrap().wired());
+        assert!(
+            Target::parse("can0").unwrap().open().is_err(),
+            "not an ELM327"
+        );
         for bad in [
             "bt:00:11",
             "bt:00:11:22:33:44:ZZ",
@@ -331,6 +379,10 @@ mod tests {
             "tcp:host",
             "COM3",
             "/dev/x@fast",
+            "can:",
+            "can:../x",
+            "canx",
+            "can",
         ] {
             assert!(Target::parse(bad).is_err(), "{bad}");
         }

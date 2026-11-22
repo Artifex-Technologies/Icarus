@@ -6,6 +6,7 @@ use icarus_core::rom::{self, Rom};
 use icarus_core::xdf;
 use icarus_obd::elm::Elm;
 use icarus_obd::j1979::{self, DtcKind};
+use icarus_obd::link::Link;
 use icarus_obd::port::Target;
 use icarus_obd::{
     actuator, bus, charging, clear, dtc, garage, lock, lookup, mode06, nhtsa, report, settings,
@@ -161,7 +162,8 @@ Trouble codes:
                                              every module
 
   The adapter A: sim (a simulated vehicle), /dev/ttyUSB0[@baud], bt:AA:BB:CC:DD:EE:FF[#channel] (paired Bluetooth, such as
-  an OBDLink MX+), tcp:host:port (Wi-Fi). ICARUS_ADAPTER sets a default.";
+  an OBDLink MX+), tcp:host:port (Wi-Fi), can:can0 or can0 (a Linux CAN interface such as a CANable: Icarus speaks
+  ISO-TP over it itself). ICARUS_ADAPTER sets a default.";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -633,19 +635,52 @@ fn cmd_diff(a: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn connect(args: &Args) -> Result<Elm, String> {
+/// The adapter `--adapter` (or ICARUS_ADAPTER) names, parsed.
+fn adapter_target(args: &Args) -> Result<(String, Target), String> {
     let spec = args.opt("adapter").map(str::to_string).or_else(|| std::env::var("ICARUS_ADAPTER").ok()).ok_or(
-        "which adapter? --adapter sim | /dev/ttyUSB0 | bt:AA:BB:CC:DD:EE:FF | tcp:host:port (or set ICARUS_ADAPTER)",
+        "which adapter? --adapter sim | /dev/ttyUSB0 | bt:AA:BB:CC:DD:EE:FF | tcp:host:port | can:can0 (or set ICARUS_ADAPTER)",
     )?;
     let target = Target::parse(&spec)?;
+    Ok((spec, target))
+}
+
+/// The link to the vehicle: an ELM327/STN adapter, or a Linux CAN interface (`can0`, spoken to over SocketCAN).
+fn connect(args: &Args) -> Result<Box<dyn Link>, String> {
+    let (spec, target) = adapter_target(args)?;
+    eprintln!("connecting to {spec}...");
+    if let Target::Can(ifn) = &target {
+        let sock = socketcan::open(ifn).map_err(|x| x.to_string())?;
+        return icarus_obd::canlink::CanLink::connect(sock, ifn)
+            .map(|l| Box::new(l) as Box<dyn Link>)
+            .map_err(|x| x.to_string());
+    }
+    let port = target.open().map_err(|e| format!("{spec}: {e}"))?;
+    Elm::connect(port)
+        .map(|l| Box::new(l) as Box<dyn Link>)
+        .map_err(|e| e.to_string())
+}
+
+/// The Linux CAN interface to watch: `--can can0`, or `--adapter can0` / `can:can0`.
+fn can_interface(args: &Args) -> Option<String> {
+    args.opt("can")
+        .map(str::to_string)
+        .or_else(|| match adapter_target(args) {
+            Ok((_, Target::Can(ifn))) => Some(ifn),
+            _ => None,
+        })
+}
+
+/// An ELM327/STN adapter itself, for what only an adapter does (its monitor mode).
+fn connect_elm(args: &Args) -> Result<Elm, String> {
+    let (spec, target) = adapter_target(args)?;
     let port = target.open().map_err(|e| format!("{spec}: {e}"))?;
     eprintln!("connecting to {spec}...");
     Elm::connect(port).map_err(|e| e.to_string())
 }
 
-/// Prints the notes on modules left out of broadcasts' answers (`Elm::take_dropped`): every command that shows a broadcast's
-/// answers calls it, so a module is never lost silently.
-pub(crate) fn note_dropped(elm: &mut Elm) {
+/// Prints the notes on modules left out of broadcasts' answers (`Link::take_dropped`): every command that shows a
+/// broadcast's answers calls it, so a module is never lost silently.
+pub(crate) fn note_dropped(elm: &mut dyn Link) {
     for n in elm.take_dropped() {
         eprintln!("note: {n}");
     }
@@ -660,10 +695,10 @@ fn cmd_obd(a: &[String]) -> Result<(), String> {
         ],
     )?;
     // connected, run, and the senders any broadcast left out noted however it ended
-    let with = |f: &dyn Fn(&mut Elm) -> Result<(), String>| {
-        let mut elm = connect(&args)?;
-        let r = f(&mut elm);
-        note_dropped(&mut elm);
+    let with = |f: &dyn Fn(&mut dyn Link) -> Result<(), String>| {
+        let mut link = connect(&args)?;
+        let r = f(&mut *link);
+        note_dropped(&mut *link);
         r
     };
     match a.first().map(String::as_str) {
@@ -690,7 +725,7 @@ fn cmd_obd(a: &[String]) -> Result<(), String> {
     }
 }
 
-fn print_module(elm: &mut Elm, m: &vehicles::ModuleAddr) -> Result<(), String> {
+fn print_module(elm: &mut dyn Link, m: &vehicles::ModuleAddr) -> Result<(), String> {
     let (tx, rx) = (m.tx, m.rx());
     let at = if m.rx.is_none_or(|r| r == tx + 8) {
         format!("{tx:03X}")
@@ -754,7 +789,7 @@ fn profiles() -> Vec<vehicles::Profile> {
     all
 }
 
-fn obd_scan(elm: &mut Elm, args: &Args) -> Result<(), String> {
+fn obd_scan(elm: &mut dyn Link, args: &Args) -> Result<(), String> {
     let all = profiles();
     let profile = match args.opt("make") {
         Some(m) => vehicles::find(&all, m)?.clone(),
@@ -770,9 +805,9 @@ fn obd_scan(elm: &mut Elm, args: &Args) -> Result<(), String> {
         }
     };
     let list = if args.opt("sweep").is_some() {
-        uds::sweep_on(&all, elm.protocol)
+        uds::sweep_on(&all, elm.protocol())
     } else {
-        vehicles::candidates_on(&profile, elm.protocol)
+        vehicles::candidates_on(&profile, elm.protocol())
     };
     println!("Vehicle profile: {} ({})", profile.name, profile.source);
     if !profile.notes.is_empty() {
@@ -813,7 +848,7 @@ fn obd_scan(elm: &mut Elm, args: &Args) -> Result<(), String> {
     Ok(())
 }
 
-fn obd_module(elm: &mut Elm, args: &Args) -> Result<(), String> {
+fn obd_module(elm: &mut dyn Link, args: &Args) -> Result<(), String> {
     let [id] = args.pos.as_slice() else {
         return Err(
             "usage: icarus obd module ID[/ANSWER_ID] --adapter A (hex, e.g. 7B0, 713/77D or 18DA30F1)".into(),
@@ -933,19 +968,12 @@ fn e(x: icarus_obd::elm::ObdError) -> String {
     x.to_string()
 }
 
-fn obd_info(elm: &mut Elm) -> Result<(), String> {
-    println!(
-        "Adapter:   {}{}",
-        elm.id,
-        elm.stn
-            .as_ref()
-            .map(|s| format!(" ({s})"))
-            .unwrap_or_default()
-    );
-    if let Some(v) = elm.voltage {
+fn obd_info(elm: &mut dyn Link) -> Result<(), String> {
+    println!("Adapter:   {}", elm.adapter());
+    if let Some(v) = elm.voltage() {
         println!("Battery:   {v:.1} V at the OBD port");
     }
-    println!("Protocol:  {}", elm.protocol.describe());
+    println!("Protocol:  {}", elm.protocol().describe());
     println!(
         "VIN:       {}",
         j1979::vin(elm)
@@ -1066,7 +1094,7 @@ fn print_code(
     }
 }
 
-fn obd_codes(elm: &mut Elm) -> Result<(), String> {
+fn obd_codes(elm: &mut dyn Link) -> Result<(), String> {
     let all = profiles();
     let vin = j1979::vin(elm).map_err(e)?;
     let profile = vin.as_deref().and_then(|v| vehicles::for_vin(&all, v));
@@ -1111,14 +1139,14 @@ fn obd_codes(elm: &mut Elm) -> Result<(), String> {
     Ok(())
 }
 
-fn vehicle_tests(elm: &mut Elm) -> Result<Vec<actuator::TestDef>, String> {
+fn vehicle_tests(elm: &mut dyn Link) -> Result<Vec<actuator::TestDef>, String> {
     let all = profiles();
     let vin = j1979::vin(elm).map_err(e)?;
     let profile = vin.as_deref().and_then(|v| vehicles::for_vin(&all, v));
     Ok(vehicles::tests_for(profile, vin.as_deref()))
 }
 
-fn obd_tests(elm: &mut Elm) -> Result<(), String> {
+fn obd_tests(elm: &mut dyn Link) -> Result<(), String> {
     let tests = vehicle_tests(elm)?;
     if tests.is_empty() {
         println!("No actuator tests are known for this vehicle yet: their IDs are the maker's own. They go in the vehicle's profile as [[test]] entries (docs/DESIGN.md).");
@@ -1147,7 +1175,7 @@ fn obd_tests(elm: &mut Elm) -> Result<(), String> {
     Ok(())
 }
 
-fn obd_test(elm: &mut Elm, args: &Args) -> Result<(), String> {
+fn obd_test(elm: &mut dyn Link, args: &Args) -> Result<(), String> {
     let [name] = args.pos.as_slice() else {
         return Err(
             "usage: icarus obd test \"NAME\" --adapter A [--value PERCENT] [--seconds N] [--yes]"
@@ -1235,7 +1263,9 @@ fn obd_test(elm: &mut Elm, args: &Args) -> Result<(), String> {
     Ok(())
 }
 
-fn vehicle_settings(elm: &mut Elm) -> Result<(Option<String>, Vec<settings::SettingDef>), String> {
+fn vehicle_settings(
+    elm: &mut dyn Link,
+) -> Result<(Option<String>, Vec<settings::SettingDef>), String> {
     let all = profiles();
     let vin = j1979::vin(elm).map_err(e)?;
     let profile = vin.as_deref().and_then(|v| vehicles::for_vin(&all, v));
@@ -1244,7 +1274,7 @@ fn vehicle_settings(elm: &mut Elm) -> Result<(Option<String>, Vec<settings::Sett
 }
 
 /// Where a vehicle's setting changes are kept: its own folder's Logs (the simulation's in Icarus's state folder).
-fn obd_settings(elm: &mut Elm) -> Result<(), String> {
+fn obd_settings(elm: &mut dyn Link) -> Result<(), String> {
     let (_, list) = vehicle_settings(elm)?;
     if list.is_empty() {
         println!("No module settings are known for this vehicle yet: their IDs are the maker's own. Watch a dealer tool change one (icarus bus), then add what it learned to the vehicle's profile as a [[setting]] entry (docs/DESIGN.md).");
@@ -1387,7 +1417,7 @@ fn obd_setting(args: &Args, undo: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn obd_charging(elm: &mut Elm, args: &Args) -> Result<(), String> {
+fn obd_charging(elm: &mut dyn Link, args: &Args) -> Result<(), String> {
     let battery = match args.opt("battery") {
         Some(b) => charging::Battery::parse(b).ok_or("--battery is agm or flooded")?,
         None => charging::Battery::Agm,
@@ -1411,7 +1441,7 @@ fn obd_charging(elm: &mut Elm, args: &Args) -> Result<(), String> {
     Ok(())
 }
 
-fn obd_selftests(elm: &mut Elm) -> Result<(), String> {
+fn obd_selftests(elm: &mut dyn Link) -> Result<(), String> {
     let r = mode06::read(elm).map_err(e)?;
     if r.is_empty() {
         println!("The engine module gave no on-board test results.");
@@ -1433,7 +1463,7 @@ fn obd_selftests(elm: &mut Elm) -> Result<(), String> {
     Ok(())
 }
 
-fn obd_clear(elm: &mut Elm, args: &Args) -> Result<(), String> {
+fn obd_clear(elm: &mut dyn Link, args: &Args) -> Result<(), String> {
     // one module (its dialect is learned by reading its codes first) or every OBD-II module
     let target = match args.opt("module") {
         None => None,
@@ -1505,7 +1535,7 @@ fn obd_clear(elm: &mut Elm, args: &Args) -> Result<(), String> {
     Ok(())
 }
 
-fn obd_report(elm: &mut Elm, args: &Args) -> Result<(), String> {
+fn obd_report(elm: &mut dyn Link, args: &Args) -> Result<(), String> {
     let d = report::collect(elm, &profiles(), args.opt("scan").is_some()).map_err(e)?;
     let p = report::save(&d, args.opt("out").map(std::path::PathBuf::from))
         .map_err(|x| x.to_string())?;
@@ -1584,8 +1614,8 @@ fn cmd_bus(a: &[String]) -> Result<(), String> {
         start.elapsed().as_secs_f64() < secs && !actuator::interrupted()
     };
     eprintln!("watching for {secs} s (Ctrl+C stops); nothing is sent onto the bus...");
-    let ended = if let Some(ifn) = args.opt("can") {
-        let sock = socketcan::open(ifn).map_err(|x| x.to_string())?;
+    let ended = if let Some(ifn) = can_interface(&args) {
+        let sock = socketcan::open(&ifn).map_err(|x| x.to_string())?;
         loop {
             let f = sock
                 .read(
@@ -1598,7 +1628,7 @@ fn cmd_bus(a: &[String]) -> Result<(), String> {
             }
         }
     } else {
-        let mut elm = connect(&args)?;
+        let mut elm = connect_elm(&args)?;
         let proto = elm.protocol;
         if raw {
             // the adapter first, so a firmware change shows in the log; bus::parse_line skips this line
@@ -1713,14 +1743,15 @@ fn cmd_learn(a: &[String]) -> Result<(), String> {
         go
     };
     let all = profiles();
-    let (vin, source, vehicle) = if let Some(ifn) = args.opt("can") {
+    let can_if = can_interface(&args);
+    let (vin, source, vehicle) = if let Some(ifn) = &can_if {
         (
             None,
             format!("the CAN interface {ifn}"),
             "a vehicle Icarus did not ask (CAN interface)".to_string(),
         )
     } else {
-        let mut elm = connect(&args)?;
+        let mut elm = connect_elm(&args)?;
         let vin = j1979::vin(&mut elm).map_err(e)?;
         note_dropped(&mut elm);
         let vehicle = match vin.as_deref() {
@@ -1753,7 +1784,7 @@ fn cmd_learn(a: &[String]) -> Result<(), String> {
             vehicle,
         )
     };
-    if let Some(ifn) = args.opt("can") {
+    if let Some(ifn) = &can_if {
         eprintln!("Learning on the CAN interface {ifn}. Icarus only listens. Type what you are about to do and press Enter before each change; \"stop\" or Ctrl+C ends.");
         let sock = socketcan::open(ifn).map_err(|x| x.to_string())?;
         loop {
@@ -1916,7 +1947,7 @@ fn cmd_garage(a: &[String]) -> Result<(), String> {
     }
 }
 
-fn obd_pids(elm: &mut Elm) -> Result<(), String> {
+fn obd_pids(elm: &mut dyn Link) -> Result<(), String> {
     for (from, module, pids) in j1979::supported(elm).map_err(e)? {
         println!("{module} ({from}):");
         for p in pids {
@@ -1932,7 +1963,7 @@ fn obd_pids(elm: &mut Elm) -> Result<(), String> {
     Ok(())
 }
 
-fn obd_live(elm: &mut Elm, args: &Args) -> Result<(), String> {
+fn obd_live(elm: &mut dyn Link, args: &Args) -> Result<(), String> {
     let mut pids: Vec<u8> = args
         .pos
         .iter()
@@ -2060,4 +2091,65 @@ fn cmd_devices() -> Result<(), String> {
         println!("    {}", f.known.note);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use icarus_obd::canlink::{serve, CanLink, SimBus};
+
+    /// `icarus obd info --adapter can0`: the command's own steps over the CAN interface's link, the simulated vehicle on an
+    /// in-memory bus in place of the interface (no interface, no root).
+    #[test]
+    fn obd_info_over_a_can_interface() {
+        assert_eq!(Target::parse("can0").unwrap(), Target::Can("can0".into()));
+        let mut link = CanLink::connect(SimBus::new(sim::SimCar::new()), "can0").unwrap();
+        obd_info(&mut link).unwrap();
+        // it asked what obd info shows: the VIN, the modules' names and calibrations, the monitors
+        let asked: Vec<Vec<u8>> = link
+            .frames()
+            .sent
+            .iter()
+            .filter(|f| f.id == 0x7DF)
+            .map(|f| f.data[1..1 + f.data[0] as usize].to_vec())
+            .collect();
+        for want in [
+            &[0x09, 0x02][..],
+            &[0x09, 0x0A],
+            &[0x09, 0x04],
+            &[0x01, 0x01],
+        ] {
+            assert!(asked.iter().any(|a| a == want), "{want:02X?}: {asked:02X?}");
+        }
+        note_dropped(&mut link);
+    }
+
+    /// The same through `--adapter vcan0` on a real virtual CAN interface, when one exists (made once with root:
+    /// `sudo ip link add vcan0 type vcan && sudo ip link set vcan0 up`): a thread plays the simulated vehicle on a second
+    /// socket.
+    #[test]
+    #[ignore = "needs a vcan0 interface"]
+    fn obd_info_over_a_real_vcan0() {
+        let Ok(mut car_side) = socketcan::open("vcan0") else {
+            eprintln!("no vcan0 here: skipped");
+            return;
+        };
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let done = stop.clone();
+        let car = std::thread::spawn(move || {
+            let mut sim = SimBus::new(sim::SimCar::new());
+            serve(&mut car_side, &mut sim, || {
+                done.load(std::sync::atomic::Ordering::Relaxed)
+            })
+        });
+        let args = parse_args(&["--adapter".into(), "vcan0".into()], &["adapter"]).unwrap();
+        let link = connect(&args);
+        let r = link.and_then(|mut l| {
+            assert_eq!(l.adapter(), "SocketCAN vcan0");
+            obd_info(&mut *l)
+        });
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        car.join().unwrap().unwrap();
+        r.unwrap();
+    }
 }

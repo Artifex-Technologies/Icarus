@@ -85,6 +85,37 @@ pub trait Link {
     }
 }
 
+/// A boxed link is a link (the command line picks the kind of link when it connects: an adapter or a CAN interface).
+impl<L: Link + ?Sized> Link for Box<L> {
+    fn request(&mut self, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
+        (**self).request(data)
+    }
+    fn request_to(&mut self, tx: u32, rx: u32, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
+        (**self).request_to(tx, rx, data)
+    }
+    fn protocol(&self) -> Protocol {
+        (**self).protocol()
+    }
+    fn adapter(&self) -> String {
+        (**self).adapter()
+    }
+    fn voltage(&mut self) -> Option<f64> {
+        (**self).voltage()
+    }
+    fn set_ext(&mut self, ext: Option<u8>) -> Result<(), ObdError> {
+        (**self).set_ext(ext)
+    }
+    fn reach(&self) -> Reach {
+        (**self).reach()
+    }
+    fn set_bus(&mut self, bus: Bus) -> Result<(), ObdError> {
+        (**self).set_bus(bus)
+    }
+    fn take_dropped(&mut self) -> Vec<String> {
+        (**self).take_dropped()
+    }
+}
+
 impl Link for Elm {
     fn request(&mut self, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
         Elm::request(self, data)
