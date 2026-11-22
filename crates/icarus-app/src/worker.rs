@@ -30,6 +30,8 @@ pub enum Cmd {
     Report(bool),
     /// Read each module's own values once (icarus_obd::vehicledata): every module of the set that fits, read only.
     ModuleData,
+    /// Run a service routine (icarus_obd::service: its checks first).
+    Service(icarus_obd::service::ServiceDef),
     /// Start an actuator test (value for percent tests); it runs while TestHold keeps coming (at least every 0.5 s).
     TestStart {
         def: actuator::TestDef,
@@ -79,6 +81,8 @@ pub struct Info {
     pub tests: Vec<actuator::TestDef>,
     /// Module settings known for this vehicle.
     pub settings: Vec<SettingDef>,
+    /// Service routines known for this vehicle.
+    pub services: Vec<icarus_obd::service::ServiceDef>,
     /// The vehicle's code history (its folder), this reading included; or why it could not be kept.
     pub history: Result<Vec<icarus_obd::history::Span>, String>,
 }
@@ -172,6 +176,8 @@ pub enum Event {
     Settings(Vec<SettingView>),
     /// A setting change (or undo) ended: what was done, or why not.
     SettingDone(Result<String, String>),
+    /// A service routine ran (what the module answered), or why not.
+    ServiceDone(Result<String, String>),
     TestStarted(String),
     /// A test ended: its name and why.
     TestStopped {
@@ -378,6 +384,21 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
                 );
                 send(Event::Settings(read_settings(e, &defs, vin.as_deref())));
                 send(Event::Status(format!("{} setting(s) read.", defs.len())));
+            }
+            Some(Cmd::Service(def)) => {
+                let Some(e) = elm.as_mut() else { continue };
+                live.clear();
+                let wired = Target::parse(&spec).map(|t| t.wired()).unwrap_or(false);
+                send(Event::Status(format!("Running {}...", def.name)));
+                send(Event::ServiceDone(
+                    icarus_obd::service::run(e, &def, wired).map(|status| {
+                        if status.is_empty() {
+                            format!("{}: done.", def.name)
+                        } else {
+                            format!("{}: done; the module answered {status}.", def.name)
+                        }
+                    }),
+                ));
             }
             Some(Cmd::SettingChange { def, value }) => {
                 let Some(e) = elm.as_mut() else { continue };
@@ -653,6 +674,7 @@ fn gather(elm: &mut Elm, profiles: &[Profile]) -> Result<Info, String> {
     let freeze = j1979::freeze_frame(elm).map_err(e)?;
     let vehicle = vin.as_deref().and_then(garage::get);
     let tests = vehicles::tests_for(profile.as_ref(), vin.as_deref());
+    let services = vehicles::services_for(profile.as_ref(), vin.as_deref());
     let settings = vehicles::settings_for(profile.as_ref(), vin.as_deref());
     let info = Info {
         adapter: format!(
@@ -675,6 +697,7 @@ fn gather(elm: &mut Elm, profiles: &[Profile]) -> Result<Info, String> {
         freeze,
         tests,
         settings,
+        services,
         vehicle,
         history,
     };

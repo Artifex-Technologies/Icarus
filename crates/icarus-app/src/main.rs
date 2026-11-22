@@ -223,6 +223,8 @@ struct App {
     test_reading: Option<f64>,
     /// A clear waiting for the person's yes: None = every OBD-II module, Some = one module (tx, rx, dialect).
     confirm_clear: Option<(ClearTarget, String)>,
+    /// A service routine asked to run, waiting for "Run" in its confirmation.
+    confirm_service: Option<icarus_obd::service::ServiceDef>,
     selftests: Option<Vec<icarus_obd::mode06::TestResult>>,
     battery_agm: bool,
     /// NHTSA lookups run on their own thread; answers come back here.
@@ -346,6 +348,7 @@ impl App {
             test_note: String::new(),
             test_reading: None,
             confirm_clear: None,
+            confirm_service: None,
             selftests: None,
             battery_agm: true,
             bg_tx: bg_tx.clone(),
@@ -755,6 +758,16 @@ impl App {
                     self.bus = Some(*v);
                 }
                 Event::Settings(v) => self.setting_views = v,
+                Event::ServiceDone(r) => match r {
+                    Ok(m) => {
+                        self.status = m;
+                        self.error = None;
+                    }
+                    Err(m) => {
+                        self.status = "The routine did not run to the end.".into();
+                        self.error = Some(m);
+                    }
+                },
                 Event::SettingDone(r) => match r {
                     Ok(m) => {
                         self.status = m;
@@ -1600,6 +1613,31 @@ impl App {
             return;
         };
         let tests = info.tests.clone();
+        let services = info.services.clone();
+        if !services.is_empty() {
+            card(ui, pal, "Service routines", |ui| {
+                ui.label(RichText::new("Relearns, resets, TPMS, coding: each the maker's own routine, run once after a confirmation. Its conditions, the battery and the Read-Only switch are checked first; every run is logged.").weak());
+                for s in &services {
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("Run...").clicked() {
+                            self.confirm_service = Some(s.clone());
+                        }
+                        ui.label(RichText::new(&s.name).strong());
+                        ui.label(
+                            RichText::new(format!(
+                                "{:03X}, routine {:04X}{}{}",
+                                s.module,
+                                s.routine,
+                                if s.wired { ", cable only" } else { "" },
+                                if s.checked { "" } else { ", not yet checked on a vehicle" }
+                            ))
+                            .small()
+                            .weak(),
+                        );
+                    });
+                }
+            });
+        }
         card(ui, pal, "Before you test", |ui| {
             ui.label("Actuator tests make the vehicle move parts: fans, throttle, pumps, valves. Park it: in Park (or neutral with the parking brake on), wheels chocked for brake and ABS tests, people and hands clear.");
             ui.label("Hold the button to run a test. Letting go stops it at once and hands control back to the module; so does a time limit, a broken condition or a lost connection. Every test is logged in ~/.local/state/icarus/actions.log.");
@@ -3449,6 +3487,52 @@ impl eframe::App for App {
                     }
                 }
             });
+        if let Some(def) = self.confirm_service.clone() {
+            let mut go = false;
+            let mut cancel = false;
+            let resp = egui::Modal::new(egui::Id::new("confirm-service")).show(&ctx, |ui| {
+                ui.set_max_width(460.0);
+                ui.label(RichText::new(format!("Run {}?", def.name)).size(17.0).strong());
+                ui.add_space(6.0);
+                ui.label(format!(
+                    "Routine {:04X} in module {:03X}{}.",
+                    def.routine,
+                    def.module,
+                    if def.checked { "" } else { ", not yet checked on a vehicle" }
+                ));
+                if !def.warning.is_empty() {
+                    ui.label(&def.warning);
+                }
+                if !def.conditions.is_empty() {
+                    ui.label(
+                        RichText::new(format!(
+                            "Needs: {}.",
+                            def.conditions.iter().map(|c| c.describe()).collect::<Vec<_>>().join(", ")
+                        ))
+                        .weak(),
+                    );
+                }
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(egui::Button::new(RichText::new("Run").color(pal.on_accent())).fill(pal.red))
+                        .clicked()
+                    {
+                        go = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+            if go {
+                self.live_on = false;
+                let _ = self.tx.send(Cmd::Service(def));
+                self.confirm_service = None;
+            } else if cancel || resp.should_close() {
+                self.confirm_service = None;
+            }
+        }
         if let Some((target, label)) = self.confirm_clear.clone() {
             let mut go = false;
             let mut cancel = false;
