@@ -117,7 +117,8 @@ after the gates gets no file in the set (it is listed with the reasons).
   packet sent twice read once; Bluetooth LE adapters from ATT writes and notifications.
 - **The adapter's language** (ELM327 and STN): commands end at a carriage return, answers at the `>` prompt; the settings
   that change requests and answers are followed once the adapter answered OK (`ATZ`/`ATD`/`ATWS`, `ATSP`/`ATTP` and
-  `ATDPN`'s answer, `ATSH` with 3, 6 or 8 digits and `ATCP`, `ATCRA`/`ATAR`/`ATCF`+`ATCM` (3 or 8 digits; `ATCFC0/1`
+  `ATDPN`'s answer, `ATSH` with 3, 6 or 8 digits (6 under automatic protocol: 29-bit CAN when they start DA or DB,
+  else K-line or J1850 header bytes such as `81 10 F1`) and `ATCP`, `ATCRA`/`ATAR`/`ATCF`+`ATCM` (3 or 8 digits; `ATCFC0/1`
   is flow control, not the filter), `ATCEA`, `ATH`, `ATCAF`,
   `ATS`, `ATD0/1`) and STN's one-shot `STPX H:..., D:..., R:...`; answers with and without headers, long answers as CAN
   frames or as the adapter's `0:`/`1:` lines, CAN formatting off with the app's own flow control, response pending
