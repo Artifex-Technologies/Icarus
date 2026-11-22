@@ -43,6 +43,8 @@ Vehicle, through an OBD adapter (read-only: nothing is cleared or written):
                                              as dealer tools do. The make comes from the VIN (or --make, see icarus
                                              vehicles); --sweep tries every request ID from 700 to 7F7 (slower;
                                              never 7DF or a known answer ID such as 7E8-7EF)
+  icarus obd asbuilt ID[/ANSWER] --adapter A one module's as-built configuration block (22 DE00 on, read only), saved
+                                             in the vehicle's folder: the backup before any configuration change
   icarus obd module ID[/ANSWER] --adapter A  one module (request ID in hex, e.g. 7B0, or 713/77D): identity and codes
   icarus obd data [MODULE...] --adapter A [--set SET] [--year YYYY] [--find TEXT] [--every MS --count N] [--csv FILE]
                   [--all-years] [--all] [--refused]
@@ -678,6 +680,7 @@ fn cmd_obd(a: &[String]) -> Result<(), String> {
         Some("live") => with(&|e| obd_live(e, &args)),
         Some("scan") => with(&|e| obd_scan(e, &args)),
         Some("module") => with(&|e| obd_module(e, &args)),
+        Some("asbuilt") => with(&|e| obd_asbuilt(e, &args)),
         Some("data") => data::obd_data(&args),
         Some("report") => with(&|e| obd_report(e, &args)),
         Some("tests") => with(&obd_tests),
@@ -807,6 +810,36 @@ fn obd_scan(elm: &mut Elm, args: &Args) -> Result<(), String> {
     if !later.is_empty() {
         println!("Not reachable yet:\n  {}", later.join("\n  "));
     }
+    Ok(())
+}
+
+/// `icarus obd asbuilt MODULE`: the module's as-built block read whole (22 DE00 on) and saved in the vehicle's folder.
+fn obd_asbuilt(elm: &mut Elm, args: &Args) -> Result<(), String> {
+    let [id] = args.pos.as_slice() else {
+        return Err("usage: icarus obd asbuilt MODULE --adapter A   (the request ID in hex, e.g. 726, or 726/72E)".into());
+    };
+    let (tx, rx) = match id.split_once('/') {
+        Some((a, b)) => (
+            u16::from_str_radix(a, 16).map_err(|_| format!("{a} is not an ID in hex"))?,
+            u16::from_str_radix(b, 16).map_err(|_| format!("{b} is not an ID in hex"))?,
+        ),
+        None => {
+            let t = u16::from_str_radix(id, 16).map_err(|_| format!("{id} is not an ID in hex"))?;
+            (t, t + 8)
+        }
+    };
+    let vin = j1979::vin(elm).map_err(e)?;
+    let b = icarus_obd::asbuilt::read(elm, tx, rx)?;
+    for (did, bytes) in &b {
+        let hex: Vec<String> = bytes.iter().map(|x| format!("{x:02X}")).collect();
+        println!("{did:04X}  {}", hex.join(" "));
+    }
+    let p = icarus_obd::asbuilt::save(vin.as_deref(), tx, &b)?;
+    println!(
+        "{} identifiers saved to {} (the way back before any change).",
+        b.len(),
+        p.display()
+    );
     Ok(())
 }
 

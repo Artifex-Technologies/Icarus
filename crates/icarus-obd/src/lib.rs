@@ -6,6 +6,7 @@
 //! definition files, with read-only requests only.
 
 pub mod actuator;
+pub mod asbuilt;
 pub mod audit;
 pub mod bus;
 pub mod charging;

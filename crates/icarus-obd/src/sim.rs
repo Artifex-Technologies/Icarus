@@ -636,6 +636,10 @@ impl SimCar {
             ([0x22, 0xF1, 0x90], true) if tx == 0x7E0 => {
                 Some([&[0x62, 0xF1, 0x90][..], self.vin.as_bytes()].concat())
             }
+            // the cluster's as-built block (Ford's configuration identifiers DE00-DE02, made up)
+            ([0x22, 0xDE, n @ 0..=2], true) if tx == 0x7C0 => {
+                Some(vec![0x62, 0xDE, *n, 0x2A, *n, 0x14, 0x07])
+            }
             ([0x22, ..], true) => refuse(0x31),
             _ => refuse(0x11),
         }

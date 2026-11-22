@@ -380,6 +380,7 @@ icarus obd pids  --adapter A    # the live values each module offers, and what e
 icarus obd live  --adapter A 0C 06 07 14 44 --csv run.csv   # watch values (PIDs in hex), optionally into a CSV log
 icarus obd scan  --adapter A --make toyota   # every module (ABS, airbags, cluster...): identity and trouble codes
 icarus obd module 7B0 --adapter A            # one module, by its request ID
+icarus obd asbuilt 726 --adapter A           # a module's as-built configuration block, saved in the vehicle's folder
 ```
 
 Live values (`obd live`, Live data and Record in the window) go up to six to a request on CAN vehicles, as SAE J1979
@@ -393,6 +394,9 @@ only reading services out: clearing codes, writing, actuator tests and programmi
 Modules behind a gateway (Toyota's body modules at 750, each with its address byte: main body 40, tire pressure 2A) are
 reached with the adapter's extended addressing (`ATCEA`): their identity and codes, read only, with no Clear button. An
 adapter that shows the address byte in answers and one that strips it are both read.
+`asbuilt` reads a module's whole as-built configuration block (FORScan's name for Ford's identifiers DE00 on: `22` reads
+only, until the first one the module does not have) and saves it in the vehicle's `Definitions` folder, never over an
+earlier one: the way back before any configuration change.
 A module's codes are asked for in every read-only form in turn (UDS `19 02` with the status masks FF, 2F, 09 and 08;
 KWP2000 `18` with status 02 and 00; ISO 14230 `13` with and without the group), since modules refuse the forms they do not
 support; when none gives them, Icarus shows what each request got (no answer, or the module's refusal and its reason).
