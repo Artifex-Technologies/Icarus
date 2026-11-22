@@ -86,7 +86,7 @@ pub const RESEND_WAIT: Duration = Duration::from_millis(50);
 
 /// Every answer in one request's window, pending responses (7F xx 78) and "busy" (7F xx 21) waited out: when the window
 /// ends with one of them, the request is sent again after 300 ms (a read is harmless to repeat), up to three times.
-fn ask_window(elm: &mut dyn Link, tx: u16, rx: u16, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
+fn ask_window(elm: &mut dyn Link, tx: u32, rx: u32, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
     ask_window_with(elm, tx, rx, data, &mut sleep)
 }
 
@@ -94,8 +94,8 @@ fn ask_window(elm: &mut dyn Link, tx: u16, rx: u16, data: &[u8]) -> Result<Vec<A
 /// them without sleeping).
 fn ask_window_with(
     elm: &mut dyn Link,
-    tx: u16,
-    rx: u16,
+    tx: u32,
+    rx: u32,
     data: &[u8],
     nap: &mut dyn FnMut(Duration),
 ) -> Result<Vec<Answer>, ObdError> {
@@ -115,7 +115,7 @@ fn ask_window_with(
 }
 
 /// One module's answer to a request, pending responses (7F xx 78) waited out.
-fn ask(elm: &mut dyn Link, tx: u16, rx: u16, data: &[u8]) -> Result<Option<Answer>, ObdError> {
+fn ask(elm: &mut dyn Link, tx: u32, rx: u32, data: &[u8]) -> Result<Option<Answer>, ObdError> {
     Ok(ask_window(elm, tx, rx, data)?.into_iter().last())
 }
 
@@ -139,8 +139,8 @@ pub enum DataAnswer {
 /// (`PENDING_WAIT`) within a window, `RESEND_WAIT` before the second.
 pub fn read_data(
     elm: &mut dyn Link,
-    tx: u16,
-    rx: u16,
+    tx: u32,
+    rx: u32,
     service: u8,
     ident: u16,
 ) -> Result<DataAnswer, ObdError> {
@@ -150,8 +150,8 @@ pub fn read_data(
 /// `read_data`, waiting with `nap` (the pacer's clock).
 pub fn read_data_with(
     elm: &mut dyn Link,
-    tx: u16,
-    rx: u16,
+    tx: u32,
+    rx: u32,
     service: u8,
     ident: u16,
     nap: &mut dyn FnMut(Duration),
@@ -342,7 +342,7 @@ fn hex_req(r: &[u8]) -> String {
 
 /// A module's trouble codes, by the first request in `CODE_REQUESTS` that gives them. Once the module refuses UDS's
 /// service outright ("service not supported", 11), the other UDS masks are skipped.
-pub fn module_dtcs(elm: &mut dyn Link, tx: u16, rx: u16) -> Result<CodesRead, ObdError> {
+pub fn module_dtcs(elm: &mut dyn Link, tx: u32, rx: u32) -> Result<CodesRead, ObdError> {
     let mut tried: Vec<String> = Vec::new();
     let mut skip_uds = false;
     for (dialect, req) in CODE_REQUESTS {
@@ -404,8 +404,8 @@ fn shown(b: &[u8]) -> String {
 /// The identification values a module gives (each asked separately: many modules refuse several at once).
 pub fn module_identity(
     elm: &mut dyn Link,
-    tx: u16,
-    rx: u16,
+    tx: u32,
+    rx: u32,
 ) -> Result<Vec<(&'static str, String)>, ObdError> {
     let mut out = Vec::new();
     for (did, name) in IDENTITY {
@@ -437,7 +437,7 @@ pub fn at<T>(
 }
 
 /// Whether a module answers at request ID `tx`: any answer counts, a refusal too.
-pub fn present(elm: &mut dyn Link, tx: u16, rx: u16) -> Result<bool, ObdError> {
+pub fn present(elm: &mut dyn Link, tx: u32, rx: u32) -> Result<bool, ObdError> {
     for req in [&[0x3E, 0x00][..], &[0x3E, 0x01][..]] {
         if ask(elm, tx, rx, req)?.is_some() {
             return Ok(true);
@@ -446,19 +446,22 @@ pub fn present(elm: &mut dyn Link, tx: u16, rx: u16) -> Result<bool, ObdError> {
     Ok(false)
 }
 
-/// IDs the sweep never sends on, from the loaded profiles: OBD's broadcast (7DF), the OBD-II answer IDs (7E8-7EF), and the
-/// answer ID of every module any profile names (its `rx`, or its request ID + 8).
+/// IDs the sweep never sends on, from the loaded profiles: OBD's broadcast (7DF, and 18DB33F1 on 29-bit CAN), the OBD-II
+/// answer IDs (7E8-7EF, and 18DAF1xx: every 29-bit answer to the tester), and the answer ID of every module any profile
+/// names (its `rx`, or its request ID + 8), its ranges' too.
 ///
 /// A request sent on one of these would look, to every module on the bus, like that module's own answer: a gateway or the
 /// tester side of another module can act on it, and the module whose ID it is sees a frame it did not send (on some
 /// modules, a bus fault). 7DF would reach every module at once. So the sweep sends only on IDs that could be requests.
-pub fn sweep_skips(profiles: &[crate::vehicles::Profile]) -> std::collections::BTreeSet<u16> {
-    let mut skip: std::collections::BTreeSet<u16> = (0x7E8..=0x7EF).collect();
+pub fn sweep_skips(profiles: &[crate::vehicles::Profile]) -> std::collections::BTreeSet<u32> {
+    let mut skip: std::collections::BTreeSet<u32> = (0x7E8..=0x7EF).collect();
     skip.insert(0x7DF);
+    skip.insert(0x18DB_33F1);
+    skip.extend((0..=0xFF).map(|a| 0x18DA_F100 | a));
     skip.extend(
         profiles
             .iter()
-            .flat_map(|p| p.modules.iter().map(|m| m.rx())),
+            .flat_map(|p| crate::vehicles::named(p).into_iter().map(|m| m.rx())),
     );
     skip
 }
@@ -472,12 +475,12 @@ pub fn sweep_skips(profiles: &[crate::vehicles::Profile]) -> std::collections::B
 #[derive(Debug, Default)]
 pub struct ScanGuard {
     /// Answer ID -> the request ID of the module found answering from it.
-    answers: std::collections::BTreeMap<u16, u16>,
+    answers: std::collections::BTreeMap<u32, u32>,
 }
 
 impl ScanGuard {
     /// The module found earlier in this scan whose answer ID is `tx`, when there is one: the scan must not send on `tx`.
-    pub fn answer_of(&self, tx: u16) -> Option<u16> {
+    pub fn answer_of(&self, tx: u32) -> Option<u32> {
         self.answers.get(&tx).copied()
     }
 
@@ -503,8 +506,32 @@ impl ScanGuard {
 /// `sweep_skips`: the broadcast and every known answer ID, which the sweep must not transmit on. The answer IDs of modules
 /// the sweep itself finds are left out as it goes, by [`ScanGuard`].
 pub fn sweep(profiles: &[crate::vehicles::Profile]) -> Vec<crate::vehicles::ModuleAddr> {
+    swept(profiles, 0x700..=0x7F7)
+}
+
+/// `sweep` for a vehicle whose OBD-II uses `protocol`: on 29-bit CAN, every 29-bit physical request ID 18DAxxF1 instead
+/// (xx 00-FF but F1, the tester's own address; their answers are 18DAF1xx, which no request uses).
+pub fn sweep_on(
+    profiles: &[crate::vehicles::Profile],
+    protocol: crate::elm::Protocol,
+) -> Vec<crate::vehicles::ModuleAddr> {
+    if !crate::link::Reach::of(protocol).can29 {
+        return sweep(profiles);
+    }
+    swept(
+        profiles,
+        (0..=0xFFu32)
+            .map(|a| crate::vehicles::FIXED29 | a << 8 | 0xF1)
+            .filter(|&id| crate::vehicles::is_fixed29_request(id)),
+    )
+}
+
+fn swept(
+    profiles: &[crate::vehicles::Profile],
+    ids: impl IntoIterator<Item = u32>,
+) -> Vec<crate::vehicles::ModuleAddr> {
     let skip = sweep_skips(profiles);
-    (0x700..=0x7F7)
+    ids.into_iter()
         .filter(|id| !skip.contains(id))
         .map(|tx| crate::vehicles::ModuleAddr {
             tx,
@@ -614,13 +641,20 @@ mod tests {
     }
 
     /// The IDs requests went out on, from a log of what was sent to the adapter: every request goes out under the header
-    /// (ATSH) set last, 7DF until one is set.
-    fn sent_on(log: &[String]) -> std::collections::BTreeSet<u16> {
+    /// (ATSH) set last, 7DF until one is set; a six-digit ATSH is a 29-bit header's lower bytes under the priority byte
+    /// set last (ATCP, 18 until set).
+    pub(crate) fn sent_on(log: &[String]) -> std::collections::BTreeSet<u32> {
         let (mut header, mut on) = (0x7DF, std::collections::BTreeSet::new());
+        let mut priority = 0x18;
         for l in log {
             let c = l.trim_end_matches('\r');
-            if let Some(h) = c.strip_prefix("ATSH") {
-                header = u16::from_str_radix(h, 16).unwrap();
+            if let Some(p) = c.strip_prefix("ATCP") {
+                priority = u32::from_str_radix(p, 16).unwrap();
+            } else if let Some(h) = c.strip_prefix("ATSH") {
+                header = u32::from_str_radix(h, 16).unwrap();
+                if h.len() == 6 {
+                    header |= priority << 24;
+                }
             } else if !c.is_empty() && c.chars().all(|ch| ch.is_ascii_hexdigit()) {
                 on.insert(header);
             }
@@ -740,6 +774,129 @@ mod tests {
         );
     }
 
+    /// Every module a scan finds, as the command line's and the window's scans go: the reachable candidates, each asked
+    /// through the scan's guard.
+    fn scan(elm: &mut Elm, list: &[crate::vehicles::ModuleAddr]) -> Vec<u32> {
+        let mut guard = ScanGuard::default();
+        let reach = elm.reach();
+        list.iter()
+            .filter(|m| m.unreachable(reach).is_none())
+            .filter(|m| guard.present(elm, m).unwrap())
+            .map(|m| m.tx)
+            .collect()
+    }
+
+    #[test]
+    fn scanning_the_simulated_honda_on_29_bit_ids() {
+        use crate::sim::recording::Recorder;
+        use crate::vehicles::{candidates_on, for_vin};
+        let (port, sent) = Recorder::new(SimCar::honda());
+        let mut elm = Elm::connect(Box::new(port)).unwrap();
+        assert_eq!(elm.protocol, crate::elm::Protocol::Can29At500);
+        let all = crate::vehicles::builtin();
+        let vin = crate::j1979::vin(&mut elm).unwrap().unwrap();
+        assert_eq!(vin, crate::sim::HONDA_VIN);
+        let honda = for_vin(&all, &vin).unwrap();
+        assert_eq!(honda.id, "honda");
+        // the profile's scan: OBD-II's engine and transmission at their 29-bit addresses, not 7E0-7E7
+        let list = candidates_on(honda, elm.protocol);
+        assert!(list.iter().all(|m| m.is_29bit()), "{list:?}");
+        assert_eq!(scan(&mut elm, &list), vec![0x18DA_10F1, 0x18DA_18F1]);
+        // 11-bit IDs cannot reach these modules, and say why
+        let toyota_like = crate::vehicles::candidates(honda);
+        let why = toyota_like[0].unreachable(elm.reach()).unwrap();
+        assert!(why.contains("11-bit") && why.contains("29-bit"), "{why}");
+        // the sweep asks every 29-bit address and finds all five modules
+        sent.lock().unwrap().clear();
+        let sweep = sweep_on(&all, elm.protocol);
+        assert_eq!(sweep.len(), 255, "18DA00F1-18DAFFF1 but 18DAF1F1");
+        assert_eq!(scan(&mut elm, &sweep), crate::sim::HONDA_MODULES);
+        let on = sent_on(&sent.lock().unwrap());
+        let skip = sweep_skips(&all);
+        assert!(
+            on.is_disjoint(&skip),
+            "{:08X?}",
+            on.intersection(&skip).collect::<Vec<_>>()
+        );
+        assert!(!on.contains(&0x18DB_33F1) && !on.iter().any(|id| id & 0xFFFF_FF00 == 0x18DA_F100));
+        // the stability assist's identity and codes, over 29-bit headers
+        let vsa = crate::vehicles::ModuleAddr {
+            tx: 0x18DA_28F1,
+            rx: None,
+            name: "VSA".into(),
+            ext: None,
+            bus: None,
+            checked: false,
+        };
+        assert_eq!(vsa.rx(), 0x18DA_F128);
+        let id = module_identity(&mut elm, vsa.tx, vsa.rx()).unwrap();
+        assert!(
+            id.contains(&("part number", "57100-ICARUS".to_string())),
+            "{id:?}"
+        );
+        let (d, codes) = module_dtcs(&mut elm, vsa.tx, vsa.rx()).unwrap().unwrap();
+        assert_eq!((d, codes[0].code.as_str()), (Dialect::Uds, "C0210"));
+        let log = sent.lock().unwrap().clone();
+        for c in ["ATCP18", "ATSHDA28F1", "ATCRA18DAF128", "ATFCSH18DA28F1"] {
+            assert!(log.contains(&format!("{c}\r")), "{c}: {log:?}");
+        }
+        // an 11-bit request on this vehicle is refused before anything is sent
+        sent.lock().unwrap().clear();
+        let e = elm
+            .request_to(0x7E0, 0x7E8, &[0x3E, 0x00])
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("11-bit") && e.contains("29-bit"), "{e}");
+        assert!(sent.lock().unwrap().is_empty());
+        // and the broadcast reaches every module again afterwards (18DB33F1 under priority 18)
+        assert_eq!(
+            crate::j1979::read(&mut elm, 0x0C).unwrap()[0].from,
+            "18DAF110"
+        );
+        let log = sent.lock().unwrap().clone();
+        assert_eq!(&log[..2], &["ATCP18\r", "ATSHDB33F1\r"], "{log:?}");
+    }
+
+    #[test]
+    fn scanning_the_simulated_gm_finds_its_body_range() {
+        use crate::sim::recording::Recorder;
+        let (port, sent) = Recorder::new(SimCar::gm());
+        let mut elm = Elm::connect(Box::new(port)).unwrap();
+        let all = crate::vehicles::builtin();
+        let vin = crate::j1979::vin(&mut elm).unwrap().unwrap();
+        let gm = crate::vehicles::for_vin(&all, &vin).unwrap();
+        assert_eq!(gm.id, "gm");
+        let list = crate::vehicles::candidates_on(gm, elm.protocol);
+        let body = list.iter().find(|m| m.tx == 0x241).unwrap();
+        assert_eq!((body.rx(), body.checked), (0x641, false));
+        sent.lock().unwrap().clear();
+        let found = scan(&mut elm, &list);
+        assert_eq!(
+            found,
+            crate::sim::GM_MODULES
+                .iter()
+                .map(|m| m.0)
+                .collect::<Vec<_>>()
+        );
+        // the body range was asked on its request IDs only, never on an answer ID (64x) or the broadcast
+        let on = sent_on(&sent.lock().unwrap());
+        assert!((0x240..=0x24F).all(|id| on.contains(&id)), "{on:03X?}");
+        assert!(on.is_disjoint(&sweep_skips(&all)), "{on:03X?}");
+        assert!((0x640..=0x64F).all(|id| sweep_skips(&all).contains(&id)));
+        let (identity, codes) = (
+            module_identity(&mut elm, 0x241, 0x641).unwrap(),
+            module_dtcs(&mut elm, 0x241, 0x641).unwrap().unwrap(),
+        );
+        assert!(identity.contains(&("part number", "ICARUS-GM-BCM".to_string())));
+        assert_eq!(codes.1[0].code, "B1234");
+        assert!(sent.lock().unwrap().contains(&"ATCRA641\r".to_string()));
+        // the transmission at 7E2 answers from 7EA, in the broadcast too
+        assert!(crate::j1979::supported(&mut elm)
+            .unwrap()
+            .iter()
+            .any(|s| s.0 == "7EA"));
+    }
+
     #[test]
     fn scanning_the_simulated_toyota() {
         let mut elm = Elm::connect(Box::new(SimCar::new())).unwrap();
@@ -747,9 +904,10 @@ mod tests {
         let vin = crate::j1979::vin(&mut elm).unwrap().unwrap();
         let toyota = crate::vehicles::for_vin(&all, &vin).unwrap();
         assert_eq!(toyota.id, "toyota", "the VIN picks the profile");
-        let found: Vec<u16> = crate::vehicles::candidates(toyota)
+        let reach = elm.reach();
+        let found: Vec<u32> = crate::vehicles::candidates(toyota)
             .into_iter()
-            .filter(|m| m.unreachable().is_none())
+            .filter(|m| m.unreachable(reach).is_none())
             .filter(|m| present(&mut elm, m.tx, m.rx()).unwrap())
             .map(|m| m.tx)
             .collect();

@@ -1394,9 +1394,21 @@ impl App {
                                 &mut links,
                             );
                         }
-                        // airbag modules: never cleared by Icarus (clear::refused); say so where the button would be
-                        let airbag =
-                            icarus_obd::clear::refused(m.addr.tx, m.addr.rx(), &m.addr.name).is_some();
+                        // airbag modules: never cleared by Icarus (clear::refused); say so where the button would be. The
+                        // clear path takes 11-bit IDs on the main bus only: a 29-bit module, one answering outside
+                        // 700-7FF (GM's body range) or one on Ford's MS-CAN gets no button
+                        let small = |id: u32| u16::try_from(id).ok().filter(|i| *i <= 0x7FF);
+                        let airbag = icarus_obd::actuator::is_airbag(
+                            small(m.addr.tx).unwrap_or(0),
+                            &m.addr.name,
+                        ) || small(m.addr.rx())
+                            .is_some_and(|r| icarus_obd::actuator::is_airbag(r, ""));
+                        let clear_ids = small(m.addr.tx)
+                            .zip(small(m.addr.rx()))
+                            .filter(|(t, r)| {
+                                icarus_obd::clear::refused(*t, *r, &m.addr.name).is_none()
+                            })
+                            .filter(|_| m.addr.ext.is_none() && !m.addr.on_ms_can());
                         if !codes.is_empty() && airbag {
                             ui.label(
                                 RichText::new(
@@ -1408,17 +1420,15 @@ impl App {
                             );
                         }
                         // a module behind a gateway is read only in this build (no clear path carries its address)
-                        if !codes.is_empty()
-                            && !airbag
-                            && m.addr.ext.is_none()
-                            && ui.button("Clear this module's codes...").clicked()
-                        {
-                            ask_clear = Some((
-                                m.addr.tx,
-                                m.addr.rx(),
-                                *d,
-                                format!("{:03X} {}", m.addr.tx, m.addr.name),
-                            ));
+                        if let Some((tx, rx)) = clear_ids.filter(|_| !codes.is_empty() && !airbag) {
+                            if ui.button("Clear this module's codes...").clicked() {
+                                ask_clear = Some((
+                                    tx,
+                                    rx,
+                                    *d,
+                                    format!("{:03X} {}", m.addr.tx, m.addr.name),
+                                ));
+                            }
                         }
                     }
                 }

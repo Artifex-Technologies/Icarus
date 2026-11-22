@@ -135,12 +135,13 @@ pub fn collect(
             .profile
             .clone()
             .or_else(|| vehicles::find(profiles, "generic").ok().cloned());
+        let protocol = elm.protocol();
         for m in profile
             .as_ref()
-            .map(vehicles::candidates)
+            .map(|p| vehicles::candidates_on(p, protocol))
             .unwrap_or_default()
         {
-            if m.unreachable().is_some() {
+            if m.unreachable(elm.reach()).is_some() {
                 continue;
             }
             let (tx, rx) = (m.tx, m.rx());

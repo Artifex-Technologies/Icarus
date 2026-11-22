@@ -21,6 +21,9 @@ pub struct Profile {
     pub notes: String,
     #[serde(default, rename = "module")]
     pub modules: Vec<ModuleAddr>,
+    /// Ranges of module request IDs (`[[range]]` entries), asked like modules.
+    #[serde(default, rename = "range")]
+    pub ranges: Vec<ModuleRange>,
     /// The maker's own trouble codes: code = meaning (`[codes]` table).
     #[serde(default)]
     pub codes: BTreeMap<String, String>,
@@ -41,11 +44,12 @@ pub struct Profile {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ModuleAddr {
-    /// The ID requests go to.
-    pub tx: u16,
-    /// The ID answers come from (tx + 8 unless given).
+    /// The ID requests go to: an 11-bit CAN ID (up to 7FF), or a 29-bit one written with all eight digits (18DA30F1).
+    pub tx: u32,
+    /// The ID answers come from: tx + 8 on 11-bit CAN, and on 29-bit CAN 18DAF1xx for a request to 18DAxxF1 (ISO
+    /// 15765-4's normal fixed addressing, the tester at F1), unless given.
     #[serde(default)]
-    pub rx: Option<u16>,
+    pub rx: Option<u32>,
     pub name: String,
     /// An extended address byte in front of each message (Toyota body modules behind 750, BMW).
     #[serde(default)]
@@ -58,22 +62,94 @@ pub struct ModuleAddr {
     pub checked: bool,
 }
 
+/// ISO 15765-4's 29-bit physical request IDs (normal fixed addressing): 18DA, the module's address, the tester's (F1).
+pub const FIXED29: u32 = 0x18DA_0000;
+
+/// Whether `id` is a 29-bit request in ISO 15765-4's normal fixed form, 18DAxxF1 (and not to the tester's own address).
+pub fn is_fixed29_request(id: u32) -> bool {
+    id & 0xFFFF_00FF == FIXED29 | 0xF1 && (id >> 8) & 0xFF != 0xF1
+}
+
 impl ModuleAddr {
-    pub fn rx(&self) -> u16 {
-        self.rx.unwrap_or(self.tx + 8)
+    pub fn rx(&self) -> u32 {
+        self.rx.unwrap_or(if self.tx > 0x7FF {
+            // 18DA<module><tester> is answered from 18DA<tester><module>
+            (self.tx & 0xFFFF_0000) | ((self.tx & 0xFF) << 8) | ((self.tx >> 8) & 0xFF)
+        } else {
+            self.tx + 8
+        })
     }
 
-    /// Why Icarus cannot reach this module yet, if it cannot.
-    pub fn unreachable(&self) -> Option<&'static str> {
-        if self
+    /// A 29-bit module (its request ID above 7FF).
+    pub fn is_29bit(&self) -> bool {
+        self.tx > 0x7FF
+    }
+
+    /// On Ford's medium-speed CAN (OBD pins 3 and 11), which the adapter has to switch to.
+    pub fn on_ms_can(&self) -> bool {
+        self.bus
+            .as_deref()
+            .is_some_and(|b| b.eq_ignore_ascii_case("ms-can"))
+    }
+
+    /// Why a link that reaches `r` cannot reach this module, if it cannot: a bus it cannot switch to, or an ID width the
+    /// vehicle's CAN does not carry to it.
+    pub fn unreachable(&self, r: crate::link::Reach) -> Option<&'static str> {
+        let other_bus = self
             .bus
             .as_deref()
-            .is_some_and(|b| !b.eq_ignore_ascii_case("hs-can"))
-        {
-            Some("on a second CAN bus the adapter has to switch to, not supported yet")
+            .is_some_and(|b| !b.eq_ignore_ascii_case("hs-can"));
+        if other_bus && !self.on_ms_can() {
+            Some("on a CAN bus Icarus does not know how to switch to")
+        } else if self.on_ms_can() && !r.ms_can {
+            Some(
+                "on Ford's medium-speed CAN (OBD pins 3 and 11): it needs an adapter that switches to that bus (an \
+                 OBDLink, with an STN chip), and this one cannot",
+            )
+        } else if self.on_ms_can() && self.is_29bit() {
+            Some("a 29-bit ID on the medium-speed CAN, where Icarus asks on 11-bit IDs only")
+        } else if !self.on_ms_can() && self.is_29bit() && !r.can29 {
+            Some("a 29-bit ID, and this vehicle's CAN carries 11-bit IDs to this adapter")
+        } else if !self.on_ms_can() && !self.is_29bit() && !r.can11 {
+            Some("an 11-bit ID, and this vehicle's CAN carries 29-bit IDs to this adapter (or it is not CAN)")
         } else {
             None
         }
+    }
+}
+
+/// A range of request IDs a make uses for its modules, each answered a fixed distance away (GM's body modules: requests
+/// 240-24F, answers 400 higher). A scan of that make asks each one; they count as unchecked addresses.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ModuleRange {
+    /// The first and last request IDs (11-bit).
+    pub from: u32,
+    pub to: u32,
+    /// How far above its request ID each module answers (8 unless given).
+    #[serde(default = "eight")]
+    pub answer_offset: u32,
+    /// What the modules there are ("body module"); each is named this and its ID.
+    pub name: String,
+}
+
+fn eight() -> u32 {
+    8
+}
+
+impl ModuleRange {
+    /// Each module address the range covers.
+    pub fn modules(&self) -> Vec<ModuleAddr> {
+        (self.from..=self.to)
+            .map(|tx| ModuleAddr {
+                tx,
+                rx: Some(tx + self.answer_offset),
+                name: format!("{} {tx:03X}", self.name),
+                ext: None,
+                bus: None,
+                checked: false,
+            })
+            .collect()
     }
 }
 
@@ -93,16 +169,42 @@ const BUILTIN: &[(&str, &str)] = &[
     ("mitsubishi", include_str!("../vehicles/mitsubishi.toml")),
 ];
 
-/// One profile from TOML text, checked: IDs must be 11-bit CAN IDs, VIN prefixes 2-3 characters.
+/// Why `tx`/`rx` are not a module's CAN IDs, if they are not: both 11-bit (up to 7FF), or both 29-bit written with all
+/// eight digits (01000000-1FFFFFFF: a 29-bit ID's top byte is its priority, 18 in 18DAxxF1, so a shorter number is a
+/// mistyped 11-bit ID), and a 29-bit request outside ISO 15765-4's 18DAxxF1 form names its answer ID.
+fn ids_refused(m: &ModuleAddr) -> Option<String> {
+    let wide = |id: u32| (0x0100_0000..=0x1FFF_FFFF).contains(&id);
+    let ok = match (m.tx, m.rx()) {
+        (t, r) if t <= 0x7FF && r <= 0x7FF => true,
+        (t, r) if wide(t) && wide(r) => m.rx.is_some() || is_fixed29_request(t),
+        _ => false,
+    };
+    (!ok).then(|| {
+        format!(
+            "{} uses {:X}/{:X}, not 11-bit CAN IDs (up to 7FF) or 29-bit ones (eight digits, such as 18DA30F1; one outside \
+             the 18DAxxF1 form gives its rx)",
+            m.name,
+            m.tx,
+            m.rx()
+        )
+    })
+}
+
+/// One profile from TOML text, checked: IDs must be 11-bit or 29-bit CAN IDs (`ids_refused`), a range's 11-bit and at
+/// most 64 long, VIN prefixes 2-3 characters.
 pub fn parse(id: &str, source: &str, text: &str) -> Result<Profile, String> {
     let mut p: Profile = toml::from_str(text).map_err(|e| format!("{source}: {e}"))?;
     for m in &p.modules {
-        if m.tx > 0x7FF || m.rx() > 0x7FF {
+        if let Some(why) = ids_refused(m) {
+            return Err(format!("{source}: {why}"));
+        }
+    }
+    for r in &p.ranges {
+        if r.from > r.to || r.to - r.from >= 64 || r.to + r.answer_offset > 0x7FF {
             return Err(format!(
-                "{source}: {} uses {:X}/{:X}, not 11-bit CAN IDs",
-                m.name,
-                m.tx,
-                m.rx()
+                "{source}: the range \"{}\" ({:X}-{:X}, answers {:X} higher) should be at most 64 11-bit IDs, answered \
+                 on 11-bit IDs",
+                r.name, r.from, r.to, r.answer_offset
             ));
         }
     }
@@ -209,10 +311,16 @@ fn merge(base: &mut Profile, user: Profile) {
         match base
             .modules
             .iter_mut()
-            .find(|b| b.tx == m.tx && b.ext == m.ext)
+            .find(|b| b.tx == m.tx && b.ext == m.ext && b.on_ms_can() == m.on_ms_can())
         {
             Some(b) => *b = m,
             None => base.modules.push(m),
+        }
+    }
+    for r in user.ranges {
+        match base.ranges.iter_mut().find(|b| b.from == r.from) {
+            Some(b) => *b = r,
+            None => base.ranges.push(r),
         }
     }
     base.codes.extend(user.codes);
@@ -328,8 +436,15 @@ pub fn settings_for(
 /// (`actuator::not_one_module`), and any answer ID the profiles know (7E8-7EF and every module's `rx`, `uds::sweep_skips`):
 /// a request sent there would look like that module's own answer. `obd module`, `obd data` and the module-data loader all
 /// ask here.
-pub fn request_id_refused(tx: u16, profiles: &[Profile]) -> Option<String> {
-    if let Some(why) = crate::actuator::not_one_module(tx) {
+pub fn request_id_refused(tx: u32, profiles: &[Profile]) -> Option<String> {
+    if tx > 0x7FF {
+        // 29-bit: only ISO 15765-4's physical requests, 18DAxxF1; 18DB33F1 is the broadcast every module hears
+        if !is_fixed29_request(tx) {
+            return Some(format!(
+                "refused: {tx:08X} is not a 29-bit module request ID (18DAxxF1)"
+            ));
+        }
+    } else if let Some(why) = crate::actuator::not_one_module(tx as u16) {
         return Some(why);
     }
     if crate::uds::sweep_skips(profiles).contains(&tx) {
@@ -340,9 +455,18 @@ pub fn request_id_refused(tx: u16, profiles: &[Profile]) -> Option<String> {
     None
 }
 
-/// Where to look: the OBD-II range, then the profile's own modules (a profile entry for an OBD ID renames it).
-pub fn candidates(p: &Profile) -> Vec<ModuleAddr> {
-    let mut v: Vec<ModuleAddr> = (0..8u16)
+/// Every module address a profile names: its modules and the ones its ranges cover.
+pub fn named(p: &Profile) -> Vec<ModuleAddr> {
+    p.modules
+        .iter()
+        .cloned()
+        .chain(p.ranges.iter().flat_map(ModuleRange::modules))
+        .collect()
+}
+
+/// OBD-II's own modules on 11-bit CAN: 7E0-7E7.
+fn obd_range() -> Vec<ModuleAddr> {
+    (0..8u32)
         .map(|i| ModuleAddr {
             tx: 0x7E0 + i,
             rx: None,
@@ -355,14 +479,43 @@ pub fn candidates(p: &Profile) -> Vec<ModuleAddr> {
             bus: None,
             checked: false,
         })
+        .collect()
+}
+
+/// Where to look: the OBD-II range (7E0-7E7), then the profile's own modules and ranges (a profile entry for an OBD ID
+/// renames it).
+pub fn candidates(p: &Profile) -> Vec<ModuleAddr> {
+    with_profile(obd_range(), p)
+}
+
+/// `candidates` for a vehicle whose OBD-II uses `protocol`: on 29-bit CAN, OBD-II's own modules are the engine and the
+/// transmission at their usual 29-bit addresses (18DA10F1 and 18DA18F1, answered from 18DAF110 and 18DAF118) instead of
+/// 7E0-7E7.
+pub fn candidates_on(p: &Profile, protocol: crate::elm::Protocol) -> Vec<ModuleAddr> {
+    if !crate::link::Reach::of(protocol).can29 {
+        return candidates(p);
+    }
+    let obd = [(0x10, "engine (ECM/PCM)"), (0x18, "transmission (TCM)")]
+        .into_iter()
+        .map(|(a, name): (u32, &str)| ModuleAddr {
+            tx: FIXED29 | a << 8 | 0xF1,
+            rx: None,
+            name: name.into(),
+            ext: None,
+            bus: None,
+            checked: false,
+        })
         .collect();
-    for m in &p.modules {
-        match v
-            .iter_mut()
-            .find(|c| c.tx == m.tx && c.ext.is_none() && m.ext.is_none())
-        {
-            Some(c) => *c = m.clone(),
-            None => v.push(m.clone()),
+    with_profile(obd, p)
+}
+
+fn with_profile(mut v: Vec<ModuleAddr>, p: &Profile) -> Vec<ModuleAddr> {
+    for m in named(p) {
+        match v.iter_mut().find(|c| {
+            c.tx == m.tx && c.ext.is_none() && m.ext.is_none() && c.on_ms_can() == m.on_ms_can()
+        }) {
+            Some(c) => *c = m,
+            None => v.push(m),
         }
     }
     v
@@ -425,13 +578,95 @@ mod tests {
         assert_eq!(t[0].name, "engine (ECM)", "the profile's name for 7E0");
         assert!(t.iter().any(|m| m.tx == 0x7B0));
         let body = t.iter().find(|m| m.ext == Some(0x40)).unwrap();
+        let hs = crate::link::Reach::of(crate::elm::Protocol::Can11At500);
         assert_eq!(
-            (body.tx, body.rx(), body.unreachable().is_some()),
+            (body.tx, body.rx(), body.unreachable(hs).is_some()),
             (0x750, 0x758, false)
         );
         let vw = candidates(find(&all, "vw-audi").unwrap());
         assert_eq!(vw.iter().find(|m| m.tx == 0x713).unwrap().rx(), 0x77D);
         assert_eq!(candidates(find(&all, "generic").unwrap()).len(), 8);
+    }
+
+    #[test]
+    fn twenty_nine_bit_ids_and_ranges_in_a_profile() {
+        let p = |t: &str| parse("x", "a file", &format!("name = \"x\"\n{t}"));
+        let m = |t: &str| p(t).map(|p| p.modules[0].clone());
+        // 18DAxxF1 answers from 18DAF1xx unless given; other 29-bit forms name their answer
+        let honda = m("[[module]]\ntx = 0x18DA30F1\nname = \"EPS\"\n").unwrap();
+        assert_eq!((honda.rx(), honda.is_29bit()), (0x18DA_F130, true));
+        assert!(m("[[module]]\ntx = 0x17FC0076\nname = \"VW\"\n").is_err());
+        let vw = m("[[module]]\ntx = 0x17FC0076\nrx = 0x17FE0076\nname = \"VW\"\n").unwrap();
+        assert_eq!(vw.rx(), 0x17FE_0076);
+        // a short number above 7FF is a mistyped 11-bit ID, and widths do not mix
+        for bad in [
+            "tx = 0x9000",
+            "tx = 0x7E0\nrx = 0x18DAF110",
+            "tx = 0x18DA10F1\nrx = 0x7E8",
+            "tx = 0x20000000\nrx = 0x20000001",
+        ] {
+            let e = m(&format!("[[module]]\n{bad}\nname = \"m\"\n")).unwrap_err();
+            assert!(e.contains("not 11-bit CAN IDs"), "{bad}: {e}");
+        }
+        // a range: each ID asked, answered at its offset, unchecked
+        let r = p(
+            "[[range]]\nfrom = 0x240\nto = 0x242\nanswer_offset = 0x400\nname = \"body module\"\n",
+        )
+        .unwrap();
+        let c = candidates(&r);
+        let body: Vec<(u32, u32, &str, bool)> = c[8..]
+            .iter()
+            .map(|m| (m.tx, m.rx(), m.name.as_str(), m.checked))
+            .collect();
+        assert_eq!(
+            body,
+            vec![
+                (0x240, 0x640, "body module 240", false),
+                (0x241, 0x641, "body module 241", false),
+                (0x242, 0x642, "body module 242", false)
+            ]
+        );
+        assert!(crate::uds::sweep_skips(&[r]).contains(&0x641));
+        for bad in [
+            "from = 0x700\nto = 0x6FF",
+            "from = 0x100\nto = 0x200",
+            "from = 0x7F0\nto = 0x7F8",
+        ] {
+            assert!(
+                p(&format!("[[range]]\n{bad}\nname = \"r\"\n")).is_err(),
+                "{bad}"
+            );
+        }
+        // what a link reaches decides, and the reason says which way it fails
+        use crate::elm::Protocol::*;
+        use crate::link::Reach;
+        let eleven = m("[[module]]\ntx = 0x7B0\nname = \"ABS\"\n").unwrap();
+        assert!(eleven.unreachable(Reach::of(Can11At500)).is_none());
+        assert!(honda.unreachable(Reach::of(Can29At500)).is_none());
+        assert!(honda
+            .unreachable(Reach::of(Can11At500))
+            .unwrap()
+            .contains("29-bit ID"));
+        assert!(eleven
+            .unreachable(Reach::of(Can29At500))
+            .unwrap()
+            .contains("11-bit ID"));
+        assert!(
+            eleven.unreachable(Reach::of(Iso9141)).is_some(),
+            "K-line reaches no module"
+        );
+        // on 29-bit CAN the OBD-II range is the engine's and the transmission's 29-bit addresses
+        let on29 = candidates_on(find(&builtin(), "honda").unwrap(), Can29At500);
+        assert_eq!(
+            on29.iter().map(|m| (m.tx, m.rx())).collect::<Vec<_>>(),
+            vec![(0x18DA_10F1, 0x18DA_F110), (0x18DA_18F1, 0x18DA_F118)]
+        );
+        // a 29-bit module request ID must be 18DAxxF1 (the broadcast 18DB33F1 and the answers 18DAF1xx are not)
+        let all = builtin();
+        assert_eq!(request_id_refused(0x18DA_30F1, &all), None);
+        for id in [0x18DB_33F1, 0x18DA_F130, 0x18DA_F1F1, 0x17FC_0076] {
+            assert!(request_id_refused(id, &all).is_some(), "{id:08X}");
+        }
     }
 
     #[test]

@@ -246,7 +246,7 @@ fn send(elm: &mut dyn Link, t: &TestDef, data: &[u8]) -> Result<Answer, String> 
     check(data)?;
     for _ in 0..4 {
         let a = elm
-            .request_to(t.module, t.rx(), data)
+            .request_to(t.module.into(), t.rx().into(), data)
             .map_err(|e| e.to_string())?;
         let Some(a) = a.into_iter().last() else {
             return Err("no answer".into());

@@ -703,15 +703,15 @@ fn scan(
         }
     };
     let list = if sweep {
-        uds::sweep(profiles)
+        uds::sweep_on(profiles, elm.protocol)
     } else {
-        vehicles::candidates(&profile)
+        vehicles::candidates_on(&profile, elm.protocol)
     };
     send(Event::ScanStarted(profile.name.clone(), list.len()));
     let (mut found, mut unreachable) = (0, Vec::new());
     let mut guard = uds::ScanGuard::default();
     for (i, m) in list.iter().enumerate() {
-        if let Some(why) = m.unreachable() {
+        if let Some(why) = m.unreachable(elm.reach()) {
             unreachable.push(format!("{:03X}  {}: {why}", m.tx, m.name));
             continue;
         }

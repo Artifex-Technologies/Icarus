@@ -43,7 +43,7 @@ Vehicle, through an OBD adapter (read-only: nothing is cleared or written):
                                              as dealer tools do. The make comes from the VIN (or --make, see icarus
                                              vehicles); --sweep tries every request ID from 700 to 7F7 (slower;
                                              never 7DF or a known answer ID such as 7E8-7EF)
-  icarus obd module ID[/ANSWER] --adapter A  one module (request ID in hex, e.g. 7B0, or 713/77D): identity and codes
+  icarus obd module ID[/ANSWER] --adapter A  one module (request ID in hex: 7B0, 713/77D, 18DA30F1): identity and codes
   icarus obd data [MODULE...] --adapter A [--set SET] [--year YYYY] [--find TEXT] [--every MS --count N] [--csv FILE]
                   [--all-years] [--all] [--refused]
                                              each module's own values (a dealer tool's data list: transmission fluid
@@ -692,7 +692,7 @@ fn cmd_obd(a: &[String]) -> Result<(), String> {
 
 fn print_module(elm: &mut Elm, m: &vehicles::ModuleAddr) -> Result<(), String> {
     let (tx, rx) = (m.tx, m.rx());
-    let at = if rx == tx + 8 {
+    let at = if m.rx.is_none_or(|r| r == tx + 8) {
         format!("{tx:03X}")
     } else {
         format!("{tx:03X}/{rx:03X}")
@@ -770,9 +770,9 @@ fn obd_scan(elm: &mut Elm, args: &Args) -> Result<(), String> {
         }
     };
     let list = if args.opt("sweep").is_some() {
-        uds::sweep(&all)
+        uds::sweep_on(&all, elm.protocol)
     } else {
-        vehicles::candidates(&profile)
+        vehicles::candidates_on(&profile, elm.protocol)
     };
     println!("Vehicle profile: {} ({})", profile.name, profile.source);
     if !profile.notes.is_empty() {
@@ -789,7 +789,7 @@ fn obd_scan(elm: &mut Elm, args: &Args) -> Result<(), String> {
     let (mut found, mut later) = (0, Vec::new());
     let mut guard = uds::ScanGuard::default();
     for m in &list {
-        if let Some(why) = m.unreachable() {
+        if let Some(why) = m.unreachable(elm.reach()) {
             later.push(format!("{:03X}  {}: {why}", m.tx, m.name));
             continue;
         }
@@ -808,20 +808,22 @@ fn obd_scan(elm: &mut Elm, args: &Args) -> Result<(), String> {
 fn obd_module(elm: &mut Elm, args: &Args) -> Result<(), String> {
     let [id] = args.pos.as_slice() else {
         return Err(
-            "usage: icarus obd module ID[/ANSWER_ID] --adapter A (hex, e.g. 7B0 or 713/77D)".into(),
+            "usage: icarus obd module ID[/ANSWER_ID] --adapter A (hex, e.g. 7B0, 713/77D or 18DA30F1)".into(),
         );
     };
     let (t, r) = id
         .split_once('/')
         .map_or((id.as_str(), None), |(a, b)| (a, Some(b)));
     let hex = |s: &str| {
-        u16::from_str_radix(s.trim_start_matches("0x"), 16)
+        u32::from_str_radix(s.trim_start_matches("0x"), 16)
             .map_err(|_| format!("{s} is not a module ID in hex"))
     };
     let tx = hex(t)?;
     let rx = r.map(hex).transpose()?;
     if let Some(why) = vehicles::request_id_refused(tx, &profiles()) {
-        return Err(format!("{why} (module request IDs are 700-7F7)"));
+        return Err(format!(
+            "{why} (module request IDs are 700-7F7, or 18DAxxF1 on 29-bit CAN)"
+        ));
     }
     let m = vehicles::ModuleAddr {
         tx,
@@ -1444,12 +1446,17 @@ fn obd_clear(elm: &mut Elm, args: &Args) -> Result<(), String> {
                 .ok()
                 .flatten()
                 .and_then(|v| icarus_obd::vehicles::for_vin(&ps, &v).cloned())
-                .and_then(|p| p.modules.into_iter().find(|m| m.tx == tx).map(|m| m.name))
+                .and_then(|p| {
+                    p.modules
+                        .into_iter()
+                        .find(|m| m.tx == u32::from(tx))
+                        .map(|m| m.name)
+                })
                 .unwrap_or_default();
             if let Some(why) = clear::refused(tx, rx, &name) {
                 return Err(why);
             }
-            let (d, codes) = uds::module_dtcs(elm, tx, rx)
+            let (d, codes) = uds::module_dtcs(elm, tx.into(), rx.into())
                 .map_err(e)?
                 .map_err(|why| format!("{tx:03X} did not give its codes ({why})"))?;
             println!(

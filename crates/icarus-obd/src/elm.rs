@@ -165,8 +165,9 @@ pub struct Elm {
     pub protocol: Protocol,
     /// The voltage at the OBD port (`ATRV`): the vehicle's battery.
     pub voltage: Option<f64>,
-    /// The one module requests go to (request ID, answer ID), or None: OBD's broadcast to every module (7DF).
-    target: Option<(u16, u16)>,
+    /// The one module requests go to (request ID, answer ID), or None: OBD's broadcast to every module (7DF, or 18DB33F1
+    /// on 29-bit CAN).
+    target: Option<(u32, u32)>,
     /// The extended address byte `request_to` uses from now on (`set_ext`: a module behind a gateway, such as Toyota's
     /// body modules behind 750), and the one the adapter is set to (`ATCEA`), which follows it before each request.
     want_ext: Option<u8>,
@@ -311,10 +312,7 @@ impl Elm {
         self.read_only_check(data)?;
         self.format_frames()?;
         self.ext_to(None)?;
-        if self.target.is_some() {
-            self.ok_commands(&["ATSH7DF", "ATCRA", "ATFCSM0"])?;
-            self.target = None;
-        }
+        self.point_at_everyone()?;
         self.dropped.clear();
         let lines = self.request_lines(data)?;
         let (answers, dropped) = parse_broadcast(&lines, self.protocol)?;
@@ -343,30 +341,45 @@ impl Elm {
         std::mem::take(&mut self.unseen)
     }
 
-    /// Sends a request to one module on 11-bit CAN: to request ID `tx`, listening only to answer ID `rx` (usually tx + 8).
-    /// Flow control for long answers goes to `tx` too, which modules outside OBD's own 7E0-7E7 need.
-    pub fn request_to(&mut self, tx: u16, rx: u16, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
+    /// Points the adapter back at every module (OBD's broadcast) when a request to one module moved it.
+    fn point_at_everyone(&mut self) -> Result<(), ObdError> {
+        if self.target.is_some() {
+            let cmds = header_commands(None, self.reach().can29);
+            self.ok_commands(&cmds.iter().map(String::as_str).collect::<Vec<_>>())?;
+            self.target = None;
+        }
+        Ok(())
+    }
+
+    /// What this adapter reaches on this vehicle: the ID width of the vehicle's CAN protocol.
+    pub fn reach(&self) -> crate::link::Reach {
+        crate::link::Reach::of(self.protocol)
+    }
+
+    /// Sends a request to one module on CAN: to request ID `tx`, listening only to answer ID `rx`. 11-bit IDs (up to 7FF;
+    /// the answer usually tx + 8) on a vehicle whose OBD-II uses 11-bit CAN, 29-bit IDs (18DAxxF1 answered from 18DAF1xx)
+    /// on one that uses 29-bit CAN (`header_commands`). Flow control for long answers goes to `tx` too, which modules
+    /// outside OBD's own 7E0-7E7 need.
+    pub fn request_to(&mut self, tx: u32, rx: u32, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
         self.read_only_check(data)?;
-        if !matches!(self.protocol, Protocol::Can11At500 | Protocol::Can11At250) {
+        if tx > 0x1FFF_FFFF || rx > 0x1FFF_FFFF || (tx > 0x7FF) != (rx > 0x7FF) {
             return Err(ObdError::Adapter(format!(
-                "talking to one module needs 11-bit CAN; this vehicle uses {}",
-                self.protocol.describe()
+                "{tx:X}/{rx:X} are not both 11-bit or both 29-bit CAN IDs"
             )));
         }
-        if tx > 0x7FF || rx > 0x7FF {
+        let (wide, reach) = (tx > 0x7FF, self.reach());
+        if (!wide && !reach.can11) || (wide && !reach.can29) {
             return Err(ObdError::Adapter(format!(
-                "{tx:X}/{rx:X} are not 11-bit CAN IDs"
+                "talking to the module at {tx:X} needs {}-bit CAN; this vehicle uses {}",
+                if wide { 29 } else { 11 },
+                self.protocol.describe()
             )));
         }
         self.format_frames()?;
         self.ext_to(self.want_ext)?;
         if self.target != Some((tx, rx)) {
-            let (sh, cra, fc) = (
-                format!("ATSH{tx:03X}"),
-                format!("ATCRA{rx:03X}"),
-                format!("ATFCSH{tx:03X}"),
-            );
-            self.ok_commands(&[&sh, &cra, &fc, "ATFCSD300000", "ATFCSM1"])?;
+            let cmds = header_commands(Some((tx, rx)), wide);
+            self.ok_commands(&cmds.iter().map(String::as_str).collect::<Vec<_>>())?;
             self.target = Some((tx, rx));
         }
         match self.ext {
@@ -421,10 +434,7 @@ impl Elm {
     /// link comes back as itself. If the watch went well but `ATCAF1` failed, the watch's result comes back, saying that
     /// auto-formatting goes back on before the next request (it stays pending until it does).
     pub fn monitor(&mut self, each: impl FnMut(&str) -> bool) -> Result<String, ObdError> {
-        if self.target.is_some() {
-            self.ok_commands(&["ATSH7DF", "ATCRA", "ATFCSM0"])?;
-            self.target = None;
-        }
+        self.point_at_everyone()?;
         let silent: &[&str] = if self.stn.is_some() {
             &["ATCSM1", "STCMM0"]
         } else {
@@ -539,6 +549,34 @@ impl Elm {
         let lines = self.raw_request(&hex, Duration::from_secs(5))?;
         check_errors(&lines)?;
         Ok(lines)
+    }
+}
+
+/// The commands that point the adapter at one module, `Some((tx, rx))`, or back at every module (OBD's broadcast), for
+/// 11-bit or 29-bit (`can29`) CAN. One module: the header requests go out under (`ATSH`), the only answer ID shown
+/// (`ATCRA`), and flow control for long answers sent to `tx` (`ATFCSH`, `ATFCSD300000`: go on, no pause; `ATFCSM1`: these
+/// settings, not the adapter's own guess). On 29-bit CAN, `ATSH` takes the header's lower three bytes and `ATCP` its top
+/// one, the priority (18 in 18DAxxF1); the broadcast is 18DB33F1.
+pub fn header_commands(target: Option<(u32, u32)>, can29: bool) -> Vec<String> {
+    let v = |s: &[&str]| s.iter().map(|c| c.to_string()).collect::<Vec<_>>();
+    match (target, can29) {
+        (None, false) => v(&["ATSH7DF", "ATCRA", "ATFCSM0"]),
+        (None, true) => v(&["ATCP18", "ATSHDB33F1", "ATCRA", "ATFCSM0"]),
+        (Some((tx, rx)), false) => vec![
+            format!("ATSH{tx:03X}"),
+            format!("ATCRA{rx:03X}"),
+            format!("ATFCSH{tx:03X}"),
+            "ATFCSD300000".into(),
+            "ATFCSM1".into(),
+        ],
+        (Some((tx, rx)), true) => vec![
+            format!("ATCP{:02X}", (tx >> 24) & 0x1F),
+            format!("ATSH{:06X}", tx & 0xFF_FFFF),
+            format!("ATCRA{rx:08X}"),
+            format!("ATFCSH{tx:08X}"),
+            "ATFCSD300000".into(),
+            "ATFCSM1".into(),
+        ],
     }
 }
 
