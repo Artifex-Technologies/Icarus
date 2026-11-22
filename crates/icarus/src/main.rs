@@ -1585,6 +1585,13 @@ fn cmd_bus(a: &[String]) -> Result<(), String> {
     } else {
         let mut elm = connect(&args)?;
         let proto = elm.protocol;
+        if raw {
+            // the adapter first, so a firmware change shows in the log; bus::parse_line skips this line
+            println!(
+                "{}",
+                icarus_obd::drivelog::adapter_line(&icarus_obd::link::Link::adapter(&elm))
+            );
+        }
         elm.monitor(|line| {
             let f = bus::parse_line(line, proto, start.elapsed().as_secs_f64());
             step(&mut an, f)
@@ -1950,6 +1957,14 @@ fn obd_live(elm: &mut Elm, args: &Args) -> Result<(), String> {
             format!("{} [{}]", d.name, d.unit)
         })
         .collect();
+    if let Some(f) = csv.as_mut() {
+        writeln!(
+            f,
+            "{}",
+            icarus_obd::drivelog::adapter_line(&icarus_obd::link::Link::adapter(&*elm))
+        )
+        .map_err(|e| e.to_string())?;
+    }
     println!("time_s, {}", names.join(", "));
     if let Some(f) = csv.as_mut() {
         writeln!(

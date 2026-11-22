@@ -476,7 +476,7 @@ impl App {
             return;
         };
         let (fast, rest) = logs::drive_set(&info.live);
-        match logs::Recorder::start(&fast, &rest) {
+        match logs::Recorder::start(&fast, &rest, &info.adapter) {
             Ok(r) => {
                 self.status = format!(
                     "Recording {} values to {} (the Logs page shows it as it comes in).",

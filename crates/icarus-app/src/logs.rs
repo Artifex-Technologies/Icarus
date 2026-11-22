@@ -98,8 +98,9 @@ fn file_name() -> String {
 }
 
 impl Recorder {
-    /// Starts a recording in ~/Documents/Icarus/logs: `fast` read every sweep, `rest` in turn.
-    pub fn start(fast: &[u8], rest: &[u8]) -> Result<Recorder, String> {
+    /// Starts a recording in ~/Documents/Icarus/logs: `fast` read every sweep, `rest` in turn; its first line names the
+    /// `adapter` (drivelog::adapter_line).
+    pub fn start(fast: &[u8], rest: &[u8], adapter: &str) -> Result<Recorder, String> {
         let pids: Vec<u8> = fast.iter().chain(rest).copied().filter(|p| j1979::pid(*p).is_some()).collect();
         let dir = drivelog::folders().into_iter().next().ok_or("no home folder")?;
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -107,7 +108,8 @@ impl Recorder {
         let mut file = std::fs::File::create(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         let names: Vec<String> =
             pids.iter().filter_map(|p| j1979::pid(*p)).map(|d| format!("{} [{}]", d.name, d.unit)).collect();
-        writeln!(file, "{}", drivelog::csv_header(&names)).map_err(|e| e.to_string())?;
+        writeln!(file, "{}\n{}", drivelog::adapter_line(adapter), drivelog::csv_header(&names))
+            .map_err(|e| e.to_string())?;
         let awake = std::process::Command::new("systemd-inhibit")
             .args(["--what=sleep:idle:handle-lid-switch", "--who=Icarus", "--why=Recording a drive", "cat"])
             .stdin(std::process::Stdio::piped())

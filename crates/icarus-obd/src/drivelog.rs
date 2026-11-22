@@ -121,8 +121,26 @@ pub fn recording_now() -> Option<PathBuf> {
     (age < std::time::Duration::from_secs(5)).then_some(newest)
 }
 
+/// A recording's first line: the adapter it was made through, as the adapter names itself (`ATI`, and an STN chip's
+/// `STI`, which carries its firmware version), so a firmware update shows in the logs. Readers skip `#` lines.
+pub fn adapter_line(adapter: &str) -> String {
+    format!("# adapter: {}", adapter.replace(['\r', '\n'], " "))
+}
+
+/// The adapter a recording names in its first lines, when it does.
+pub fn adapter_of(text: &str) -> Option<String> {
+    text.lines()
+        .take_while(|l| l.starts_with('#'))
+        .find_map(|l| l.strip_prefix("# adapter: ").map(|a| a.trim().to_string()))
+}
+
+/// The lines of a recording after its `#` lines.
+fn data_lines(text: &str) -> impl Iterator<Item = &str> {
+    text.lines().skip_while(|l| l.starts_with('#'))
+}
+
 pub fn series(text: &str) -> Result<Series, String> {
-    let mut lines = text.lines();
+    let mut lines = data_lines(text);
     let header = split(lines.next().ok_or("the file is empty")?);
     let names: Vec<String> = header
         .iter()
@@ -172,7 +190,7 @@ pub fn csv_row(t: f64, values: &[Option<f64>]) -> String {
 }
 
 pub fn summarize(text: &str) -> Result<Summary, String> {
-    let mut lines = text.lines();
+    let mut lines = data_lines(text);
     let header = split(lines.next().ok_or("the file is empty")?);
     let c = cols(&header);
     if c.stft1.is_none() && c.ltft1.is_none() {
@@ -389,7 +407,11 @@ pub fn summarize_file(path: &Path) -> Result<String, String> {
         .file_name()
         .map(|f| f.to_string_lossy().into_owned())
         .unwrap_or_default();
-    Ok(words(&name, &summarize(&text)?))
+    let mut out = words(&name, &summarize(&text)?);
+    if let Some(a) = adapter_of(&text) {
+        out = format!("{out}\nRecorded through: {a}.");
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -397,6 +419,19 @@ mod tests {
     use super::*;
 
     const HEAD: &str = "time_s,\"Engine speed [rpm]\",\"Vehicle speed [km/h]\",\"Coolant temperature [°C]\",\"Short-term fuel trim, bank 1 [%]\",\"Long-term fuel trim, bank 1 [%]\",\"Short-term fuel trim, bank 2 [%]\",\"Long-term fuel trim, bank 2 [%]\",\"Timing advance [° before TDC]\",\"Mass air flow [g/s]\",\"Throttle position [%]\",\"Engine load [%]\",\"O2 sensor bank 1 sensor 2 [V]\",\"O2 sensor bank 2 sensor 2 [V]\",\"Control module voltage [V]\"";
+
+    #[test]
+    fn the_adapter_line_is_kept_and_skipped() {
+        let log = format!(
+            "{}\n{HEAD}\n0.0,650,0,90,1.0,-8.0,0.0,-4.0,15,3.0,15,16,0.78,0.74,13.6\n",
+            adapter_line("ELM327 v1.4b (STN2256 v5.10.3)")
+        );
+        assert_eq!(adapter_of(&log).as_deref(), Some("ELM327 v1.4b (STN2256 v5.10.3)"));
+        assert_eq!(summarize(&log).unwrap().readings, 1, "the summary reads past it");
+        assert_eq!(series(&log).unwrap().names.len(), 14);
+        assert_eq!(adapter_of(&format!("{HEAD}\n")), None, "older recordings have none");
+        assert_eq!(adapter_line("a\r\nb"), "# adapter: a  b", "one line, whatever the adapter says");
+    }
 
     #[test]
     fn trims_by_condition_and_the_limiter() {

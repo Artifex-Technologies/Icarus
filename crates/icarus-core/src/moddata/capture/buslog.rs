@@ -353,6 +353,8 @@ mod tests {
 
     #[test]
     fn requests_and_answers_are_paired_on_the_bus() {
+        // a raw log's first line names the adapter (icarus bus watch --raw): not a frame
+        assert!(parse_line("# adapter: ELM327 v1.4b (STN2256 v5.10.3)", 0.0).is_none());
         let r = read(LOG).unwrap();
         let e = &r.exchanges;
         let got: Vec<(String, String)> = e
