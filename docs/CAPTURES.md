@@ -46,8 +46,10 @@ transcript's `clock_utc` column is the phone's clock (UTC) for each request, `ti
 
 A Y-splitter on the OBD port carries both: the other tool on one branch, an adapter on the laptop on the other, listening
 only. `icarus bus watch --adapter /dev/ttyUSB0 --raw --seconds 600 > drive.log` (an OBDLink EX or another STN adapter
-in monitor mode), or `candump -l can0` on a CAN interface. Then `icarus import buslog drive.log`. Bus logs carry no time
-of day: `time_s` counts from when watching began.
+in monitor mode), or `candump -l can0` on a CAN interface. Then `icarus import buslog drive.log`. A `candump -l` log
+holds the computer's clock: the transcript's `clock_utc` is that clock (UTC) for each request, and `time_s` counts from
+the log's first frame. `icarus bus watch --raw` holds no time of day: `time_s` counts from when watching began and
+`clock_utc` stays empty.
 
 ## What is kept (privacy)
 

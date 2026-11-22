@@ -1,7 +1,8 @@
 //! A bus log: the CAN frames another tool and the modules sent each other, recorded through a Y-splitter by
 //! `icarus bus watch --raw` (one frame a line: the time in seconds, the ID in hex, the data bytes in hex; the watch's own
 //! words between them are skipped) or by Linux's `candump` (`(1700000000.123456) can0 7E0#0322123400000000`, or its
-//! default `can0  7E0   [8]  03 22 12 34 00 00 00 00`).
+//! default `can0  7E0   [8]  03 22 12 34 00 00 00 00`). Times of `candump -l` (seconds since 1970) give each exchange
+//! its time of day, `time_s` then counting from the log's first frame.
 //!
 //! Diagnostic frames (11-bit IDs 700-7FF, 29-bit IDs 18DAxxxx and 18DBxxxx, and where the log shows them used that way
 //! BMW's 6F1 and 6xx and GM's 24x and 64x, `make_ids`) are put back together per sender with ISO-TP
@@ -21,6 +22,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// How long a request waits for its answers (seconds).
 const WAIT: f64 = 5.0;
+
+/// Times from this on are the time of day (seconds since 1970: from 2001 on), as `candump -l` writes them; a log that
+/// counts from its start (`icarus bus watch`) never gets that far.
+const EPOCH_TIMES: f64 = 1.0e9;
 
 /// The most requests waiting for answers at once: older ones stop waiting (a log without times, as candump's default
 /// format, never lets five seconds pass).
@@ -310,6 +315,9 @@ pub fn read(text: &str) -> Result<Read, String> {
         );
     }
     let total = frames.len();
+    // candump -l (and -t a) writes the computer's clock, seconds since 1970; icarus bus watch counts from 0
+    let first = frames.iter().map(|f| f.at).fold(f64::INFINITY, f64::min);
+    let epoch = (first >= EPOCH_TIMES).then_some(first);
     let (bmw, gm) = make_ids(&frames);
     let made = |f: &BusFrame| f.ids == Ids::Can11 && (bmw.contains(&f.id) || gm.contains(&f.id));
     frames.retain(|f| diagnostic(f.ids, f.id) || made(f));
@@ -423,8 +431,15 @@ pub fn read(text: &str) -> Result<Read, String> {
         }
         open.retain(|o| o.2 && m.at - ex[o.0].at <= WAIT);
     }
-    for e in ex.iter_mut().filter(|e| e.replies.is_empty()) {
-        e.problem = Some("no answer on the bus".into());
+    for e in ex.iter_mut() {
+        if e.replies.is_empty() {
+            e.problem = Some("no answer on the bus".into());
+        }
+        // the time of day, when the log holds it; time_s from the log's first frame
+        if let Some(start) = epoch {
+            e.clock = Some(e.at);
+            e.at -= start;
+        }
     }
     let mut notes = vec![format!(
         "{lines} line(s), {total} CAN frame(s), {} on diagnostic IDs; {} request(s) found",
@@ -671,6 +686,43 @@ mod tests {
         assert_eq!(e[1].replies, vec![reply(0x642, &[0x62, 0x19, 0x40, 0x05])]);
         let imp = super::super::build(e, &o).unwrap();
         assert!(imp.notes.is_empty(), "{:?}", imp.notes);
+    }
+
+    #[test]
+    fn candump_log_times_give_the_time_of_day() {
+        // candump -l: seconds since 1970 (made-up identifiers)
+        let log = "\
+(1763560000.100000) can0 7E0#0322123400000000
+(1763560000.112500) can0 7E8#0562123401020000
+(1763560001.600000) can0 7E0#0322567800000000
+";
+        let r = read(log).unwrap();
+        let e = &r.exchanges;
+        assert_eq!(e.len(), 2);
+        assert!(
+            e[0].at.abs() < 1e-6 && (e[1].at - 1.5).abs() < 1e-6,
+            "{e:?}"
+        );
+        assert!(e[0]
+            .clock
+            .is_some_and(|c| (c - 1_763_560_000.1).abs() < 1e-6));
+        let csv = super::super::transcript_csv(e, &|_| String::new());
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(
+            lines[1],
+            "0.000,2025-11-19T13:46:40.100Z,7E0/7E8,read data by identifier,22 12 34,62 12 34 01 02"
+        );
+        assert!(
+            lines[2].starts_with("1.500,2025-11-19T13:46:41.600Z,7E0,"),
+            "{}",
+            lines[2]
+        );
+        // icarus bus watch --raw counts from when watching began: no time of day
+        assert!(read(LOG)
+            .unwrap()
+            .exchanges
+            .iter()
+            .all(|x| x.clock.is_none()));
     }
 
     #[test]

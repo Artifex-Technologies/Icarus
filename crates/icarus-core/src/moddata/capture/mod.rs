@@ -51,8 +51,8 @@ pub struct Reply {
 pub struct Exchange {
     /// Seconds from the start of the capture.
     pub at: f64,
-    /// Wall-clock time (seconds since 1970, UTC) when the capture holds it (Bluetooth logs do; `icarus bus watch` counts
-    /// from when watching began).
+    /// Wall-clock time (seconds since 1970, UTC) when the capture holds it (Bluetooth logs and `candump -l` do;
+    /// `icarus bus watch` counts from when watching began).
     pub clock: Option<f64>,
     pub ids: Ids,
     /// The request ID; None when the adapter was left on its default header (every module).
@@ -936,13 +936,14 @@ pub fn build(ex: &[Exchange], o: &Options) -> Result<Imported, String> {
     Ok(out)
 }
 
-/// "2026-11-19T14:03:05.123Z" from seconds since 1970 (UTC).
+/// "2026-11-19T14:03:05.123Z" from seconds since 1970 (UTC), to the nearest millisecond (a log's `.100000` reads back
+/// as a hair under it).
 pub fn utc(secs: f64) -> String {
     if !secs.is_finite() || secs < 0.0 {
         return String::new();
     }
-    let whole = secs.floor() as i64;
-    let ms = ((secs - whole as f64) * 1000.0).floor() as i64;
+    let total_ms = (secs * 1000.0).round() as i64;
+    let (whole, ms) = (total_ms.div_euclid(1000), total_ms.rem_euclid(1000));
     let (days, rest) = (whole.div_euclid(86_400), whole.rem_euclid(86_400));
     // days since 1970-01-01 to a civil date (the well-known era arithmetic)
     let z = days + 719_468;

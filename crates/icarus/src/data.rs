@@ -409,6 +409,8 @@ fn import_capture(args: &Args) -> Result<(), String> {
                 l.read.exchanges.len(),
                 if l.read.from.starts_with("Bluetooth") {
                     ", clock_utc the phone's clock in UTC"
+                } else if l.read.exchanges.iter().any(|e| e.clock.is_some()) {
+                    ", clock_utc the logging computer's clock in UTC"
                 } else {
                     ""
                 }
