@@ -89,7 +89,7 @@ fn builtin() -> Vec<(&'static str, &'static [(&'static str, &'static str)])> {
 #[derive(Clone, Debug, Default)]
 pub struct Gates {
     /// IDs never sent on: 7DF, every answer ID the profiles know, every answer ID in the set.
-    skips: BTreeSet<u16>,
+    skips: BTreeSet<u32>,
     profiles: Vec<Profile>,
     /// Set when the make's profile names no airbag module (or there is no profile for it): why a module of unknown kind
     /// gets no data request.
@@ -119,23 +119,23 @@ impl Gates {
             modules
                 .iter()
                 .filter(|m| m.module.ids == Ids::Can11)
-                .filter_map(|m| u16::try_from(m.module.rx()).ok()),
+                .map(|m| m.module.rx()),
         );
         let profile = profiles
             .iter()
             .find(|p| !make.is_empty() && p.id.eq_ignore_ascii_case(make));
+        // 11-bit IDs only: the ones module data reaches and the airbag list names (a 29-bit module counts by its name)
+        let small = |id: u32| u16::try_from(id).ok().filter(|i| *i <= 0x7FF);
+        let airbag = |a: &crate::vehicles::ModuleAddr| {
+            crate::actuator::is_airbag(small(a.tx).unwrap_or(0), &a.name)
+        };
         let caution = match profile {
             None => Some(if make.is_empty() {
                 "the set names no make".to_string()
             } else {
                 format!("no vehicle profile is named {make:?}")
             }),
-            Some(p)
-                if !p
-                    .modules
-                    .iter()
-                    .any(|a| crate::actuator::is_airbag(a.tx, &a.name)) =>
-            {
+            Some(p) if !p.modules.iter().any(airbag) => {
                 Some(format!("the {} profile names no airbag module", p.id))
             }
             Some(_) => None,
@@ -143,16 +143,19 @@ impl Gates {
         let airbags: Vec<&crate::vehicles::ModuleAddr> = profiles
             .iter()
             .flat_map(|p| &p.modules)
-            .filter(|a| crate::actuator::is_airbag(a.tx, &a.name))
+            .filter(|a| airbag(a))
             .collect();
         Gates {
             skips,
             profiles: profiles.to_vec(),
-            airbag_tx: airbags.iter().map(|a| (a.tx, a.ext)).collect(),
+            airbag_tx: airbags
+                .iter()
+                .filter_map(|a| small(a.tx).map(|t| (t, a.ext)))
+                .collect(),
             airbag_rx: airbags
                 .iter()
                 .filter(|a| a.ext.is_none())
-                .map(|a| a.rx())
+                .filter_map(|a| small(a.rx()))
                 .collect(),
             caution,
             named: profile
@@ -160,7 +163,7 @@ impl Gates {
                     p.modules
                         .iter()
                         .filter(|a| a.ext.is_none())
-                        .map(|a| a.tx)
+                        .filter_map(|a| small(a.tx))
                         .collect()
                 })
                 .unwrap_or_default(),
@@ -240,10 +243,10 @@ impl Gates {
                 "refused: {tx:03X} would answer on its own request ID"
             ));
         }
-        if let Some(why) = crate::vehicles::request_id_refused(tx, &self.profiles) {
+        if let Some(why) = crate::vehicles::request_id_refused(tx.into(), &self.profiles) {
             return Some(why);
         }
-        if self.skips.contains(&tx) {
+        if self.skips.contains(&tx.into()) {
             return Some(format!(
                 "refused: {tx:03X} is the answer ID of another module in this set"
             ));
@@ -735,7 +738,7 @@ pub fn read_request(
         return hold;
     }
     // `reachable` and the gates hold both to 11 bits
-    let (tx, rx) = (m.module.tx as u16, m.module.rx() as u16);
+    let (tx, rx) = (m.module.tx, m.module.rx());
     let nap = pacer.sleep;
     let ext = m.module.ext;
     let ask = |link: &mut dyn Link| match uds::at(link, ext, |l| {
@@ -1634,8 +1637,8 @@ mod tests {
         }
         fn request_to(
             &mut self,
-            _: u16,
-            _: u16,
+            _: u32,
+            _: u32,
             _: &[u8],
         ) -> Result<Vec<crate::elm::Answer>, crate::elm::ObdError> {
             self.1 += 1;
@@ -2177,8 +2180,8 @@ mod tests {
         }
         fn request_to(
             &mut self,
-            tx: u16,
-            rx: u16,
+            tx: u32,
+            rx: u32,
             d: &[u8],
         ) -> Result<Vec<crate::elm::Answer>, crate::elm::ObdError> {
             self.1.push(fake_now());

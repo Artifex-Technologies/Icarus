@@ -145,10 +145,18 @@ data page, add latitude, longitude and GPS speed columns (empty while there is n
 
 ## The bus
 
-`icarus bus watch --adapter A` (the OBDLink's monitor mode) or `--can can0` (a Linux CAN interface such as a CANable),
+`icarus bus watch --adapter A` (the OBDLink's monitor mode), `--can can0` / `--adapter can0` (a Linux CAN interface such
+as a CANable) or `--adapter slcan:/dev/ttyACM0` (an SLCAN adapter: see below),
 or the Bus page: every ID with its rate and last bytes, the bytes that just changed lit up (press a pedal or a switch and
 watch which byte follows), and diagnostic messages between a tool and the modules put in words. Watching only: nothing
 is sent onto the bus. What another tool does while Icarus watches is learned (next section).
+
+SLCAN adapters (Lawicel CANUSB, a CANable with the slcan firmware, many cheap USB-CAN sticks) are watched without
+`slcand` or root: `--adapter slcan:/dev/ttyACM0[@baud][#bitrate]` (115200 baud and 500 kbit/s unless given; `#125k`
+for a medium-speed bus). Icarus speaks SLCAN on the serial port itself and opens the channel listen-only (`L`), so the
+adapter acknowledges nothing; it never opens it in normal mode (`O`) and never sends a frame (the only commands sent are
+`C`, `S0`-`S8` and `L`), and an adapter that refuses `L` is not watched through. `icarus learn` takes the same adapters.
+They watch only: the `obd` commands refuse them.
 
 ## Learning from another tool
 
@@ -451,6 +459,17 @@ adapter that shows the address byte in answers and one that strips it are both r
 `asbuilt` reads a module's whole as-built configuration block (FORScan's name for Ford's identifiers DE00 on: `22` reads
 only, until the first one the module does not have) and saves it in the vehicle's `Definitions` folder, never over an
 earlier one: the way back before any configuration change.
+On a vehicle whose OBD-II runs on 29-bit CAN (most Hondas), modules are asked at their 29-bit IDs (`18DAxxF1`, answered
+from `18DAF1xx`; `ATCP` and `ATSH` set the header): a scan asks the engine and transmission at `18DA10F1` and `18DA18F1`,
+`--sweep` every `18DAxxF1`, and `icarus obd module 18DA30F1` one of them. A profile can name a range of request IDs
+answered a fixed distance away: GM's body modules (requests `240`-`24F`, answers 400 higher) are asked that way, each named
+by its number. 29-bit modules and GM's body range are read only, with no Clear button.
+A module written down with `bus = "ms-can"` (Ford's medium-speed CAN on pins 3 and 11) is asked through an OBDLink: Icarus
+switches the STN chip to that bus (`STP53`) for that module's requests only and back to the vehicle's own protocol
+(`ATSP6`) afterwards, whatever happened (a failed way back is tried again before the next request); a plain ELM327 lists
+such a module as not reachable, with the reason. A request longer than one CAN frame goes as `STPX` on an OBDLink and is
+refused on a plain ELM327. These STN commands are from the STN11xx/STN22xx reference and have been tested on the
+simulator only (`elm::STN_UNVERIFIED`).
 A module's codes are asked for in every read-only form in turn (UDS `19 02` with the status masks FF, 2F, 09 and 08;
 KWP2000 `18` with status 02 and 00; ISO 14230 `13` with and without the group), since modules refuse the forms they do not
 support; when none gives them, Icarus shows what each request got (no answer, or the module's refusal and its reason).
@@ -474,8 +493,17 @@ The adapter `A` is one of:
 | `bt:AA:BB:CC:DD:EE:FF` | a paired Bluetooth adapter such as the OBDLink MX+ (RFCOMM channel 1; `#2` picks another) |
 | `/dev/ttyUSB0[@115200]` | a USB adapter (38400 baud unless given) |
 | `tcp:192.168.0.10:35000` | a Wi-Fi adapter |
+| `can:can0` (or just `can0`, `vcan0`) | a Linux CAN interface (SocketCAN), such as a CANable set up with `ip link set can0 up type can bitrate 500000` |
+| `slcan:/dev/ttyACM0[@baud][#bitrate]` | an SLCAN adapter, for watching the bus only (listen-only; see The bus) |
 
-`ICARUS_ADAPTER` sets a default. Pair a Bluetooth adapter once with `bluetoothctl` (`scan on`, `pair`, `trust`); Icarus
+`ICARUS_ADAPTER` sets a default.
+
+Through a CAN interface Icarus speaks ISO 15765-2 (ISO-TP) itself over raw frames, with no ELM327 in between and no kernel
+`can-isotp` module: OBD-II's broadcast on `7DF` (or `18DB33F1`; it tries 11-bit CAN, then 29-bit), each module at its own
+IDs, long answers and requests put together and split with flow control both ways, "response pending" waited out, a
+message that stops halfway reported, never kept short. The `obd` commands work the same (`icarus obd info --adapter can0`);
+the interface cannot measure the battery, and its bit rate is whatever `ip link` set. As on every link, a request that
+would change a vehicle switched to Read-Only is refused before any frame is sent. Pair a Bluetooth adapter once with `bluetoothctl` (`scan on`, `pair`, `trust`); Icarus
 connects to it directly, no `rfcomm bind` needed.
 
 ## Build
@@ -492,7 +520,7 @@ Rust (stable), Linux. Dependencies: `roxmltree` (XML) and `libc`.
 | Crate | What |
 | --- | --- |
 | `crates/icarus-core` | ROM images (original + edited, diff), definitions (tables, values, switches), formulas, the TunerPro `.xdf` and ASAM `.a2l` readers; module-data definitions, their decoder, the OBDb importer and the capture importers (Bluetooth logs, bus logs); ISO-TP |
-| `crates/icarus-obd` | adapters (USB, Bluetooth, Wi-Fi, simulated), the ELM327/STN language, the standard OBD-II services |
+| `crates/icarus-obd` | adapters (USB, Bluetooth, Wi-Fi, simulated), the ELM327/STN language, Linux CAN interfaces with Icarus's own ISO-TP, the standard OBD-II services |
 | `crates/icarus` | the `icarus` command |
 | `crates/icarus-app` | the window (egui, Yggdrasil's look from yggdrasil-ui); a worker thread owns the adapter |
 

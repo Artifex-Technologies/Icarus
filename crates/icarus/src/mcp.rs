@@ -343,22 +343,26 @@ fn vehicle_modules() -> Result<String, String> {
         .cloned()
         .or_else(|| vehicles::find(&all, "generic").ok().cloned());
     let mut o = String::new();
+    let protocol = elm.protocol;
     for m in profile
         .as_ref()
-        .map(vehicles::candidates)
+        .map(|p| vehicles::candidates_on(p, protocol))
         .unwrap_or_default()
     {
-        if m.unreachable().is_some() {
+        if m.unreachable(elm.reach()).is_some() {
             continue;
         }
         let (tx, rx) = (m.tx, m.rx());
-        let codes = uds::at(&mut elm, m.ext, |l| {
+        let codes = match uds::at_module(&mut elm, &m, |l| {
             if !uds::present(l, tx, rx)? {
                 return Ok(None);
             }
             uds::module_dtcs(l, tx, rx).map(Some)
-        })
-        .map_err(e)?;
+        }) {
+            // the adapter refused to switch to that module's bus
+            Err(icarus_obd::elm::ObdError::Adapter(_)) if m.on_ms_can() => continue,
+            r => r.map_err(e)?,
+        };
         let Some(codes) = codes else { continue };
         match codes {
             Err(why) => {

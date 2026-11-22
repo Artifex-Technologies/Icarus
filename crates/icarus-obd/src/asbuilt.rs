@@ -17,7 +17,7 @@ pub type Block = Vec<(u16, Vec<u8>)>;
 
 /// Reads the module's as-built block: from DE00 on until the module refuses or stays silent (after at least one answer),
 /// or DEFF.
-pub fn read(link: &mut dyn Link, tx: u16, rx: u16) -> Result<Block, String> {
+pub fn read(link: &mut dyn Link, tx: u32, rx: u32) -> Result<Block, String> {
     let mut out = Vec::new();
     for did in FIRST..=LAST {
         match uds::read_data(link, tx, rx, 0x22, did) {
@@ -67,7 +67,7 @@ pub fn parse(t: &str) -> Block {
 }
 
 /// Saves the block in `dir` (the vehicle's `Definitions`) as `as-built-<module>-<when>.txt`, never over an existing file.
-pub fn save_in(dir: &Path, tx: u16, when: &str, b: &Block) -> Result<PathBuf, String> {
+pub fn save_in(dir: &Path, tx: u32, when: &str, b: &Block) -> Result<PathBuf, String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let stamp: String = when
         .chars()
@@ -84,7 +84,7 @@ pub fn save_in(dir: &Path, tx: u16, when: &str, b: &Block) -> Result<PathBuf, St
 }
 
 /// Saves the block in the vehicle's folder (`Definitions`), or Icarus's state folder for the simulated vehicle.
-pub fn save(vin: Option<&str>, tx: u16, b: &Block) -> Result<PathBuf, String> {
+pub fn save(vin: Option<&str>, tx: u32, b: &Block) -> Result<PathBuf, String> {
     let dir = match vin {
         Some(v) if v != crate::sim::VIN => crate::garage::ensure(v)
             .map_err(|e| format!("the vehicle's folder could not be made: {e}"))?

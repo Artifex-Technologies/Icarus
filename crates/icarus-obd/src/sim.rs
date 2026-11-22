@@ -2,6 +2,11 @@
 //! tests. It speaks like a real adapter (echo, headers, spaces, the `>` prompt, ISO-TP frames on CAN 11-bit at 500 kbit/s)
 //! and Toyota-like modules (engine, transmission, ABS, airbags, cluster). Its VIN, 5TFICARUSSIM00001, starts like a US-built
 //! Toyota truck's but cannot be a real one (real VINs never use I, O or Q).
+//!
+//! Two other makes' layouts, for the tests (`SimCar::honda`, `SimCar::gm`): a Honda-like vehicle on 29-bit CAN, its modules
+//! at 18DAxxF1 answering from 18DAF1xx, and a GM-like one on 11-bit CAN whose transmission answers at 7EA and whose body
+//! modules take requests at 24x and answer at 64x. Their module addresses beyond OBD-II's own are made up for the
+//! simulation, in each make's published form, and are in no vehicle profile.
 
 use crate::port::Port;
 use std::collections::VecDeque;
@@ -9,6 +14,40 @@ use std::io;
 use std::time::Duration;
 
 pub const VIN: &str = "5TFICARUSSIM00001";
+/// The Honda-like simulation's VIN (Honda's JHM prefix; the I makes it no real VIN).
+pub const HONDA_VIN: &str = "JHMICARUSSIM00002";
+/// The GM-like simulation's VIN (Chevrolet's 1G1 prefix; the I makes it no real VIN).
+pub const GM_VIN: &str = "1G1ICARUSSIM00003";
+/// The Ford-like simulation's VIN (Ford's 1FA prefix; the I makes it no real VIN).
+pub const FORD_VIN: &str = "1FAICARUSSIM00004";
+
+/// Which maker's layout the simulated vehicle has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Make {
+    Toyota,
+    /// 29-bit CAN (ISO 15765-4 protocol 7): OBD-II's broadcast 18DB33F1, modules at 18DAxxF1.
+    Honda,
+    /// 11-bit CAN: the transmission at 7E2/7EA, body modules at 24x answering at 64x.
+    Gm,
+    /// 11-bit CAN, and body modules on the medium-speed CAN (pins 3 and 11) that an OBDLink switches to.
+    Ford,
+}
+
+/// The Ford-like simulation's modules: (request ID, on the medium-speed CAN). The engine and ABS on the main bus, a body
+/// control module and an audio module on the medium-speed one, each answering only on its own bus.
+pub const FORD_MODULES: &[(u32, bool)] =
+    &[(0x7E0, false), (0x760, false), (0x726, true), (0x727, true)];
+
+/// The Honda-like simulation's modules (29-bit request IDs): engine, transmission, stability assist (brakes), power
+/// steering, gauges. Only the engine's and the transmission's addresses (10, 18) are OBD-II's usual ones.
+pub const HONDA_MODULES: &[u32] = &[0x18DA10F1, 0x18DA18F1, 0x18DA28F1, 0x18DA30F1, 0x18DA60F1];
+/// The GM-like simulation's modules: engine, transmission, and two body modules in the 24x range.
+pub const GM_MODULES: &[(u32, u32)] = &[
+    (0x7E0, 0x7E8),
+    (0x7E2, 0x7EA),
+    (0x241, 0x641),
+    (0x243, 0x643),
+];
 
 pub struct SimCar {
     input: Vec<u8>,
@@ -17,10 +56,16 @@ pub struct SimCar {
     headers: bool,
     spaces: bool,
     tick: u32,
-    /// Where requests go (ATSH): 7DF is OBD's broadcast to all modules, anything else one module.
-    header: u16,
+    /// Where requests go (ATSH): 7DF (18DB33F1 on 29-bit CAN) is OBD's broadcast to all modules, anything else one module.
+    header: u32,
+    /// The 29-bit header's priority byte (ATCP; 18 by default).
+    priority: u32,
     /// Only answers from this ID are shown (ATCRA).
-    filter: Option<u16>,
+    filter: Option<u32>,
+    /// Whose layout: Toyota's unless a test asks for another (`honda`, `gm`, `ford`).
+    make: Make,
+    /// On the medium-speed CAN (`STP53` on an STN chip; `ATSP` or `ATZ` goes back).
+    ms: bool,
     /// The instrument cluster answers its first trouble-code request with "response pending" (7F 19 78).
     meter_busy: bool,
     /// The engine's UDS side (700) answers its first `22 1F02` with "response pending" (7F 22 78).
@@ -28,17 +73,17 @@ pub struct SimCar {
     /// The engine runs (`sim`), or the ignition is on with the engine off (`sim:off`).
     engine_on: bool,
     /// Modules in the extended diagnostic session (10 03), which UDS output control needs.
-    extended: std::collections::HashSet<u16>,
+    extended: std::collections::HashSet<u32>,
     /// Outputs driven by a test: (module, identifier) -> control state.
-    driven: std::collections::HashMap<(u16, u16), Vec<u8>>,
+    driven: std::collections::HashMap<(u32, u16), Vec<u8>>,
     /// Modules whose codes were cleared (OBD-II 04 clears the engine and transmission; UDS/KWP 14 one module).
-    cleared: std::collections::HashSet<u16>,
+    cleared: std::collections::HashSet<u32>,
     /// In monitor mode (ATMA/STMA): the bus tick, frames streamed until any byte arrives.
     monitoring: Option<u64>,
     /// Module settings (`sim::settings`): (module, identifier) -> value.
-    settings: std::collections::HashMap<(u16, u16), Vec<u8>>,
+    settings: std::collections::HashMap<(u32, u16), Vec<u8>>,
     /// Service routines started (module, routine), whose results are then ready (`sim::services`).
-    routines: std::collections::HashSet<(u16, u16)>,
+    routines: std::collections::HashSet<(u32, u16)>,
     /// CAN auto-formatting (ATCAF, on by default): requests get ISO-TP's length byte added, and in monitor mode a frame whose
     /// first byte is 01-07 is read as an ISO-TP single frame and cut to that length, as a real adapter does.
     caf: bool,
@@ -82,7 +127,10 @@ impl SimCar {
             spaces: true,
             tick: 0,
             header: 0x7DF,
+            priority: 0x18,
             filter: None,
+            make: Make::Toyota,
+            ms: false,
             meter_busy: true,
             data_busy: true,
             engine_on: true,
@@ -103,6 +151,92 @@ impl SimCar {
             vin: VIN.to_string(),
             cea: None,
         }
+    }
+
+    /// The Honda-like vehicle: OBD-II on 29-bit CAN, modules at 18DAxxF1 (`HONDA_MODULES`), the engine with P0171 and the
+    /// stability assist with C0210.
+    pub fn honda() -> SimCar {
+        SimCar {
+            make: Make::Honda,
+            header: 0x18DB_33F1,
+            vin: HONDA_VIN.to_string(),
+            ..SimCar::new()
+        }
+    }
+
+    /// The GM-like vehicle: 11-bit CAN, the transmission at 7E2 (answering at 7EA), body modules at 241 and 243 answering
+    /// at 641 and 643 (`GM_MODULES`), the body control module with B1234.
+    pub fn gm() -> SimCar {
+        SimCar {
+            make: Make::Gm,
+            vin: GM_VIN.to_string(),
+            ..SimCar::new()
+        }
+    }
+
+    /// The Ford-like vehicle (`FORD_MODULES`), behind an OBDLink (an STN chip, which switches to the medium-speed CAN)
+    /// when `stn`, else behind a plain ELM327.
+    pub fn ford(stn: bool) -> SimCar {
+        SimCar {
+            make: Make::Ford,
+            stn,
+            vin: FORD_VIN.to_string(),
+            ..SimCar::new()
+        }
+    }
+
+    /// OBD-II's broadcast ID on this vehicle's CAN.
+    pub(crate) fn functional(&self) -> u32 {
+        if self.make == Make::Honda {
+            0x18DB_33F1
+        } else {
+            0x7DF
+        }
+    }
+
+    /// The engine computer's request ID.
+    fn engine(&self) -> u32 {
+        if self.make == Make::Honda {
+            0x18DA_10F1
+        } else {
+            0x7E0
+        }
+    }
+
+    /// Where a module asked at `tx` answers from: 29-bit 18DAxxF1 from 18DAF1xx, GM's body range 400 higher, else tx + 8.
+    fn answer_id(&self, tx: u32) -> u32 {
+        match tx {
+            t if t > 0x7FF => (t & 0xFFFF_0000) | ((t & 0xFF) << 8) | ((t >> 8) & 0xFF),
+            t @ 0x240..=0x24F if self.make == Make::Gm => t + 0x400,
+            t => t + 8,
+        }
+    }
+
+    /// Where the module asked at `to` answers from, the gateway's modules included (750 from 758).
+    pub(crate) fn answer_id_of(&self, to: u32) -> u32 {
+        match self.gateway() {
+            Some(g) if g == to => g + 8,
+            _ => self.answer_id(to),
+        }
+    }
+
+    /// The answer ID of an OBD-II broadcast answer, from the Toyota-like layout's 7E8 (engine) and 7E9 (transmission).
+    fn obd_answer_id(&self, from: &str) -> u32 {
+        let id = u32::from_str_radix(from, 16).unwrap_or(0x7E8);
+        match (self.make, id) {
+            (Make::Honda, 0x7E8) => 0x18DA_F110,
+            (Make::Honda, _) => 0x18DA_F118,
+            (Make::Gm, 0x7E9) => 0x7EA,
+            (_, id) => id,
+        }
+    }
+
+    /// A header as the adapter prints it: three digits, or a 29-bit one's four bytes (spaced when spaces are on).
+    fn header_text(&self, id: u32) -> String {
+        if id <= 0x7FF {
+            return format!("{id:03X}");
+        }
+        self.hex(&id.to_be_bytes())
     }
 
     /// The same vehicle answering another VIN: one that is not the simulated vehicle, for the read-only lock (`lock`).
@@ -419,12 +553,12 @@ impl SimCar {
 
     fn answer(&mut self, req: &[u8]) -> Vec<String> {
         self.tick += 1;
-        if self.header == 0x750 {
+        if self.header == 0x750 && self.make == Make::Toyota {
             // the gateway: only a frame with a module's address byte reaches a module behind it
             let Some(a) = self.cea else {
                 return vec!["NO DATA".into()];
             };
-            let Some(p) = self.module(0x7500 | a as u16, req) else {
+            let Some(p) = self.module(0x7500 | a as u32, req) else {
                 return vec!["NO DATA".into()];
             };
             if self.filter.is_some_and(|f| f != 0x758) || !self.headers {
@@ -432,24 +566,26 @@ impl SimCar {
             }
             return self.ext_frames("758", a, &p);
         }
-        let mut msgs: Vec<(String, Vec<u8>)> = if self.header == 0x7DF {
+        let mut msgs: Vec<(u32, Vec<u8>)> = if self.header == self.functional() {
             self.broadcast(req)
                 .into_iter()
-                .map(|(h, p)| (h.to_string(), p))
+                .map(|(h, p)| (self.obd_answer_id(h), p))
                 .collect()
         } else {
             self.module(self.header, req)
-                .map(|p| (format!("{:03X}", self.header + 8), p))
+                .map(|p| (self.answer_id(self.header), p))
                 .into_iter()
                 .collect()
         };
         if let Some(f) = self.filter {
-            msgs.retain(|(h, _)| *h == format!("{f:03X}"));
+            msgs.retain(|(h, _)| *h == f);
         }
         if msgs.is_empty() {
             return vec!["NO DATA".into()];
         }
-        msgs.iter().flat_map(|(h, p)| self.frames(h, p)).collect()
+        msgs.iter()
+            .flat_map(|(h, p)| self.frames(&self.header_text(*h), p))
+            .collect()
     }
 
     /// The answers to an OBD-II request to every module (7DF), for a simulated J2534 device: (answer ID, message).
@@ -460,7 +596,7 @@ impl SimCar {
 
     /// One module's answers to a request sent to it alone, for a simulated J2534 device: a "response pending" (7F xx 78) is
     /// followed by the real answer, as a module does (the simulated ELM327 leaves asking again to its caller).
-    pub fn module_answers(&mut self, tx: u16, req: &[u8]) -> Vec<Vec<u8>> {
+    pub fn module_answers(&mut self, tx: u32, req: &[u8]) -> Vec<Vec<u8>> {
         self.tick += 1;
         let Some(first) = self.module(tx, req) else {
             return vec![];
@@ -471,25 +607,83 @@ impl SimCar {
         vec![first]
     }
 
+    /// The gateway whose modules take an address byte first in each frame (Toyota's 750), on this layout.
+    pub fn gateway(&self) -> Option<u32> {
+        (self.make == Make::Toyota).then_some(0x750)
+    }
+
+    /// Every message a request sent on CAN ID `to` (with the address byte `ext` first, for a module behind the gateway)
+    /// brings back, for a simulated CAN interface: (answer ID, the address byte, message). OBD-II's broadcast is answered by
+    /// every module that has an answer; a module that says "response pending" (7F xx 78) follows it with its answer.
+    pub fn can_answers(
+        &mut self,
+        to: u32,
+        ext: Option<u8>,
+        req: &[u8],
+    ) -> Vec<(u32, Option<u8>, Vec<u8>)> {
+        self.tick += 1;
+        if to == self.functional() && ext.is_none() {
+            return self
+                .broadcast(req)
+                .into_iter()
+                .map(|(h, p)| (self.obd_answer_id(h), None, p))
+                .collect();
+        }
+        let (key, from) = match (self.gateway(), ext) {
+            (Some(g), Some(a)) if g == to => (0x7500 | a as u32, g + 8),
+            (_, None) => (to, self.answer_id(to)),
+            _ => return vec![],
+        };
+        let Some(first) = self.module(key, req) else {
+            return vec![];
+        };
+        let mut out = vec![(from, ext, first.clone())];
+        if first.len() >= 3 && first[0] == 0x7F && first[2] == 0x78 {
+            out.extend(self.module(key, req).map(|p| (from, ext, p)));
+        }
+        out
+    }
+
     /// One module's answer to a request sent to it alone: the engine and transmission speak UDS (the transmission refuses
     /// the code status mask FF and takes 2F), the ABS only KWP2000 (as many Toyota modules do), the airbag and instrument
     /// cluster UDS, the air conditioning only ISO 14230's `13` for its codes. Anything else is "not supported" (7F) or
     /// silence.
-    fn module(&mut self, tx: u16, req: &[u8]) -> Option<Vec<u8>> {
+    fn module(&mut self, tx: u32, req: &[u8]) -> Option<Vec<u8>> {
         let refuse = |code: u8| Some(vec![0x7F, req[0], code]);
-        let (part, uds, codes): (&[u8], bool, &[u8]) = match tx {
-            0x7E0 => (b"89661-ICARUS", true, &[0x01, 0x71, 0x00, 0x09]),
-            0x7E1 => (b"35010-ICARUS", true, &[]),
+        let engine = self.engine();
+        let ms = self.ms;
+        if ms && self.make != Make::Ford {
+            return None; // nothing of the other layouts is on a medium-speed CAN
+        }
+        let (part, uds, codes): (&[u8], bool, &[u8]) = match (self.make, tx) {
+            // the Ford-like layout (`FORD_MODULES`): each module answers on its own bus only
+            (Make::Ford, 0x7E0) if !ms => (b"ICARUS-FORD-PCM", true, &[0x01, 0x71, 0x00, 0x09]),
+            (Make::Ford, 0x760) if !ms => (b"ICARUS-FORD-ABS", true, &[]),
+            (Make::Ford, 0x726) if ms => (b"ICARUS-FORD-BCM", true, &[0x93, 0x42, 0x00, 0x09]),
+            (Make::Ford, 0x727) if ms => (b"ICARUS-FORD-ACM", true, &[]),
+            (Make::Toyota, 0x7E0) => (b"89661-ICARUS", true, &[0x01, 0x71, 0x00, 0x09]),
+            (Make::Toyota, 0x7E1) => (b"35010-ICARUS", true, &[]),
             // the engine and transmission computers' own diagnostic addresses (UDS), beside OBD-II's 7E0/7E1
-            0x700 => (b"89663-ICARUS", true, &[]),
-            0x701 => (b"89535-ICARUS", true, &[]),
-            0x7B0 => (b"89540-ICARUS", false, &[0x52, 0x41, 0x60]),
-            0x780 => (b"89170-ICARUS", true, &[]),
-            0x7C0 => (b"83800-ICARUS", true, &[]),
-            0x7C4 => (b"88650-ICARUS", false, &[0x94, 0x21]),
+            (Make::Toyota, 0x700) => (b"89663-ICARUS", true, &[]),
+            (Make::Toyota, 0x701) => (b"89535-ICARUS", true, &[]),
+            (Make::Toyota, 0x7B0) => (b"89540-ICARUS", false, &[0x52, 0x41, 0x60]),
+            (Make::Toyota, 0x780) => (b"89170-ICARUS", true, &[]),
+            (Make::Toyota, 0x7C0) => (b"83800-ICARUS", true, &[]),
+            (Make::Toyota, 0x7C4) => (b"88650-ICARUS", false, &[0x94, 0x21]),
             // behind the gateway at 750 (keys above any 11-bit ID): the main body module (40), tire pressure (2A)
-            0x7540 => (b"89221-ICARUS", true, &[0x92, 0x34, 0x00, 0x09]),
-            0x752A => (b"42607-ICARUS", true, &[]),
+            (Make::Toyota, 0x7540) => (b"89221-ICARUS", true, &[0x92, 0x34, 0x00, 0x09]),
+            (Make::Toyota, 0x752A) => (b"42607-ICARUS", true, &[]),
+            // the Honda-like layout (`HONDA_MODULES`): engine with P0171, stability assist with C0210
+            (Make::Honda, 0x18DA_10F1) => (b"37820-ICARUS", true, &[0x01, 0x71, 0x00, 0x09]),
+            (Make::Honda, 0x18DA_18F1) => (b"28100-ICARUS", true, &[]),
+            (Make::Honda, 0x18DA_28F1) => (b"57100-ICARUS", true, &[0x42, 0x10, 0x00, 0x09]),
+            (Make::Honda, 0x18DA_30F1) => (b"39980-ICARUS", true, &[]),
+            (Make::Honda, 0x18DA_60F1) => (b"78100-ICARUS", true, &[]),
+            // the GM-like layout (`GM_MODULES`): the body control module with B1234
+            (Make::Gm, 0x7E0) => (b"ICARUS-GM-ECM", true, &[0x01, 0x71, 0x00, 0x09]),
+            (Make::Gm, 0x7E2) => (b"ICARUS-GM-TCM", true, &[]),
+            (Make::Gm, 0x241) => (b"ICARUS-GM-BCM", true, &[0x92, 0x34, 0x00, 0x09]),
+            (Make::Gm, 0x243) => (b"ICARUS-GM-EBCM", true, &[]),
             _ => return None,
         };
         let codes: &[u8] = if self.cleared.contains(&tx) {
@@ -497,6 +691,23 @@ impl SimCar {
         } else {
             codes
         };
+        // several identifiers in one read (22 hi lo hi lo...: longer than a CAN frame from three on, STPX on an OBDLink):
+        // one answer with each identifier the module has and its value, in the order asked
+        if uds && req.len() > 3 && req[0] == 0x22 && req.len() % 2 == 1 {
+            let mut out = vec![0x62];
+            for d in req[1..].chunks(2) {
+                if let Some(a) = self.module(tx, &[0x22, d[0], d[1]]) {
+                    if a.first() == Some(&0x62) {
+                        out.extend_from_slice(&a[1..]);
+                    }
+                }
+            }
+            return if out.len() > 1 {
+                Some(out)
+            } else {
+                refuse(0x31)
+            };
+        }
         match (req, uds) {
             ([0x14, 0xFF, 0xFF, 0xFF], true) | ([0x14, 0xFF, 0x00], false) => {
                 if self.engine_on {
@@ -571,7 +782,7 @@ impl SimCar {
             ([0x3E, 0x00], true) => Some(vec![0x7E, 0x00]),
             ([0x3E, 0x00], false) => refuse(0x12),
             ([0x3E, 0x01], false) => Some(vec![0x7E]),
-            ([0x01, pid], _) if tx == 0x7E0 => self
+            ([0x01, pid], _) if tx == engine => self
                 .engine_pid(*pid)
                 .map(|d| [&[0x41, *pid][..], &d].concat()),
             ([0x19, 0x02, 0xFF], true) if tx == 0x7E1 => refuse(0x31),
@@ -659,7 +870,7 @@ impl SimCar {
             ([0x22, 0xF1, 0x88], true) => {
                 Some([&[0x62, 0xF1, 0x88][..], b"ICARUS-SW-0001"].concat())
             }
-            ([0x22, 0xF1, 0x90], true) if tx == 0x7E0 => {
+            ([0x22, 0xF1, 0x90], true) if tx == engine => {
                 Some([&[0x62, 0xF1, 0x90][..], self.vin.as_bytes()].concat())
             }
             // the cluster's as-built block (Ford's configuration identifiers DE00-DE02, made up)
@@ -674,6 +885,9 @@ impl SimCar {
     /// Answers to OBD's broadcast (7DF), from every module that has one.
     fn broadcast(&mut self, req: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
         let mut msgs: Vec<(&'static str, Vec<u8>)> = Vec::new();
+        if self.ms {
+            return msgs; // OBD-II is on the main bus only
+        }
         match req {
             [0x01, pids @ ..] if pids.len() > 1 => {
                 // several PIDs (CAN, up to six): one answer per module with each PID it has, in the order asked
@@ -788,7 +1002,8 @@ impl SimCar {
             "ATZ" => {
                 (self.echo, self.headers, self.spaces) = (true, false, true);
                 (self.caf, self.csm, self.cmm) = (true, !self.loud, u8::from(self.loud));
-                (self.header, self.filter) = (0x7DF, None);
+                (self.header, self.filter, self.priority) = (self.functional(), None, 0x18);
+                self.ms = false;
                 vec!["".into(), "ELM327 v1.5".into()]
             }
             "ATI" => vec!["ELM327 v1.5".into()],
@@ -804,6 +1019,7 @@ impl SimCar {
                 self.spaces = c.ends_with('1');
                 ok
             }
+            "ATDPN" if self.make == Make::Honda => vec!["A7".into()],
             "ATDPN" => vec!["A6".into()],
             "ATMA" | "STMA" => {
                 if c == "STMA" && !self.stn {
@@ -818,6 +1034,37 @@ impl SimCar {
             "STCMM0" | "STCMM1" if self.stn => {
                 self.cmm = u8::from(c.ends_with('1'));
                 ok
+            }
+            // the medium-speed CAN (ISO 15765, 11-bit, 125 kbit/s on pins 3 and 11); ATSP goes back to the main bus
+            "STP53" if self.stn => {
+                self.ms = true;
+                ok
+            }
+            // one long request, split into frames by the adapter: STPX H:header,D:data[,R:answers]
+            _ if c.starts_with("STPX") && self.stn => {
+                let field = |k: &str| {
+                    c[4..]
+                        .split(',')
+                        .find_map(|f| f.strip_prefix(k).map(str::to_string))
+                };
+                let req = field("D:").filter(|d| d.len() % 2 == 0).and_then(|d| {
+                    (0..d.len())
+                        .step_by(2)
+                        .map(|i| u8::from_str_radix(&d[i..i + 2], 16).ok())
+                        .collect::<Option<Vec<u8>>>()
+                });
+                match (
+                    field("H:").and_then(|h| u32::from_str_radix(&h, 16).ok()),
+                    req,
+                ) {
+                    (Some(h), Some(req)) if !req.is_empty() => {
+                        let kept = std::mem::replace(&mut self.header, h);
+                        let r = self.answer(&req);
+                        self.header = kept;
+                        r
+                    }
+                    _ => vec!["?".into()],
+                }
             }
             "ATCAF0" | "ATCAF1" => {
                 self.caf = c.ends_with('1');
@@ -842,30 +1089,50 @@ impl SimCar {
                 }
                 Err(_) => vec!["?".into()],
             },
+            // 11-bit CAN: ATSH and ATCRA take three digits; 29-bit: ATSH the header's lower three bytes (under ATCP's
+            // priority byte), ATCRA all four
             _ if c.starts_with("ATSH") || c.starts_with("ATCRA") => {
-                match u16::from_str_radix(&c[if c.starts_with("ATSH") { 4 } else { 5 }..], 16) {
-                    Ok(id) if id <= 0x7FF => {
-                        if c.starts_with("ATSH") {
-                            self.header = id;
-                        } else {
-                            self.filter = Some(id);
-                        }
+                let sh = c.starts_with("ATSH");
+                let digits = &c[if sh { 4 } else { 5 }..];
+                let wide = self.make == Make::Honda;
+                match (u32::from_str_radix(digits, 16), digits.len(), wide, sh) {
+                    (Ok(id), 3, false, true) => {
+                        self.header = id;
+                        ok
+                    }
+                    (Ok(id), 3, false, false) => {
+                        self.filter = Some(id);
+                        ok
+                    }
+                    (Ok(id), 6, true, true) => {
+                        self.header = self.priority << 24 | id;
+                        ok
+                    }
+                    (Ok(id), 8, true, false) if id <= 0x1FFF_FFFF => {
+                        self.filter = Some(id);
                         ok
                     }
                     _ => vec!["?".into()],
                 }
             }
+            _ if c.starts_with("ATCP") && c.len() == 6 => match u32::from_str_radix(&c[4..], 16) {
+                Ok(p) if p <= 0x1F => {
+                    self.priority = p;
+                    // the header's other bytes stay; its priority follows
+                    self.header = p << 24 | (self.header & 0xFF_FFFF);
+                    ok
+                }
+                _ => vec!["?".into()],
+            },
             _ if c.starts_with("ATFCSH") || c.starts_with("ATFCSD") || c.starts_with("ATFCSM") => {
                 ok
             }
             "ATRV" => vec!["12.6V".into()],
-            _ if c.starts_with("ATL")
-                || c.starts_with("ATSP")
-                || c.starts_with("ATST")
-                || c.starts_with("ATAT") =>
-            {
+            _ if c.starts_with("ATSP") => {
+                self.ms = false; // an OBD-II protocol: the main bus
                 ok
             }
+            _ if c.starts_with("ATL") || c.starts_with("ATST") || c.starts_with("ATAT") => ok,
             _ if c.starts_with("AT") || c.starts_with("ST") => vec!["?".into()],
             _ if !c.is_empty()
                 && c.len().is_multiple_of(2)
@@ -875,7 +1142,10 @@ impl SimCar {
                     .step_by(2)
                     .map(|i| u8::from_str_radix(&c[i..i + 2], 16).unwrap())
                     .collect();
-                if self.caf {
+                if self.caf && req.len() > if self.cea.is_some() { 6 } else { 7 } {
+                    // more than one CAN frame carries: an ELM327 sends single frames only
+                    vec!["?".into()]
+                } else if self.caf {
                     self.answer(&req)
                 } else {
                     // auto-formatting off: the bytes go out as the whole frame, so the first is read as ISO-TP's length

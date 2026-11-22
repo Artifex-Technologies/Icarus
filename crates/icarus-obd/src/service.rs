@@ -115,7 +115,7 @@ fn send(link: &mut dyn Link, s: &ServiceDef, data: &[u8]) -> Result<Answer, Stri
     check(data)?;
     for _ in 0..8 {
         let a = link
-            .request_to(s.module, s.rx(), data)
+            .request_to(s.module.into(), s.rx().into(), data)
             .map_err(|e| e.to_string())?;
         let Some(a) = a.into_iter().last() else {
             return Err("no answer".into());

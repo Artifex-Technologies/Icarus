@@ -65,7 +65,7 @@ fn name_from_profile(imp: &mut moddata::Imported, all: &[vehicles::Profile]) {
         if let Some(a) = p
             .modules
             .iter()
-            .find(|a| u32::from(a.tx) == m.module.tx && a.ext.is_none())
+            .find(|a| a.tx == m.module.tx && a.ext.is_none())
         {
             m.module.name = a.name.clone();
         }
@@ -1520,8 +1520,8 @@ mod tests {
         }
         fn request_to(
             &mut self,
-            _: u16,
-            rx: u16,
+            _: u32,
+            rx: u32,
             _: &[u8],
         ) -> Result<Vec<icarus_obd::elm::Answer>, icarus_obd::elm::ObdError> {
             self.1 += 1;

@@ -135,16 +135,17 @@ pub fn collect(
             .profile
             .clone()
             .or_else(|| vehicles::find(profiles, "generic").ok().cloned());
+        let protocol = elm.protocol();
         for m in profile
             .as_ref()
-            .map(vehicles::candidates)
+            .map(|p| vehicles::candidates_on(p, protocol))
             .unwrap_or_default()
         {
-            if m.unreachable().is_some() {
+            if m.unreachable(elm.reach()).is_some() {
                 continue;
             }
             let (tx, rx) = (m.tx, m.rx());
-            let found = uds::at(elm, m.ext, |l| {
+            let found = match uds::at_module(elm, &m, |l| {
                 if !uds::present(l, tx, rx)? {
                     return Ok(None);
                 }
@@ -152,7 +153,11 @@ pub fn collect(
                     uds::module_identity(l, tx, rx)?,
                     uds::module_dtcs(l, tx, rx)?,
                 )))
-            })?;
+            }) {
+                // the adapter refused to switch to that module's bus
+                Err(crate::elm::ObdError::Adapter(_)) if m.on_ms_can() => continue,
+                r => r?,
+            };
             if let Some((id, codes)) = found {
                 d.modules.push((m, id, codes));
             }

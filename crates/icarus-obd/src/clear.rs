@@ -86,7 +86,9 @@ pub fn clear_module(elm: &mut dyn Link, tx: u16, rx: u16, dialect: Dialect) -> R
     };
     check(req)?;
     for _ in 0..4 {
-        let a = elm.request_to(tx, rx, req).map_err(|e| e.to_string())?;
+        let a = elm
+            .request_to(tx.into(), rx.into(), req)
+            .map_err(|e| e.to_string())?;
         let Some(a) = a.into_iter().last() else {
             return Err("no answer".into());
         };

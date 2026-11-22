@@ -28,7 +28,7 @@ pub fn session_text(
     );
     let seen: Vec<&crate::vehicles::ModuleAddr> = modules
         .iter()
-        .filter(|m| a.ids.contains_key(&(m.tx as u32)) || a.ids.contains_key(&(m.rx() as u32)))
+        .filter(|m| a.ids.contains_key(&m.tx) || a.ids.contains_key(&m.rx()))
         .collect();
     if !seen.is_empty() {
         t += "## Modules on the bus (as Icarus's profile names them)\n\n";

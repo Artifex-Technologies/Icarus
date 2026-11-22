@@ -1,8 +1,10 @@
 name = "Ford / Lincoln / Mercury"
 wmi = ["1F", "2F", "3F", "1L", "2L", "3L", "5L", "MAJ"]
 notes = """Ford names modules by function (PCM, ABS, RCM, IPC, BCM...), as FORScan shows them. Older models put body modules on
-a second, medium-speed CAN bus (pins 3 and 11): OBDLink adapters can switch to it, Icarus cannot yet. Configuration
-(as-built data: tire size, features) lives in these modules; Icarus only reads for now."""
+a second, medium-speed CAN bus (pins 3 and 11): a module written down with bus = "ms-can" is asked there through an
+OBDLink (an STN chip; Icarus switches it over and back), not through a plain ELM327. Which modules sit on that bus varies
+by model, so none is listed here until seen on a vehicle. Configuration (as-built data: tire size, features) lives in
+these modules; Icarus only reads for now."""
 
 [[module]]
 tx = 0x7E0

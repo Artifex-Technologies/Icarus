@@ -159,13 +159,12 @@ impl<D: PassThru> Link for PassThruLink<D> {
         )
     }
 
-    fn request_to(&mut self, tx: u16, rx: u16, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
+    fn request_to(&mut self, tx: u32, rx: u32, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
         if tx > 0x7FF || rx > 0x7FF {
             return Err(ObdError::Adapter(format!(
                 "{tx:X}/{rx:X} are not 11-bit CAN IDs"
             )));
         }
-        let (tx, rx) = (tx as u32, rx as u32);
         if !self.pairs.contains(&(tx, rx)) {
             self.dev.flow_control(self.channel, tx, rx)?;
             self.pairs.push((tx, rx));
@@ -263,7 +262,7 @@ impl PassThru for SimPassThru {
                 .collect()
         } else {
             self.car
-                .module_answers(msg.id as u16, &msg.data)
+                .module_answers(msg.id, &msg.data)
                 .into_iter()
                 .map(|d| (msg.id + 8, d))
                 .collect()
