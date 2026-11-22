@@ -312,10 +312,11 @@ the saved file is for study only. No family's description ships yet: each needs 
 
 ## Sarina (or another assistant)
 
-`icarus mcp` is a Model Context Protocol server on stdin/stdout with five read-only tools: `explain_code` (what a code
+`icarus mcp` is a Model Context Protocol server on stdin/stdout with seven read-only tools: `explain_code` (what a code
 means, where to start, the parts), `vehicle_check` (identity, check-engine light, readiness, codes explained, freeze frame,
-current values, on-board test results), `vehicle_modules` (every module's codes), `learning_sessions` (what Icarus saved
-while watching another tool) and `tires_gears`. Nothing that clears
+current values, on-board test results), `vehicle_modules` (every module's codes), `module_data` (each module's own
+values), `learning_sessions` (what Icarus saved while watching another tool), `drive_logs` (recorded drives summarized)
+and `tires_gears`. Nothing that clears
 codes, runs a test or writes is offered to a model; a test fails if a tool with such a name appears. The adapter comes from
 `ICARUS_ADAPTER` in the server's environment (`sim` for the simulated vehicle). For Sarina, a definition file of its own:
 

@@ -6,7 +6,8 @@ What other projects may rely on from Icarus, and what it uses from them. One sec
 
 ### `icarus mcp` (a Model Context Protocol server)
 
-stdin/stdout, five read-only tools: `explain_code`, `vehicle_check`, `vehicle_modules`, `learning_sessions`, `tires_gears`.
+stdin/stdout, seven read-only tools: `explain_code`, `vehicle_check`, `vehicle_modules`, `module_data`, `learning_sessions`,
+`drive_logs`, `tires_gears`.
 Nothing that clears codes, runs a test or writes is offered to a model; a test fails if a tool with such a name appears. The
 adapter comes from `ICARUS_ADAPTER` in the server's environment (`sim` for the simulated vehicle). The definition file for an
 assistant and the tools in full: [README.md](../README.md), "Sarina (or another assistant)".
