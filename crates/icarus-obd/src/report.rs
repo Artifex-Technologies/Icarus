@@ -38,6 +38,9 @@ pub struct Diagnosis {
     pub codes: Vec<(&'static str, String, Vec<String>)>,
     pub freeze: Vec<FreezeFrame>,
     pub modules: Vec<ModuleFound>,
+    /// Per module (by request ID), the identification values it refused (and why) or did not answer
+    /// (`uds::module_identity_notes`): what a vehicle does not give is as telling as what it gives.
+    pub module_notes: Vec<(u32, Vec<String>)>,
     pub snapshot: Vec<(u8, f64)>,
     /// On-board test results (service 06; CAN vehicles).
     pub selftests: Vec<crate::mode06::TestResult>,
@@ -154,7 +157,7 @@ pub fn collect(
                     return Ok(None);
                 }
                 Ok(Some((
-                    uds::module_identity(l, tx, rx)?,
+                    uds::module_identity_notes(l, tx, rx)?,
                     uds::module_dtcs(l, tx, rx)?,
                 )))
             }) {
@@ -162,7 +165,10 @@ pub fn collect(
                 Err(crate::elm::ObdError::Adapter(_)) if m.on_ms_can() => continue,
                 r => r?,
             };
-            if let Some((id, codes)) = found {
+            if let Some(((id, notes), codes)) = found {
+                if !notes.is_empty() {
+                    d.module_notes.push((m.tx, notes));
+                }
                 d.modules.push((m, id, codes));
             }
         }
@@ -346,6 +352,11 @@ pub fn markdown(d: &Diagnosis) -> String {
             let _ = writeln!(o, "### {:03X} {}\n", m.tx, m.name);
             for (what, v) in id {
                 let _ = writeln!(o, "- {what}: {v}");
+            }
+            for (_, notes) in d.module_notes.iter().filter(|(tx, _)| *tx == m.tx) {
+                for n in notes {
+                    let _ = writeln!(o, "- identification: {n}");
+                }
             }
             match codes {
                 Err(why) => {
