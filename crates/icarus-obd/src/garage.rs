@@ -1,6 +1,10 @@
 //! The vehicles Icarus has met, by VIN, with the name the person gave them ("2017 Toyota Tacoma 3.5L V6"): a VIN gives the
 //! model year and the maker, not the model, and searches and parts links need the model. Kept in
-//! `~/.config/icarus/garage.toml` on this computer only.
+//! `~/.config/icarus/garage.toml` on this computer only (a flat VIN = "year make model engine" map, as older installs have it).
+//!
+//! What the person adds beyond that (a name of their own, the sub-model, drivetrain, transmission, the miles) is a vehicle's
+//! `Details`, kept beside it in `~/.config/icarus/details.toml`: the Garage page lists a vehicle as
+//! "2017 Toyota Tacoma V6 - Old Blue" (`label`).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -35,6 +39,45 @@ impl Described {
         }
     }
 
+    /// The engine's size from the rest ("3.5L" of "3.5L V6"), if it gives one.
+    pub fn engine_size(&self) -> String {
+        self.rest
+            .split_whitespace()
+            .find(|w| is_size(w))
+            .unwrap_or("")
+            .to_string()
+    }
+
+    /// The engine without its size ("V6" of "3.5L V6").
+    pub fn engine(&self) -> String {
+        self.rest
+            .split_whitespace()
+            .filter(|w| !is_size(w))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// From its parts as the Garage page edits them: the size before the engine, as a description reads ("3.5L V6").
+    pub fn from_parts(
+        year: Option<u16>,
+        make: &str,
+        model: &str,
+        engine_size: &str,
+        engine: &str,
+    ) -> Described {
+        let rest = [engine_size.trim(), engine.trim()]
+            .into_iter()
+            .filter(|p| !p.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        Described {
+            year,
+            make: make.trim().to_string(),
+            model: model.trim().to_string(),
+            rest,
+        }
+    }
+
     pub fn name(&self) -> String {
         [
             self.year.map(|y| y.to_string()).unwrap_or_default(),
@@ -47,6 +90,121 @@ impl Described {
         .collect::<Vec<_>>()
         .join(" ")
     }
+}
+
+/// An engine size as written: "3.5L", "2.7l", "5.0L".
+fn is_size(w: &str) -> bool {
+    let Some(n) = w.strip_suffix('L').or_else(|| w.strip_suffix('l')) else {
+        return false;
+    };
+    !n.is_empty() && n.parse::<f64>().is_ok_and(|v| v > 0.0 && v < 20.0)
+}
+
+/// What the person tells about a vehicle beyond its description: a name of their own and what a VIN does not give.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Details {
+    /// a name of their own ("Old Blue")
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub nickname: String,
+    /// the trim ("TRD Off-Road")
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sub_model: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub drivetrain: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub transmission: String,
+    /// the odometer as last written down
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub miles: Option<u32>,
+}
+
+/// How the Garage page lists a vehicle: "2017 Toyota Tacoma V6 - Old Blue" (year, make, model and engine, then its own name);
+/// the parts it has, else its own name, else the VIN.
+pub fn label(vin: &str, described: Option<&Described>, details: &Details) -> String {
+    let car = described
+        .map(|d| {
+            let engine = if d.engine().is_empty() {
+                d.engine_size()
+            } else {
+                d.engine()
+            };
+            [
+                d.year.map(|y| y.to_string()).unwrap_or_default(),
+                d.make.clone(),
+                d.model.clone(),
+                engine,
+            ]
+            .into_iter()
+            .filter(|p| !p.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+        })
+        .unwrap_or_default();
+    let own = details.nickname.trim();
+    match (car.is_empty(), own.is_empty()) {
+        (false, false) => format!("{car} - {own}"),
+        (false, true) => car,
+        (true, false) => own.to_string(),
+        (true, true) => vin.to_string(),
+    }
+}
+
+pub fn details_path() -> Option<PathBuf> {
+    crate::vehicles::user_dir().and_then(|d| d.parent().map(|p| p.join("details.toml")))
+}
+
+fn details_all(file: &Path) -> BTreeMap<String, Details> {
+    std::fs::read_to_string(file)
+        .ok()
+        .and_then(|t| toml::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+/// A vehicle's details in `file` (none saved: empty).
+pub fn details_in(file: &Path, vin: &str) -> Details {
+    details_all(file)
+        .remove(&vin.trim().to_uppercase())
+        .unwrap_or_default()
+}
+
+/// A vehicle's details (none saved: empty).
+pub fn details(vin: &str) -> Details {
+    details_path()
+        .map(|p| details_in(&p, vin))
+        .unwrap_or_default()
+}
+
+/// Saves a vehicle's details in `file` (all empty: forgotten), the text fields trimmed.
+pub fn set_details_in(file: &Path, vin: &str, d: &Details) -> Result<(), String> {
+    let tidy = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let d = Details {
+        nickname: tidy(&d.nickname),
+        sub_model: tidy(&d.sub_model),
+        drivetrain: tidy(&d.drivetrain),
+        transmission: tidy(&d.transmission),
+        miles: d.miles,
+    };
+    let mut all = details_all(file);
+    if d == Details::default() {
+        all.remove(&vin.trim().to_uppercase());
+    } else {
+        all.insert(vin.trim().to_uppercase(), d);
+    }
+    let body = toml::to_string(&all).map_err(|e| e.to_string())?;
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    let tmp = file.with_extension("tmp");
+    std::fs::write(
+        &tmp,
+        format!("# Icarus: what you told it about each vehicle (its own name, sub-model, drivetrain, transmission, miles), by VIN. On this computer only.\n{body}"),
+    )
+    .and_then(|_| std::fs::rename(&tmp, file))
+    .map_err(|e| format!("{}: {e}", file.display()))
+}
+
+pub fn set_details(vin: &str, d: &Details) -> Result<(), String> {
+    set_details_in(&details_path().ok_or("no config folder")?, vin, d)
 }
 
 /// The vehicle library: `~/Documents/Icarus/Vehicles`, a folder per vehicle.
@@ -350,6 +508,84 @@ pub fn set_tires(vin: &str, t: Option<TireSetting>) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_vehicle_is_listed_with_its_own_name_and_its_details_are_kept() {
+        use super::*;
+        let d = Described::parse("2017 Toyota Tacoma 3.5L V6");
+        assert_eq!(
+            (d.engine_size().as_str(), d.engine().as_str()),
+            ("3.5L", "V6")
+        );
+        assert_eq!(
+            Described::from_parts(d.year, &d.make, &d.model, "3.5L", "V6").name(),
+            "2017 Toyota Tacoma 3.5L V6"
+        );
+        assert_eq!(
+            Described::parse("2015 Ford F-150 2.7l EcoBoost").engine_size(),
+            "2.7l"
+        );
+        assert_eq!(Described::parse("2010 Honda Civic").engine(), "");
+        let mine = Details {
+            nickname: "Old Blue".into(),
+            ..Details::default()
+        };
+        assert_eq!(
+            label("VIN1", Some(&d), &mine),
+            "2017 Toyota Tacoma V6 - Old Blue"
+        );
+        assert_eq!(
+            label("VIN1", Some(&d), &Details::default()),
+            "2017 Toyota Tacoma V6"
+        );
+        assert_eq!(
+            label(
+                "VIN1",
+                Some(&Described::parse("2017 Toyota Tacoma 3.5L")),
+                &mine
+            ),
+            "2017 Toyota Tacoma 3.5L - Old Blue"
+        );
+        assert_eq!(label("VIN1", None, &mine), "Old Blue");
+        assert_eq!(label("VIN1", None, &Details::default()), "VIN1");
+
+        let dir = std::env::temp_dir().join(format!("icarus-details-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let f = dir.join("details.toml");
+        assert_eq!(
+            details_in(&f, "vin1"),
+            Details::default(),
+            "nothing saved yet"
+        );
+        let all = Details {
+            nickname: "  Old Blue ".into(),
+            sub_model: "TRD  Off-Road".into(),
+            drivetrain: "4WD".into(),
+            transmission: "6-speed automatic".into(),
+            miles: Some(84_200),
+        };
+        set_details_in(&f, "vin1", &all).unwrap();
+        let back = details_in(&f, "VIN1");
+        assert_eq!(
+            (back.nickname.as_str(), back.sub_model.as_str(), back.miles),
+            ("Old Blue", "TRD Off-Road", Some(84_200))
+        );
+        // another vehicle beside it, then this one emptied: forgotten, the other kept
+        set_details_in(
+            &f,
+            "VIN2",
+            &Details {
+                nickname: "Grandma's".into(),
+                ..Details::default()
+            },
+        )
+        .unwrap();
+        set_details_in(&f, "VIN1", &Details::default()).unwrap();
+        assert_eq!(details_in(&f, "VIN1"), Details::default());
+        assert_eq!(details_in(&f, "VIN2").nickname, "Grandma's");
+        assert!(!std::fs::read_to_string(&f).unwrap().contains("VIN1"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn tire_settings_by_vin() {
         let dir = std::env::temp_dir().join(format!("icarus-tires-{}", std::process::id()));

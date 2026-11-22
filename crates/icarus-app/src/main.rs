@@ -316,6 +316,9 @@ struct App {
     /// Vehicle folders: (VIN, name, folder), the one shown, a path to import.
     garage: Vec<(String, Option<String>, std::path::PathBuf)>,
     garage_sel: Option<usize>,
+    /// Each vehicle's details (its own name, sub-model ...), by VIN, as saved; and the shown one's fields being edited.
+    garage_details: std::collections::BTreeMap<String, garage::Details>,
+    garage_edit: Option<GarageEdit>,
     /// The VINs whose Read-only switch is on (`icarus_obd::lock`).
     read_only: std::collections::BTreeSet<String>,
     import_path: String,
@@ -432,6 +435,8 @@ impl App {
             learn_stop_at: None,
             garage: icarus_obd::garage::vehicles(),
             garage_sel: None,
+            garage_details: Default::default(),
+            garage_edit: None,
             read_only: icarus_obd::lock::read_only(),
             import_path: String::new(),
             t_stock: "P265/65R17".into(),
@@ -2386,8 +2391,16 @@ impl App {
             if ui.button("Refresh").clicked() {
                 self.garage = garage::vehicles();
                 self.read_only = icarus_obd::lock::read_only();
+                self.garage_details.clear();
+                self.garage_edit = None;
             }
         });
+        for (vin, _, _) in &self.garage {
+            if !self.garage_details.contains_key(vin) {
+                self.garage_details
+                    .insert(vin.clone(), garage::details(vin));
+            }
+        }
         if self.garage.is_empty() {
             ui.label("No vehicles yet: each vehicle connected gets a folder here (OEM tunes, Custom tunes, Definitions, Reports, Logs).");
             return;
@@ -2396,9 +2409,12 @@ impl App {
             self.garage_sel = Some(0);
         }
         let mut action: Option<(&'static str, std::path::PathBuf, std::path::PathBuf)> = None;
+        let mut save: Option<GarageEdit> = None;
         ui.columns(2, |cols| {
             for (i, (vin, name, _)) in self.garage.iter().enumerate() {
-                if cols[0].selectable_label(self.garage_sel == Some(i), name.clone().unwrap_or_else(|| vin.clone())).clicked() {
+                let details = self.garage_details.get(vin).cloned().unwrap_or_default();
+                let shown = garage::label(vin, name.as_deref().map(Described::parse).as_ref(), &details);
+                if cols[0].selectable_label(self.garage_sel == Some(i), shown).clicked() {
                     self.garage_sel = Some(i);
                 }
             }
@@ -2407,16 +2423,59 @@ impl App {
                 ui.label("Choose a vehicle.");
                 return;
             };
-            ui.label(RichText::new(name.unwrap_or_else(|| vin.clone())).size(17.0).strong());
-            ui.label(RichText::new(format!("VIN {vin}")).weak());
-            let mut locked = self.read_only.contains(&vin);
-            if ui
-                .checkbox(&mut locked, "Read-Only")
-                .on_hover_text("On: Icarus clears, tests and changes nothing on this vehicle. Codes, live data, module values, reports and recordings still work.")
-                .changed()
-            {
-                action = Some((if locked { "lock" } else { "unlock" }, dir.clone(), std::path::PathBuf::from(&vin)));
+            let described = name.as_deref().map(Described::parse);
+            let saved = GarageEdit::of(&vin, described.as_ref(), &self.garage_details.get(&vin).cloned().unwrap_or_default());
+            if self.garage_edit.as_ref().is_none_or(|e| e.vin != vin) {
+                self.garage_edit = Some(saved.clone());
             }
+            let edit = self.garage_edit.as_mut().expect("just set");
+            // its own name at the top, edited where it is shown
+            let title = ui.add(
+                egui::TextEdit::singleline(&mut edit.nickname)
+                    .font(egui::FontId::proportional(19.0))
+                    .hint_text("Give it a name")
+                    .desired_width(f32::INFINITY),
+            );
+            let enter = title.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            ui.add_space(4.0);
+            egui::Grid::new(("garage-details", &vin)).num_columns(2).spacing(vec2(12.0, 6.0)).show(ui, |ui| {
+                let field = |ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str| {
+                    ui.label(RichText::new(label).weak());
+                    ui.add(egui::TextEdit::singleline(value).hint_text(hint).desired_width(220.0));
+                    ui.end_row();
+                };
+                field(ui, "Year", &mut edit.year, "not set");
+                field(ui, "Make", &mut edit.make, "not set");
+                field(ui, "Model", &mut edit.model, "not set");
+                field(ui, "Sub-model", &mut edit.sub_model, "not set");
+                field(ui, "Engine size", &mut edit.engine_size, "not set (3.5L)");
+                field(ui, "Engine", &mut edit.engine, "not set (V6)");
+                field(ui, "Drivetrain", &mut edit.drivetrain, "not set");
+                field(ui, "Transmission", &mut edit.transmission, "not set");
+                field(ui, "Miles", &mut edit.miles, "not set");
+                ui.label(RichText::new("VIN").weak());
+                ui.label(&vin);
+                ui.end_row();
+                ui.label(RichText::new("Read-Only").weak());
+                let mut locked = self.read_only.contains(&vin);
+                if switch(ui, pal, &mut locked)
+                    .on_hover_text("On: Icarus clears, tests and changes nothing on this vehicle. Codes, live data, module values, reports and recordings still work.")
+                    .changed()
+                {
+                    action = Some((if locked { "lock" } else { "unlock" }, dir.clone(), std::path::PathBuf::from(&vin)));
+                }
+                ui.end_row();
+            });
+            let changed = *edit != saved;
+            ui.horizontal(|ui| {
+                if ui.add_enabled(changed, egui::Button::new("Save")).clicked() || (enter && changed) {
+                    save = Some(edit.clone());
+                }
+                if changed && ui.button("Undo changes").clicked() {
+                    *edit = saved.clone();
+                }
+            });
+            ui.add_space(6.0);
             if ui.button("Open the folder").clicked() {
                 action = Some(("open", dir.clone(), dir.clone()));
             }
@@ -2485,6 +2544,34 @@ impl App {
                 })
                 .map(|f| dir.join("Definitions").join(f.0))
         };
+        if let Some(e) = save {
+            match e.parts() {
+                Ok((name, details)) => {
+                    let was = self
+                        .garage
+                        .iter()
+                        .find(|(v, _, _)| *v == e.vin)
+                        .and_then(|(_, n, _)| n.clone())
+                        .unwrap_or_default();
+                    // the description only when it changed (the vehicle's folder follows it)
+                    let r = if Described::parse(&was).name() != name {
+                        garage::set(&e.vin, &name)
+                    } else {
+                        Ok(())
+                    };
+                    match r.and_then(|_| garage::set_details(&e.vin, &details)) {
+                        Ok(()) => {
+                            self.garage = garage::vehicles();
+                            self.garage_details.remove(&e.vin);
+                            self.garage_edit = None;
+                            self.status = "Saved.".into();
+                        }
+                        Err(err) => self.error = Some(err),
+                    }
+                }
+                Err(err) => self.error = Some(err),
+            }
+        }
         match action {
             Some(("open", p, _)) => {
                 let _ = std::process::Command::new("xdg-open").arg(&p).spawn();
@@ -3645,6 +3732,97 @@ fn row(ui: &mut egui::Ui, k: &str, v: &str) {
     ui.label(RichText::new(k).weak());
     ui.label(v);
     ui.end_row();
+}
+
+/// The Garage page's fields for the vehicle shown, as typed (saved with Save, or Enter in its name).
+#[derive(Clone, Debug, Default, PartialEq)]
+struct GarageEdit {
+    vin: String,
+    nickname: String,
+    year: String,
+    make: String,
+    model: String,
+    sub_model: String,
+    engine_size: String,
+    engine: String,
+    drivetrain: String,
+    transmission: String,
+    miles: String,
+}
+
+impl GarageEdit {
+    fn of(vin: &str, described: Option<&Described>, d: &garage::Details) -> GarageEdit {
+        let dd = described.cloned().unwrap_or_default();
+        GarageEdit {
+            vin: vin.to_string(),
+            nickname: d.nickname.clone(),
+            year: dd.year.map(|y| y.to_string()).unwrap_or_default(),
+            make: dd.make.clone(),
+            model: dd.model.clone(),
+            sub_model: d.sub_model.clone(),
+            engine_size: dd.engine_size(),
+            engine: dd.engine(),
+            drivetrain: d.drivetrain.clone(),
+            transmission: d.transmission.clone(),
+            miles: d.miles.map(|m| m.to_string()).unwrap_or_default(),
+        }
+    }
+
+    /// The description (garage.toml) and the details (details.toml) these fields make, or what is wrong with them.
+    fn parts(&self) -> Result<(String, garage::Details), String> {
+        let year = match self.year.trim() {
+            "" => None,
+            y => Some(
+                y.parse::<u16>()
+                    .ok()
+                    .filter(|y| (1950..=2100).contains(y))
+                    .ok_or(format!("{y}: a year, like 2017"))?,
+            ),
+        };
+        let miles = match self.miles.trim().replace([',', ' '], "") {
+            m if m.is_empty() => None,
+            m => Some(
+                m.parse::<u32>()
+                    .map_err(|_| format!("{}: the miles, a whole number", self.miles.trim()))?,
+            ),
+        };
+        let name = Described::from_parts(
+            year,
+            &self.make,
+            &self.model,
+            &self.engine_size,
+            &self.engine,
+        )
+        .name();
+        let details = garage::Details {
+            nickname: self.nickname.clone(),
+            sub_model: self.sub_model.clone(),
+            drivetrain: self.drivetrain.clone(),
+            transmission: self.transmission.clone(),
+            miles,
+        };
+        Ok((name, details))
+    }
+}
+
+/// An on/off switch, drawn as Settings draws its switches (the accent colour when on).
+fn switch(ui: &mut egui::Ui, pal: &theme::Palette, on: &mut bool) -> egui::Response {
+    let (rect, mut resp) = ui.allocate_exact_size(vec2(44.0, 24.0), Sense::click());
+    if resp.clicked() {
+        *on = !*on;
+        resp.mark_changed();
+    }
+    let t = ui.ctx().animate_bool(resp.id, *on);
+    let track = if *on { pal.accent } else { pal.hover };
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(12), track);
+    let x = egui::lerp(rect.left() + 12.0..=rect.right() - 12.0, t);
+    ui.painter().circle_filled(
+        egui::pos2(x, rect.center().y),
+        9.0,
+        if *on { pal.on_accent() } else { Color32::WHITE },
+    );
+    resp
 }
 
 fn card(ui: &mut egui::Ui, pal: &theme::Palette, title: &str, body: impl FnOnce(&mut egui::Ui)) {
