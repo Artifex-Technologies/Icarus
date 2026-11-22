@@ -635,7 +635,7 @@ impl Elm {
         let watched = self
             .ok_commands(&["ATCAF0"])
             .and_then(|()| self.ok_commands(&filter))
-            .and_then(|()| self.watch(each));
+            .and_then(|()| self.watch(only.is_some(), each));
         if only.is_some() {
             // back to no filter (STN) or automatic receive filtering; the next request sets its own (ATCRA with its address)
             let _ = self.ok_commands(if stn { &["STFCP"] } else { &["ATCRA"] });
@@ -661,8 +661,18 @@ impl Elm {
 
     /// Monitor mode itself: the command, then lines until `each` says stop or the adapter stops by itself. The only byte
     /// sent after the command is the one that ends monitoring, which the adapter does not put on the bus.
-    fn watch(&mut self, mut each: impl FnMut(&str) -> bool) -> Result<String, ObdError> {
-        let cmd = if self.stn.is_some() { "STMA" } else { "ATMA" };
+    /// `filtered`: an STN watches with STM, which follows its pass filters; its STMA shows everything whatever they say (the
+    /// truck, 2026-11-22: with STMA the filter changed nothing). An ELM327's ATMA follows ATCF/ATCM.
+    fn watch(
+        &mut self,
+        filtered: bool,
+        mut each: impl FnMut(&str) -> bool,
+    ) -> Result<String, ObdError> {
+        let cmd = match (self.stn.is_some(), filtered) {
+            (true, true) => "STM",
+            (true, false) => "STMA",
+            (false, _) => "ATMA",
+        };
         self.drain_left_over()?;
         self.port.send(format!("{cmd}\r").as_bytes())?;
         let mut buf: Vec<u8> = Vec::new();

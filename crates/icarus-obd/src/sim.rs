@@ -87,8 +87,10 @@ pub struct SimCar {
     /// The STN's pass filter (STFAP pattern, mask) for its own monitor, STMA (ATMA follows ATCF/ATCM); STFCP clears it.
     sf: u32,
     sm: u32,
-    /// The monitor running is the STN's (STMA).
+    /// The monitor running is the STN's (STMA or STM).
     stma: bool,
+    /// It is STM, which follows the STN's pass filter; STMA shows everything.
+    stm_filtered: bool,
     /// Module settings (`sim::settings`): (module, identifier) -> value.
     settings: std::collections::HashMap<(u32, u16), Vec<u8>>,
     /// Service routines started (module, routine), whose results are then ready (`sim::services`).
@@ -152,6 +154,7 @@ impl SimCar {
             sf: 0,
             sm: 0,
             stma: false,
+            stm_filtered: false,
             routines: Default::default(),
             settings: [((0x7C0, 0xA001), vec![0x01]), ((0x7B0, 0x20), vec![0x00])]
                 .into_iter()
@@ -1035,13 +1038,14 @@ impl SimCar {
             }
             "ATDPN" if self.make == Make::Honda => vec!["A7".into()],
             "ATDPN" => vec!["A6".into()],
-            "ATMA" | "STMA" => {
-                if c == "STMA" && !self.stn {
+            "ATMA" | "STMA" | "STM" => {
+                if c != "ATMA" && !self.stn {
                     self.say(&["?".to_string()]);
                     return;
                 }
                 self.monitoring = Some(0);
-                self.stma = c == "STMA";
+                self.stma = c != "ATMA";
+                self.stm_filtered = c == "STM";
                 self.acked |= !self.csm || (self.stn && self.cmm != 0);
                 return;
             }
@@ -1236,10 +1240,10 @@ impl Port for SimCar {
                         .split_whitespace()
                         .next()
                         .and_then(|i| u32::from_str_radix(i, 16).ok());
-                    let (f, m) = if self.stma {
-                        (self.sf, self.sm)
-                    } else {
-                        (self.cf, self.cm)
+                    let (f, m) = match (self.stma, self.stm_filtered) {
+                        (true, true) => (self.sf, self.sm),
+                        (true, false) => (0, 0),
+                        (false, _) => (self.cf, self.cm),
                     };
                     if m != 0 && id.is_some_and(|i| i & m != f & m) {
                         continue;
@@ -1631,7 +1635,8 @@ mod monitor_tests {
         }
     }
 
-    /// The filter on an ELM327 (ATCF/ATCM, for ATMA) or an STN (STFAP, for its STMA; ATCF alone let the whole bus through).
+    /// The filter on an ELM327 (ATCF/ATCM, for ATMA) or an STN (STFAP, watched with STM: its STMA shows everything, and
+    /// ATCF alone let the whole bus through).
     fn monitoring_keeps_only_7xx(car: SimCar) {
         let mut elm = crate::elm::Elm::connect(Box::new(car)).unwrap();
         let id = |line: &str| {
