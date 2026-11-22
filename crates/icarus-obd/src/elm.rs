@@ -597,6 +597,17 @@ impl Elm {
     /// link comes back as itself. If the watch went well but `ATCAF1` failed, the watch's result comes back, saying that
     /// auto-formatting goes back on before the next request (it stays pending until it does).
     pub fn monitor(&mut self, each: impl FnMut(&str) -> bool) -> Result<String, ObdError> {
+        self.monitor_ids(None, each)
+    }
+
+    /// `monitor`, the adapter passing only IDs that match `only` (filter, mask) when given: `(0x700, 0x700)` keeps the
+    /// diagnostic messages (700-7FF), what another tool asks and the modules answer, when the whole bus is more than the
+    /// adapter's serial link carries (it stops with BUFFER FULL). The filter goes back to automatic afterwards (ATCRA).
+    pub fn monitor_ids(
+        &mut self,
+        only: Option<(u32, u32)>,
+        each: impl FnMut(&str) -> bool,
+    ) -> Result<String, ObdError> {
         self.bus_to(Bus::Main)?;
         self.point_at_everyone()?;
         let silent: &[&str] = if self.stn.is_some() {
@@ -612,9 +623,18 @@ impl Elm {
             other => other,
         })?;
         self.raw_frames = true;
+        let filter: Vec<String> = only
+            .map(|(f, m)| vec![format!("ATCF{f:03X}"), format!("ATCM{m:03X}")])
+            .unwrap_or_default();
+        let filter: Vec<&str> = filter.iter().map(String::as_str).collect();
         let watched = self
             .ok_commands(&["ATCAF0"])
+            .and_then(|()| self.ok_commands(&filter))
             .and_then(|()| self.watch(each));
+        if only.is_some() {
+            // back to automatic receive filtering; the next request sets its own (ATCRA with its address) anyway
+            let _ = self.ok_commands(&["ATCRA"]);
+        }
         // put back whatever happened to the watch; on failure `raw_frames` stays set and the next request tries again
         match (watched, self.format_frames()) {
             (Err(e), _) => Err(e),

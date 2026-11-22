@@ -80,6 +80,10 @@ pub struct SimCar {
     cleared: std::collections::HashSet<u32>,
     /// In monitor mode (ATMA/STMA): the bus tick, frames streamed until any byte arrives.
     monitoring: Option<u64>,
+    /// The monitor's CAN filter (ATCF) and mask (ATCM): a watched frame shows when its ID matches the filter in the mask's bits;
+    /// a mask of 0 shows every frame. ATCRA and ATZ put both back.
+    cf: u32,
+    cm: u32,
     /// Module settings (`sim::settings`): (module, identifier) -> value.
     settings: std::collections::HashMap<(u32, u16), Vec<u8>>,
     /// Service routines started (module, routine), whose results are then ready (`sim::services`).
@@ -138,6 +142,8 @@ impl SimCar {
             driven: Default::default(),
             cleared: Default::default(),
             monitoring: None,
+            cf: 0,
+            cm: 0,
             routines: Default::default(),
             settings: [((0x7C0, 0xA001), vec![0x01]), ((0x7B0, 0x20), vec![0x00])]
                 .into_iter()
@@ -1074,7 +1080,22 @@ impl SimCar {
                 self.csm = c.ends_with('1');
                 ok
             }
+            _ if c.starts_with("ATCF")
+                && c.len() == 7
+                && u32::from_str_radix(&c[4..], 16).is_ok() =>
+            {
+                self.cf = u32::from_str_radix(&c[4..], 16).unwrap_or(0);
+                ok
+            }
+            _ if c.starts_with("ATCM")
+                && c.len() == 7
+                && u32::from_str_radix(&c[4..], 16).is_ok() =>
+            {
+                self.cm = u32::from_str_radix(&c[4..], 16).unwrap_or(0);
+                ok
+            }
             "ATCRA" => {
+                (self.cf, self.cm) = (0, 0);
                 self.filter = None;
                 ok
             }
@@ -1185,6 +1206,13 @@ impl Port for SimCar {
             if self.output.len() < 4096 {
                 std::thread::sleep(Duration::from_millis(5));
                 for line in self.bus_tick(t) {
+                    let id = line
+                        .split_whitespace()
+                        .next()
+                        .and_then(|i| u32::from_str_radix(i, 16).ok());
+                    if self.cm != 0 && id.is_some_and(|i| i & self.cm != self.cf & self.cm) {
+                        continue;
+                    }
                     let line = self.monitored(&line);
                     self.output.extend(line.as_bytes());
                     self.output.push_back(b'\r');
@@ -1560,6 +1588,35 @@ mod monitor_tests {
             engine.iter().all(|l| l.split_whitespace().count() == 1 + 4),
             "{engine:?}"
         );
+    }
+
+    #[test]
+    fn monitoring_can_keep_only_the_diagnostic_messages() {
+        let mut elm = crate::elm::Elm::connect(Box::new(SimCar::new())).unwrap();
+        let id = |line: &str| {
+            line.split_whitespace()
+                .next()
+                .and_then(|i| u32::from_str_radix(i, 16).ok())
+        };
+        let mut ids = vec![];
+        elm.monitor_ids(Some((0x700, 0x700)), |line| {
+            ids.extend(id(line));
+            ids.len() < 6
+        })
+        .unwrap();
+        assert!(
+            !ids.is_empty() && ids.iter().all(|i| (0x700..=0x7FF).contains(i)),
+            "{ids:X?}"
+        );
+        // afterwards the whole bus again, and requests work
+        let mut all = vec![];
+        elm.monitor(|line| {
+            all.extend(id(line));
+            all.len() < 12
+        })
+        .unwrap();
+        assert!(all.iter().any(|i| *i < 0x700), "{all:X?}");
+        assert!(crate::link::Link::request(&mut elm, &[0x01, 0x00]).is_ok());
     }
 
     #[test]

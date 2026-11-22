@@ -106,10 +106,12 @@ Module data (definition files; nothing is sent to a vehicle):
                                              is checked and written back; the samples show what it decodes to
 
 Bus (watching only: nothing is sent onto the bus):
-  icarus bus watch (--adapter A | --can can0) [--seconds N] [--raw]
+  icarus bus watch (--adapter A | --can can0) [--seconds N] [--raw] [--diagnostic]
                                              every ID with its rate and changing bytes, diagnostic messages in words, and
                                              actuator tests another tool runs, as entries for the vehicle's file. A is also
-                                             slcan:/dev/ttyACM0[@baud][#bitrate] (an SLCAN adapter, opened listen-only)
+                                             slcan:/dev/ttyACM0[@baud][#bitrate] (an SLCAN adapter, opened listen-only);
+                                             --diagnostic keeps only IDs 700-7FF (another tool's requests and the answers),
+                                             for a bus busier than an ELM/STN adapter's serial link carries
   icarus learn (--adapter A | --can can0) [--seconds N] [--ask-sarina]
                                              learn from another tool working on the vehicle (a Y-cable on the OBD port):
                                              type what you are about to do in it and press Enter (a mark), then do it;
@@ -1922,13 +1924,20 @@ fn watch_slcan(
 fn bus_watch(a: &[String], serial: &OpenSerial<'_>) -> Result<bus::Analyzer, String> {
     if a.first().map(String::as_str) != Some("watch") {
         return Err(
-            "usage: icarus bus watch (--adapter A | --can can0 | --adapter slcan:/dev/ttyACM0) [--seconds N] [--raw]"
+            "usage: icarus bus watch (--adapter A | --can can0 | --adapter slcan:/dev/ttyACM0) [--seconds N] [--raw] [--diagnostic]"
                 .into(),
         );
     }
     // --raw is a switch of its own: taken out before the options are read (parse_args refused it as unknown, so it never worked)
     let raw = a.iter().any(|x| x == "--raw");
-    let rest: Vec<String> = a[1..].iter().filter(|x| *x != "--raw").cloned().collect();
+    // --diagnostic: only IDs 700-7FF (another tool's requests and the modules' answers), when the whole bus is more than an
+    // ELM/STN adapter's serial link carries
+    let diagnostic = a.iter().any(|x| x == "--diagnostic");
+    let rest: Vec<String> = a[1..]
+        .iter()
+        .filter(|x| *x != "--raw" && *x != "--diagnostic")
+        .cloned()
+        .collect();
     let args = parse_args(&rest, &["adapter", "can", "seconds"])?;
     let secs: f64 = args
         .opt("seconds")
@@ -1996,7 +2005,7 @@ fn bus_watch(a: &[String], serial: &OpenSerial<'_>) -> Result<bus::Analyzer, Str
                 icarus_obd::drivelog::adapter_line(&icarus_obd::link::Link::adapter(&elm))
             );
         }
-        elm.monitor(|line| {
+        elm.monitor_ids(diagnostic.then_some((0x700, 0x700)), |line| {
             let f = bus::parse_line(line, proto, start.elapsed().as_secs_f64());
             step(&mut an, f)
         })
