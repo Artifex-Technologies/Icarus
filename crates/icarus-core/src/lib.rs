@@ -10,4 +10,5 @@ pub mod expr;
 pub mod moddata;
 pub mod rom;
 pub mod tires;
+pub mod version;
 pub mod xdf;

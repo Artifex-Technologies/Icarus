@@ -302,7 +302,23 @@ icarus checksums IMAGE.bin FILE.checksums.toml                                  
 
 Every edit is saved as a new file (`IMAGE-edited.bin` beside it, or in the vehicle's Custom tunes folder when the image is in
 its OEM tunes folder; `--out` to choose), never over a file. In the window, the Maps page does the same: click a cell, type a
-value (or step it with - and +), Undo this map / Undo all, Save.
+value (or step it with - and +), Undo this map / Undo all, Save. A table shows as its cells, as a 2D graph (a line per
+row) or, for a map, as a 3D surface that turns as you drag it; pointing at a value reads it, clicking it picks that cell to
+change.
+
+**Versions.** "Stock" is the original image, never changed; a version is a name and the changes against it, kept as a
+small file (`<image> - <name>.version.toml`, the changed bytes with the original's bytes beside them, the original named
+by its size and CRC-32) in the same folder as edits, never over another file. On the Maps page, "Keep the edits as a
+version" saves one, the Versions row shows what each changes against stock (the changed maps listed, their cells
+outlined), and "Edit from it" goes on editing from a version. A version only applies to the image it was made from, and
+makes the full image again whenever asked; its checksums are corrected then, as for any edit.
+
+```sh
+icarus version new STOCK.bin TUNED.bin "Cold start" --def DEF   # keep what a tune changes as a version of stock
+icarus version list STOCK.bin                                     # stock and its versions
+icarus diff STOCK.bin "STOCK - Cold start.version.toml" --def DEF # what the version changes, map by map
+icarus version image STOCK.bin "STOCK - Cold start.version.toml" --def DEF   # its full image, as a new file
+```
 
 Formulas that use other values (a TunerPro `VAR` linked to another element, or to a raw number at an address) are worked
 out with those values as they are in the image, the values they use first. Editing such a cell stores the number that shows
@@ -345,8 +361,8 @@ vehicle's name, and Save report; **Modules** scans every module for its identity
 button is held; **Settings** shows each module setting's value and changes it (asks first; undo puts the last change
 back); **Learning** watches another tool and names what it learned; **Bus** shows every ID and message; **Maps** opens a
 definition and an image
-(and a second image to compare: it starts on the first map the second one changed, changed cells outlined). Start options:
-`--connect [--adapter A] --page modules --scan`, `--live`, `--maps DEF.xdf|.a2l IMAGE.bin [SECOND.bin]`, `--learn [--mark TEXT]
+(and a second image or a version to compare: it starts on the first map that changed, changed cells outlined; tables as cells, a 2D graph or a 3D surface; versions of the image). Start options:
+`--connect [--adapter A] --page modules --scan`, `--live`, `--maps DEF.xdf|.a2l IMAGE.bin [SECOND.bin|VERSION.version.toml]` with `--map NAME` and `--view cells|2d|3d`, `--learn [--mark TEXT]
 [--learn-seconds N]` (a learning watch at start, for demonstrations).
 
 ## What it does today
