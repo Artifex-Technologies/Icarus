@@ -169,6 +169,8 @@ pub struct Logs {
     /// (the background `icarus obd live --csv`, or Record here) is read again every couple of seconds.
     stamp: Option<std::time::SystemTime>,
     checked: Option<std::time::Instant>,
+    /// The column shown over engine speed and load (None: the first fuel trim, else timing).
+    grid_value: Option<usize>,
 }
 
 fn changed(p: &std::path::Path) -> Option<std::time::SystemTime> {
@@ -270,7 +272,12 @@ impl Logs {
                 }
                 ui.add_space(10.0);
                 match series {
-                    Ok(s) => charts(ui, pal, s, &mut self.hover),
+                    Ok(s) => {
+                        charts(ui, pal, s, &mut self.hover);
+                        ui.add_space(10.0);
+                        grid_ui(ui, pal, s, &mut self.grid_value);
+                        track_ui(ui, pal, s);
+                    }
                     Err(e) => {
                         ui.label(RichText::new(format!("Nothing to draw: {e}")).color(pal.red));
                     }
@@ -278,6 +285,105 @@ impl Logs {
             });
         });
     }
+}
+
+/// A colour from blue (low) through green to red (high) for `x` in 0..1.
+fn heat(x: f64) -> Color32 {
+    let x = x.clamp(0.0, 1.0) as f32;
+    let (r, g, b) = if x < 0.5 {
+        (0.0, x * 2.0, 1.0 - x * 2.0)
+    } else {
+        ((x - 0.5) * 2.0, 1.0 - (x - 0.5) * 2.0, 0.0)
+    };
+    Color32::from_rgb((60.0 + 180.0 * r) as u8, (60.0 + 160.0 * g) as u8, (60.0 + 180.0 * b) as u8)
+}
+
+/// A value over engine speed and load (drivelog::grid): a tuner's table, each cell coloured by its mean.
+fn grid_ui(ui: &mut egui::Ui, pal: &theme::Palette, s: &Series, choice: &mut Option<usize>) {
+    let Some(_) = s.find(&["engine speed"]).zip(s.find(&["engine load"])) else {
+        return;
+    };
+    let options: Vec<usize> = (0..s.names.len())
+        .filter(|i| {
+            let n = s.names[*i].to_lowercase();
+            !n.contains("engine speed") && !n.contains("engine load") && !n.starts_with("gps")
+        })
+        .collect();
+    let default = s.find(&["short-term fuel trim", "bank 1"]).or(s.find(&["timing advance"])).or(options.first().copied());
+    let Some(mut col) = choice.or(default) else { return };
+    ui.label(RichText::new("Over engine speed and load").strong());
+    egui::ComboBox::from_id_salt("grid-value")
+        .selected_text(&s.names[col])
+        .show_ui(ui, |ui| {
+            for i in &options {
+                ui.selectable_value(&mut col, *i, &s.names[*i]);
+            }
+        });
+    *choice = Some(col);
+    let Some(g) = drivelog::grid(s, col) else {
+        ui.label(RichText::new("No readings of it with engine speed and load.").color(pal.dim));
+        return;
+    };
+    let cw = ((ui.available_width() - 60.0) / g.rpm.len().max(1) as f32).clamp(28.0, 70.0);
+    let ch = 20.0;
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(60.0 + cw * g.rpm.len() as f32, ch * (g.load.len() + 1) as f32),
+        egui::Sense::hover(),
+    );
+    let p = ui.painter_at(rect);
+    let font = egui::FontId::proportional(10.0);
+    let span = (g.max - g.min).max(1e-9);
+    for (row, cells) in g.cells.iter().enumerate() {
+        // high load at the top, as a table is read
+        let y = rect.top() + ch * (g.load.len() - 1 - row) as f32;
+        p.text(
+            egui::pos2(rect.left() + 2.0, y + ch / 2.0),
+            egui::Align2::LEFT_CENTER,
+            format!("{:.0}-{:.0} %", g.load[row], g.load[row] + drivelog::LOAD_STEP),
+            font.clone(),
+            pal.dim,
+        );
+        for (c, cell) in cells.iter().enumerate() {
+            let r = egui::Rect::from_min_size(egui::pos2(rect.left() + 60.0 + cw * c as f32, y), egui::vec2(cw - 1.0, ch - 1.0));
+            if let Some((m, _)) = cell {
+                p.rect_filled(r, 2.0, heat((m - g.min) / span));
+                p.text(r.center(), egui::Align2::CENTER_CENTER, format!("{m:.1}"), font.clone(), Color32::BLACK);
+            }
+        }
+    }
+    for (c, lo) in g.rpm.iter().enumerate() {
+        p.text(
+            egui::pos2(rect.left() + 60.0 + cw * (c as f32 + 0.5), rect.bottom() - ch / 2.0),
+            egui::Align2::CENTER_CENTER,
+            format!("{:.0}", lo),
+            font.clone(),
+            pal.dim,
+        );
+    }
+    ui.label(RichText::new(format!("Columns: engine speed from each rpm shown ({:.0} wide); rows: engine load. Each cell is the mean of its readings.", drivelog::RPM_STEP)).small().color(pal.dim));
+    ui.add_space(10.0);
+}
+
+/// The drive's GPS track (recorded with GPS: drivelog::track), coloured by GPS speed. No map is fetched: the shape only.
+fn track_ui(ui: &mut egui::Ui, pal: &theme::Palette, s: &Series) {
+    let Some(t) = drivelog::track(s) else { return };
+    ui.label(RichText::new("The drive's track (GPS)").strong());
+    let (w, h) = (
+        t.iter().map(|p| p.0).fold(0.0, f64::max).max(1.0),
+        t.iter().map(|p| p.1).fold(0.0, f64::max).max(1.0),
+    );
+    let size = egui::vec2(ui.available_width().min(520.0), 260.0);
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let p = ui.painter_at(rect);
+    p.rect_stroke(rect, 4.0, egui::Stroke::new(1.0, pal.dim), egui::StrokeKind::Inside);
+    let scale = ((size.x as f64 - 20.0) / w).min((size.y as f64 - 20.0) / h);
+    let at = |x: f64, y: f64| egui::pos2(rect.left() + 10.0 + (x * scale) as f32, rect.bottom() - 10.0 - (y * scale) as f32);
+    let top = t.iter().filter_map(|p| p.2).fold(1.0, f64::max);
+    for pair in t.windows(2) {
+        let col = pair[1].2.map(|v| heat(v / top)).unwrap_or(pal.dim);
+        p.line_segment([at(pair[0].0, pair[0].1), at(pair[1].0, pair[1].1)], egui::Stroke::new(2.5, col));
+    }
+    ui.label(RichText::new(format!("{:.1} km across, {:.1} km north to south; blue slow, red fast (top {top:.0} km/h). The positions stay in this file.", w / 1000.0, h / 1000.0)).small().color(pal.dim));
 }
 
 fn summary_ui(ui: &mut egui::Ui, pal: &theme::Palette, s: &Summary) {

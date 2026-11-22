@@ -348,7 +348,10 @@ vehicle's name, and Save report; **Modules** scans every module for its identity
 button is held; **Settings** shows each module setting's value and changes it (asks first; undo puts the last change
 back); **Learning** watches another tool and names what it learned; **Bus** shows every ID and message; **Maps** opens a
 definition and an image
-(and a second image to compare: it starts on the first map the second one changed, changed cells outlined). Start options:
+(and a second image to compare: it starts on the first map the second one changed, changed cells outlined); **Logs**
+summarizes a recording (fuel trims by driving condition), charts it on one time line, lays a chosen value out over engine
+speed and load like a tuner's table (each cell the mean of its readings), and draws the drive's GPS track coloured by speed
+when it was recorded with GPS (the shape only: no map is fetched). Start options:
 `--connect [--adapter A] --page modules --scan`, `--live`, `--maps DEF.xdf IMAGE.bin [SECOND.bin]`, `--learn [--mark TEXT]
 [--learn-seconds N]` (a learning watch at start, for demonstrations).
 

@@ -4,6 +4,7 @@
 //! sudden timing drops under load sorted into the rev limiter or a shift (RPM falls right after) and the rest. Offline: only
 //! the file is read.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// The columns a summary uses, found by their names.
@@ -111,6 +112,91 @@ impl Series {
     pub fn find(&self, words: &[&str]) -> Option<usize> {
         find(&self.names, words)
     }
+}
+
+/// A value averaged over engine speed and load, the way a tuner's table is laid out: columns of RPM (`RPM_STEP` wide),
+/// rows of load (`LOAD_STEP` %), each cell the mean of `value` over the readings that fell in it, and how many.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Grid {
+    /// The lower edges of the columns (rpm) and rows (load %).
+    pub rpm: Vec<f64>,
+    pub load: Vec<f64>,
+    /// cells[row][col]: (mean, readings).
+    pub cells: Vec<Vec<Option<(f64, usize)>>>,
+    pub min: f64,
+    pub max: f64,
+}
+
+pub const RPM_STEP: f64 = 500.0;
+pub const LOAD_STEP: f64 = 10.0;
+
+/// `value` (a column) over engine speed and engine load; None when the recording lacks either or has no reading of it.
+pub fn grid(s: &Series, value: usize) -> Option<Grid> {
+    let (r, l) = (s.find(&["engine speed"])?, s.find(&["engine load"])?);
+    let mut acc: BTreeMap<(usize, usize), (f64, usize)> = BTreeMap::new();
+    for i in 0..s.t.len() {
+        let (Some(rpm), Some(load), Some(v)) = (s.cols[r][i], s.cols[l][i], s.cols.get(value)?[i])
+        else {
+            continue;
+        };
+        if !(rpm.is_finite() && load.is_finite() && v.is_finite()) || rpm < 0.0 || load < 0.0 {
+            continue;
+        }
+        let k = ((load / LOAD_STEP) as usize, (rpm / RPM_STEP) as usize);
+        let e = acc.entry(k).or_insert((0.0, 0));
+        e.0 += v;
+        e.1 += 1;
+    }
+    let (rows, cols) = (
+        acc.keys().map(|k| k.0).max()? + 1,
+        acc.keys().map(|k| k.1).max()? + 1,
+    );
+    let mut cells = vec![vec![None; cols]; rows];
+    let (mut min, mut max) = (f64::MAX, f64::MIN);
+    for ((row, col), (sum, n)) in acc {
+        let m = sum / n as f64;
+        min = min.min(m);
+        max = max.max(m);
+        cells[row][col] = Some((m, n));
+    }
+    Some(Grid {
+        rpm: (0..cols).map(|c| c as f64 * RPM_STEP).collect(),
+        load: (0..rows).map(|r| r as f64 * LOAD_STEP).collect(),
+        cells,
+        min,
+        max,
+    })
+}
+
+/// A drive's GPS track (recorded with GPS), as points in metres east and north of the track's south-west corner (an
+/// equirectangular projection: fine over a drive's distances), each with the GPS speed there.
+pub fn track(s: &Series) -> Option<Vec<(f64, f64, Option<f64>)>> {
+    let (la, lo) = (s.find(&["gps latitude"])?, s.find(&["gps longitude"])?);
+    let sp = s.find(&["gps speed"]);
+    let pts: Vec<(f64, f64, Option<f64>)> = (0..s.t.len())
+        .filter_map(|i| {
+            let (a, o) = (s.cols[la][i]?, s.cols[lo][i]?);
+            (a.abs() <= 90.0 && o.abs() <= 180.0).then(|| (a, o, sp.and_then(|c| s.cols[c][i])))
+        })
+        .collect();
+    if pts.len() < 2 {
+        return None;
+    }
+    let lat0 = pts.iter().map(|p| p.0).fold(f64::MAX, f64::min);
+    let lon0 = pts.iter().map(|p| p.1).fold(f64::MAX, f64::min);
+    let mid = pts.iter().map(|p| p.0).sum::<f64>() / pts.len() as f64;
+    let m_per_deg = 111_320.0;
+    Some(
+        pts.into_iter()
+            .map(|(a, o, v)| {
+                (
+                    (o - lon0) * m_per_deg * mid.to_radians().cos(),
+                    (a - lat0) * m_per_deg,
+                    v,
+                )
+            })
+            .collect(),
+    )
 }
 
 /// A recording being written right now (the newest drive file changed in the last few seconds): its writer has the adapter
@@ -421,16 +507,69 @@ mod tests {
     const HEAD: &str = "time_s,\"Engine speed [rpm]\",\"Vehicle speed [km/h]\",\"Coolant temperature [°C]\",\"Short-term fuel trim, bank 1 [%]\",\"Long-term fuel trim, bank 1 [%]\",\"Short-term fuel trim, bank 2 [%]\",\"Long-term fuel trim, bank 2 [%]\",\"Timing advance [° before TDC]\",\"Mass air flow [g/s]\",\"Throttle position [%]\",\"Engine load [%]\",\"O2 sensor bank 1 sensor 2 [V]\",\"O2 sensor bank 2 sensor 2 [V]\",\"Control module voltage [V]\"";
 
     #[test]
+    fn a_value_over_rpm_and_load_and_a_track() {
+        let log = "time_s,\"Engine speed [rpm]\",\"Engine load [%]\",\"Timing advance [° before TDC]\",\"GPS latitude [°]\",\"GPS longitude [°]\",\"GPS speed [km/h]\"\n\
+                   0,700,20,10,45.0000,-110.0000,0\n\
+                   1,720,22,12,45.0000,-110.0000,0\n\
+                   2,2600,55,30,45.0009,-110.0000,40\n\
+                   3,2700,58,32,45.0009,-109.9987,50\n";
+        let s = series(log).unwrap();
+        let g = grid(&s, s.find(&["timing advance"]).unwrap()).unwrap();
+        assert_eq!((g.rpm.len(), g.load.len()), (6, 6));
+        assert_eq!(
+            g.cells[2][1],
+            Some((11.0, 2)),
+            "idle: 700-720 rpm, 20-22 % load, timing 10 and 12"
+        );
+        assert_eq!(g.cells[5][5], Some((31.0, 2)));
+        assert_eq!((g.min, g.max), (11.0, 31.0));
+        assert!(
+            grid(&series("time_s,\"x\"\n0,1\n").unwrap(), 0).is_none(),
+            "no rpm or load: no grid"
+        );
+        let t = track(&s).unwrap();
+        assert_eq!(t.len(), 4);
+        assert_eq!((t[0].0, t[0].1), (0.0, 0.0), "the south-west corner");
+        assert!(
+            (t[2].1 - 100.2).abs() < 0.5,
+            "0.0009° north is about 100 m: {}",
+            t[2].1
+        );
+        assert!(
+            (t[3].0 - 102.3).abs() < 1.0,
+            "0.0013° east at 45° is about 102 m: {}",
+            t[3].0
+        );
+        assert_eq!(t[3].2, Some(50.0));
+        assert!(track(&series("time_s,\"x\"\n0,1\n").unwrap()).is_none());
+    }
+
+    #[test]
     fn the_adapter_line_is_kept_and_skipped() {
         let log = format!(
             "{}\n{HEAD}\n0.0,650,0,90,1.0,-8.0,0.0,-4.0,15,3.0,15,16,0.78,0.74,13.6\n",
             adapter_line("ELM327 v1.4b (STN2256 v5.10.3)")
         );
-        assert_eq!(adapter_of(&log).as_deref(), Some("ELM327 v1.4b (STN2256 v5.10.3)"));
-        assert_eq!(summarize(&log).unwrap().readings, 1, "the summary reads past it");
+        assert_eq!(
+            adapter_of(&log).as_deref(),
+            Some("ELM327 v1.4b (STN2256 v5.10.3)")
+        );
+        assert_eq!(
+            summarize(&log).unwrap().readings,
+            1,
+            "the summary reads past it"
+        );
         assert_eq!(series(&log).unwrap().names.len(), 14);
-        assert_eq!(adapter_of(&format!("{HEAD}\n")), None, "older recordings have none");
-        assert_eq!(adapter_line("a\r\nb"), "# adapter: a  b", "one line, whatever the adapter says");
+        assert_eq!(
+            adapter_of(&format!("{HEAD}\n")),
+            None,
+            "older recordings have none"
+        );
+        assert_eq!(
+            adapter_line("a\r\nb"),
+            "# adapter: a  b",
+            "one line, whatever the adapter says"
+        );
     }
 
     #[test]
