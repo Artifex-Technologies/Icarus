@@ -286,7 +286,8 @@ impl Args {
 
 /// A TunerPro (.xdf) or ASAM (.a2l) definition.
 fn load_def(path: &str) -> Result<Definition, String> {
-    let p = icarus_core::def::load(std::path::Path::new(path)).map_err(|e| format!("{path}: {e}"))?;
+    let p =
+        icarus_core::def::load(std::path::Path::new(path)).map_err(|e| format!("{path}: {e}"))?;
     if !p.skipped.is_empty() {
         eprintln!(
             "note: {} element(s) of {path} were left out (first: {})",
@@ -566,7 +567,10 @@ fn cmd_checksums(a: &[String]) -> Result<(), String> {
 fn cmd_diff(a: &[String]) -> Result<(), String> {
     let args = parse_args(a, &["def"])?;
     let [orig, tuned] = args.pos.as_slice() else {
-        return Err("usage: icarus diff ORIGINAL.bin TUNED.bin|VERSION.version.toml [--def DEF.xdf|.a2l]".into());
+        return Err(
+            "usage: icarus diff ORIGINAL.bin TUNED.bin|VERSION.version.toml [--def DEF.xdf|.a2l]"
+                .into(),
+        );
     };
     let def = args.opt("def").map(load_def).transpose()?;
     let ob = load_image(orig, def.as_ref())?;
@@ -577,7 +581,11 @@ fn cmd_diff(a: &[String]) -> Result<(), String> {
             "Version \"{}\" of {}{}",
             v.name,
             orig,
-            if v.note.is_empty() { String::new() } else { format!(": {}", v.note) }
+            if v.note.is_empty() {
+                String::new()
+            } else {
+                format!(": {}", v.note)
+            }
         );
         v.apply(&ob)?
     } else {
@@ -598,10 +606,18 @@ fn diff_report(def: Option<&Definition>, ob: &[u8], tb: &[u8]) -> Result<Vec<Str
         return Ok(out);
     }
     let bytes: usize = ranges.iter().map(|r| r.len()).sum();
-    out.push(format!("{bytes} byte(s) differ in {} place(s).", ranges.len()));
+    out.push(format!(
+        "{bytes} byte(s) differ in {} place(s).",
+        ranges.len()
+    ));
     let Some(def) = def else {
         for r in ranges.iter().take(50) {
-            out.push(format!("  0x{:06X}..0x{:06X} ({} bytes)", r.start, r.end, r.len()));
+            out.push(format!(
+                "  0x{:06X}..0x{:06X} ({} bytes)",
+                r.start,
+                r.end,
+                r.len()
+            ));
         }
         return Ok(out);
     };
@@ -692,7 +708,10 @@ fn diff_report(def: Option<&Definition>, ob: &[u8], tb: &[u8]) -> Result<Vec<Str
 fn cmd_version(a: &[String]) -> Result<(), String> {
     use icarus_core::version::{self, Version};
     use std::path::Path;
-    let args = parse_args(a.get(1..).unwrap_or(&[]), &["def", "note", "out", "checksums"])?;
+    let args = parse_args(
+        a.get(1..).unwrap_or(&[]),
+        &["def", "note", "out", "checksums"],
+    )?;
     match (a.first().map(String::as_str), args.pos.as_slice()) {
         (Some("new"), [orig, tuned, name]) => {
             let def = args.opt("def").map(load_def).transpose()?;
@@ -2490,10 +2509,16 @@ mod tests {
         assert_eq!(lines[0], "1 byte(s) differ in 1 place(s).");
         assert!(lines.iter().any(|l| l == "Spark (map)"), "{lines:?}");
         assert!(
-            lines.iter().any(|l| l.trim_end() == "  at 1 / 0: 20.0 -> 22.0 deg"),
+            lines
+                .iter()
+                .any(|l| l.trim_end() == "  at 1 / 0: 20.0 -> 22.0 deg"),
             "{lines:?}"
         );
-        assert_eq!(std::fs::read(&image).unwrap(), stock, "stock stays as it was");
+        assert_eq!(
+            std::fs::read(&image).unwrap(),
+            stock,
+            "stock stays as it was"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
