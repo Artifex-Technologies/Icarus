@@ -216,7 +216,14 @@ impl Port for FdPort {
         let ms = timeout.as_millis().min(i32::MAX as u128) as i32;
         let r = unsafe { libc::poll(&mut p, 1, ms) };
         if r < 0 {
-            return Err(io::Error::last_os_error());
+            // a signal (Ctrl+C) woke the wait: nothing has come yet, and the caller looks at its interrupt flag (ICA-83: a bus
+            // watch ended with "Interrupted system call" and no summary)
+            let e = io::Error::last_os_error();
+            return if e.kind() == io::ErrorKind::Interrupted {
+                Ok(0)
+            } else {
+                Err(e)
+            };
         }
         if r == 0 {
             return Ok(0);
@@ -229,7 +236,12 @@ impl Port for FdPort {
         }
         let n = unsafe { libc::read(self.0.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
         if n < 0 {
-            return Err(io::Error::last_os_error());
+            let e = io::Error::last_os_error();
+            return if e.kind() == io::ErrorKind::Interrupted {
+                Ok(0)
+            } else {
+                Err(e)
+            };
         }
         Ok(n as usize)
     }
@@ -351,7 +363,9 @@ impl Port for TcpPort {
             Err(e)
                 if matches!(
                     e.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                        | io::ErrorKind::Interrupted
                 ) =>
             {
                 Ok(0)
@@ -363,6 +377,33 @@ impl Port for TcpPort {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_signal_while_waiting_is_nothing_yet_not_an_error() {
+        // a pipe stands in for the serial port; SIGUSR1 (handled, not restarted) interrupts the wait as Ctrl+C does
+        extern "C" fn on_signal(_: libc::c_int) {}
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let mut port = super::FdPort(unsafe {
+            <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fds[0])
+        });
+        unsafe {
+            let mut sa: libc::sigaction = std::mem::zeroed();
+            sa.sa_sigaction = on_signal as extern "C" fn(libc::c_int) as usize;
+            sa.sa_flags = 0; // no SA_RESTART: the wait comes back with EINTR
+            libc::sigaction(libc::SIGUSR1, &sa, std::ptr::null_mut());
+        }
+        let me = unsafe { libc::pthread_self() };
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            unsafe { libc::pthread_kill(me, libc::SIGUSR1) };
+        });
+        let mut buf = [0u8; 16];
+        let r = super::Port::recv(&mut port, &mut buf, Duration::from_secs(2));
+        t.join().unwrap();
+        assert_eq!(r.unwrap(), 0, "an interrupted wait is nothing yet");
+        unsafe { libc::close(fds[1]) };
+    }
+
     use super::*;
 
     #[test]
