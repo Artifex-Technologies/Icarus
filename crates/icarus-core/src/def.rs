@@ -1,10 +1,44 @@
 //! A definition: what the numbers in a ROM mean. Each element names a place in the image (a table, a single value, or a flag
 //! bit), how its numbers are stored, and the formula from stored number to real unit. The same model is filled from a TunerPro
-//! `.xdf` (see `xdf`) and, later, from A2L files and Icarus's own definitions.
+//! `.xdf` (see `xdf`) and an ASAM `.a2l` (see `a2l`); `load` reads either.
 
 use crate::expr::{Expr, ExprError};
 use crate::rom::{Cell, Rom, RomError};
 use std::fmt;
+use std::path::Path;
+
+/// A parsed definition and what was left out of it, each with the reason.
+#[derive(Debug)]
+pub struct Parsed {
+    pub definition: Definition,
+    pub skipped: Vec<String>,
+}
+
+/// Reads a definition file: a TunerPro `.xdf` or an ASAM `.a2l`, told apart by what the file holds (XML, or ASAP2's
+/// `/begin` blocks) rather than by its name. Errors do not repeat the path.
+pub fn load(path: &Path) -> Result<Parsed, DefError> {
+    let bytes = std::fs::read(path).map_err(|e| DefError::Missing(e.to_string()))?;
+    parse_any(&bytes)
+}
+
+/// `load` for bytes already read.
+pub fn parse_any(bytes: &[u8]) -> Result<Parsed, DefError> {
+    // A2L files are often Latin-1 rather than UTF-8: each byte is then its own character
+    let text = match std::str::from_utf8(bytes) {
+        Ok(s) => s.to_string(),
+        Err(_) => bytes.iter().map(|b| *b as char).collect(),
+    };
+    let t = text.trim_start_matches('\u{feff}').trim_start();
+    if t.starts_with('<') {
+        crate::xdf::parse(t)
+    } else if crate::a2l::looks_like(t) {
+        crate::a2l::parse(t)
+    } else {
+        Err(DefError::Bad(
+            "neither a TunerPro definition (.xdf) nor an ASAM one (.a2l)".into(),
+        ))
+    }
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct Definition {

@@ -346,7 +346,7 @@ button is held; **Settings** shows each module setting's value and changes it (a
 back); **Learning** watches another tool and names what it learned; **Bus** shows every ID and message; **Maps** opens a
 definition and an image
 (and a second image to compare: it starts on the first map the second one changed, changed cells outlined). Start options:
-`--connect [--adapter A] --page modules --scan`, `--live`, `--maps DEF.xdf IMAGE.bin [SECOND.bin]`, `--learn [--mark TEXT]
+`--connect [--adapter A] --page modules --scan`, `--live`, `--maps DEF.xdf|.a2l IMAGE.bin [SECOND.bin]`, `--learn [--mark TEXT]
 [--learn-seconds N]` (a learning watch at start, for demonstrations).
 
 ## What it does today
@@ -357,13 +357,22 @@ settings (both above).
 **Files** (no vehicle needed):
 
 ```sh
-icarus def FILE.xdf [--find TEXT]                 # what a TunerPro definition describes; --find searches map names
-icarus show IMAGE.bin FILE.xdf NAME               # one map, curve or value from an image, in real units
-icarus diff ORIGINAL.bin TUNED.bin --def FILE.xdf # what a tune changed, map by map and cell by cell
+icarus def DEF [--find TEXT]                      # what a definition describes; --find searches map names
+icarus show IMAGE.bin DEF NAME                    # one map, curve or value from an image, in real units
+icarus diff ORIGINAL.bin TUNED.bin --def DEF      # what a tune changed, map by map and cell by cell
 ```
 
 `diff` is the quickest way to learn from an existing tune: give it the stock image and a modified one, and it names every
 map that changed and shows each cell's old and new value.
+
+A definition (DEF) is a TunerPro `.xdf` or an ASAM MCD-2 MC `.a2l` (ASAP2, what calibration tools use); Icarus tells them
+apart by their contents, and both work the same everywhere (`def`, `show`, `set`, `diff`, the Maps page). From an A2L it
+reads `CHARACTERISTIC`s of type `VALUE`, `CURVE` and `MAP` with their record layouts (`FNC_VALUES` row or column order,
+`AXIS_PTS_X/Y`, alignment, byte order), `COMPU_METHOD` `IDENTICAL`, `LINEAR` and `RAT_FUNC` (the form with one real value
+per stored number), fixed axes, shared axes (`COM_AXIS` and its `AXIS_PTS`, which are listed as elements too) and axes stored
+with the values; `FUNCTION`s become categories. The image is taken to start at the A2L's lowest memory segment that is not
+RAM (`icarus def` prints the offset). Everything else (conversion tables and formulas, bit masks, point counts stored in
+the image, rescale axes, keywords it does not know) leaves that element out, listed with the reason, rather than guessed.
 
 **Vehicle**, through an OBD-II adapter:
 
@@ -427,7 +436,7 @@ Rust (stable), Linux. Dependencies: `roxmltree` (XML) and `libc`.
 
 | Crate | What |
 | --- | --- |
-| `crates/icarus-core` | ROM images (original + edited, diff), definitions (tables, values, switches), formulas, the TunerPro `.xdf` reader; module-data definitions, their decoder, the OBDb importer and the capture importers (Bluetooth logs, bus logs); ISO-TP |
+| `crates/icarus-core` | ROM images (original + edited, diff), definitions (tables, values, switches), formulas, the TunerPro `.xdf` and ASAM `.a2l` readers; module-data definitions, their decoder, the OBDb importer and the capture importers (Bluetooth logs, bus logs); ISO-TP |
 | `crates/icarus-obd` | adapters (USB, Bluetooth, Wi-Fi, simulated), the ELM327/STN language, the standard OBD-II services |
 | `crates/icarus` | the `icarus` command |
 | `crates/icarus-app` | the window (egui, Yggdrasil's look from yggdrasil-ui); a worker thread owns the adapter |

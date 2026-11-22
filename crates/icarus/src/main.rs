@@ -3,7 +3,6 @@
 
 use icarus_core::def::{fmt_num, Definition, Kind};
 use icarus_core::rom::{self, Rom};
-use icarus_core::xdf;
 use icarus_obd::elm::Elm;
 use icarus_obd::j1979::{self, DtcKind};
 use icarus_obd::port::Target;
@@ -21,15 +20,15 @@ use std::time::{Duration, Instant};
 
 const HELP: &str = "icarus: vehicle tuning, learning and diagnostics
 
-Files (nothing is sent to a vehicle):
-  icarus def FILE.xdf [--find TEXT]          what a definition describes (with --find: the matching maps)
-  icarus show IMAGE.bin FILE.xdf NAME        one map or value from an image, in real units
-  icarus set IMAGE.bin FILE.xdf NAME VALUE [--row R --col C] [--out NEW.bin] [--checksums FILE]
+Files (nothing is sent to a vehicle; DEF is a TunerPro .xdf or an ASAM .a2l definition):
+  icarus def DEF [--find TEXT]               what a definition describes (with --find: the matching maps)
+  icarus show IMAGE.bin DEF NAME             one map or value from an image, in real units
+  icarus set IMAGE.bin DEF NAME VALUE [--row R --col C] [--out NEW.bin] [--checksums FILE]
                                              change one value, table cell (from 0) or switch (on/off) and save a NEW file
                                              (never over one), its checksums corrected where they are known
                                              (<definition>.checksums.toml beside the definition, or --checksums)
   icarus checksums IMAGE.bin CHECKSUMS.toml  whether an image's checksums are right
-  icarus diff ORIGINAL.bin TUNED.bin [--def FILE.xdf]
+  icarus diff ORIGINAL.bin TUNED.bin [--def DEF]
                                              what a tune changed: byte ranges, and with a definition each map, cell by cell
 
 Vehicle, through an OBD adapter (read-only: nothing is cleared or written):
@@ -258,9 +257,9 @@ impl Args {
     }
 }
 
+/// A TunerPro (.xdf) or ASAM (.a2l) definition.
 fn load_def(path: &str) -> Result<Definition, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
-    let p = xdf::parse(&text).map_err(|e| format!("{path}: {e}"))?;
+    let p = icarus_core::def::load(std::path::Path::new(path)).map_err(|e| format!("{path}: {e}"))?;
     if !p.skipped.is_empty() {
         eprintln!(
             "note: {} element(s) of {path} were left out (first: {})",
@@ -293,7 +292,7 @@ fn kind_name(k: &Kind) -> &'static str {
 fn cmd_def(a: &[String]) -> Result<(), String> {
     let args = parse_args(a, &["find"])?;
     let [path] = args.pos.as_slice() else {
-        return Err("usage: icarus def FILE.xdf [--find TEXT]".into());
+        return Err("usage: icarus def DEF.xdf|.a2l [--find TEXT]".into());
     };
     let def = load_def(path)?;
     if let Some(text) = args.opt("find") {
@@ -321,6 +320,13 @@ fn cmd_def(a: &[String]) -> Result<(), String> {
     );
     if !def.description.is_empty() {
         println!("{}", def.description.lines().next().unwrap_or(""));
+    }
+    if def.base_offset != 0 {
+        println!(
+            "Addresses: file offset = address {} 0x{:X}",
+            if def.base_subtract { "-" } else { "+" },
+            def.base_offset
+        );
     }
     let count = |k: &str| {
         def.elements
@@ -404,7 +410,7 @@ fn print_element(def: &Definition, rom: &Rom, e: &icarus_core::def::Element) -> 
 fn cmd_show(a: &[String]) -> Result<(), String> {
     let args = parse_args(a, &[])?;
     let [image, defp, name] = args.pos.as_slice() else {
-        return Err("usage: icarus show IMAGE.bin FILE.xdf NAME".into());
+        return Err("usage: icarus show IMAGE.bin DEF.xdf|.a2l NAME".into());
     };
     let def = load_def(defp)?;
     let rom = Rom::new(load_image(image, Some(&def))?);
@@ -435,7 +441,7 @@ fn load_checksums(
 fn cmd_set(a: &[String]) -> Result<(), String> {
     let args = parse_args(a, &["row", "col", "out", "checksums"])?;
     let [image, defp, name, value] = args.pos.as_slice() else {
-        return Err("usage: icarus set IMAGE.bin FILE.xdf NAME VALUE [--row R --col C] [--out NEW.bin] [--checksums FILE]".into());
+        return Err("usage: icarus set IMAGE.bin DEF.xdf|.a2l NAME VALUE [--row R --col C] [--out NEW.bin] [--checksums FILE]".into());
     };
     let def = load_def(defp)?;
     let mut rom = Rom::new(load_image(image, Some(&def))?);
@@ -533,7 +539,7 @@ fn cmd_checksums(a: &[String]) -> Result<(), String> {
 fn cmd_diff(a: &[String]) -> Result<(), String> {
     let args = parse_args(a, &["def"])?;
     let [orig, tuned] = args.pos.as_slice() else {
-        return Err("usage: icarus diff ORIGINAL.bin TUNED.bin [--def FILE.xdf]".into());
+        return Err("usage: icarus diff ORIGINAL.bin TUNED.bin [--def DEF.xdf|.a2l]".into());
     };
     let def = args.opt("def").map(load_def).transpose()?;
     let (ob, tb) = (

@@ -10,7 +10,6 @@ mod worker;
 use eframe::egui::{self, vec2, Color32, CornerRadius, Margin, RichText, Sense, Stroke};
 use icarus_core::def::{fmt_num, Definition, Kind};
 use icarus_core::rom::{self, Rom};
-use icarus_core::xdf;
 use icarus_obd::garage::{self, Described};
 use icarus_obd::j1979;
 use icarus_obd::uds::Dialect;
@@ -104,7 +103,7 @@ enum MapEdit {
 }
 
 /// What to do at start (command line): `--connect` (the adapter from ICARUS_ADAPTER, or `--adapter A`), `--page NAME`,
-/// `--scan` and `--live` once connected, `--maps DEF.xdf IMAGE.bin [SECOND.bin]`, `--learn` (a learning watch once
+/// `--scan` and `--live` once connected, `--maps DEF.xdf|.a2l IMAGE.bin [SECOND.bin]`, `--learn` (a learning watch once
 /// connected; `--mark TEXT` marks at its start and `--learn-seconds N` stops it, for demonstrations and screenshots),
 /// `--gps SOURCE` (the Tools page's GPS source, listened to at start).
 #[derive(Default)]
@@ -2286,7 +2285,7 @@ impl App {
                 });
             }
             card(ui, pal, "Add a file", |ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.import_path).hint_text("/path/to/file.bin or .xdf").desired_width(f32::INFINITY));
+                ui.add(egui::TextEdit::singleline(&mut self.import_path).hint_text("/path/to/file.bin, .xdf or .a2l").desired_width(f32::INFINITY));
                 ui.horizontal(|ui| {
                     if ui.button("As OEM tune (read-only)").clicked() {
                         action = Some(("oem", std::path::PathBuf::from(self.import_path.trim()), dir.clone()));
@@ -2303,7 +2302,10 @@ impl App {
         let first_def = |dir: &std::path::Path| {
             garage::files(dir, "Definitions")
                 .into_iter()
-                .find(|f| f.0.to_lowercase().ends_with(".xdf"))
+                .find(|f| {
+                    let n = f.0.to_lowercase();
+                    n.ends_with(".xdf") || n.ends_with(".a2l")
+                })
                 .map(|f| dir.join("Definitions").join(f.0))
         };
         match action {
@@ -2536,9 +2538,8 @@ impl App {
         m.note.clear();
         m.selected = None;
         let result = (|| -> Result<(), String> {
-            let text = std::fs::read_to_string(m.def_path.trim())
+            let p = icarus_core::def::load(std::path::Path::new(m.def_path.trim()))
                 .map_err(|e| format!("definition: {e}"))?;
-            let p = xdf::parse(&text).map_err(|e| format!("definition: {e}"))?;
             let bin = std::fs::read(m.bin_path.trim()).map_err(|e| format!("image: {e}"))?;
             let cmp = if m.cmp_path.trim().is_empty() {
                 None
@@ -2632,7 +2633,7 @@ impl App {
             .num_columns(2)
             .spacing(vec2(10.0, 6.0))
             .show(ui, |ui| {
-                ui.label("Definition (.xdf)");
+                ui.label("Definition (.xdf, .a2l)");
                 ui.add(egui::TextEdit::singleline(&mut self.maps.def_path).desired_width(520.0));
                 ui.end_row();
                 ui.label("Image (.bin)");
@@ -3527,7 +3528,7 @@ fn main() -> eframe::Result {
     let start = match Start::parse(&args) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("icarus-app: {e}\nusage: icarus-app [--connect] [--adapter A] [--page vehicle|modules|live|logs|tests|settings|learning|bus|maps|garage|tools] [--scan] [--live] [--record] [--learn [--mark TEXT] [--learn-seconds N]] [--maps DEF.xdf IMAGE.bin [SECOND.bin]] [--map NAME [--cell R,C]]");
+            eprintln!("icarus-app: {e}\nusage: icarus-app [--connect] [--adapter A] [--page vehicle|modules|live|logs|tests|settings|learning|bus|maps|garage|tools] [--scan] [--live] [--record] [--learn [--mark TEXT] [--learn-seconds N]] [--maps DEF.xdf|.a2l IMAGE.bin [SECOND.bin]] [--map NAME [--cell R,C]]");
             std::process::exit(2);
         }
     };

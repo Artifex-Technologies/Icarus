@@ -13,6 +13,7 @@
 //! other; formulas that use each other in a loop, or a link to an element that is missing or not a single value, leave
 //! the element out with the reason.
 
+pub use crate::def::Parsed;
 use crate::def::{Axis, Data, DefError, Definition, Element, Flag, Kind, Source, Table, Var};
 use crate::expr::Expr;
 use crate::rom::Cell;
@@ -23,13 +24,6 @@ pub const FLAG_SIGNED: u32 = 0x01;
 pub const FLAG_LSB_FIRST: u32 = 0x02;
 pub const FLAG_COLUMN_MAJOR: u32 = 0x04;
 pub const FLAG_FLOAT: u32 = 0x10000;
-
-/// A parsed definition and the elements that were left out, each with the reason.
-#[derive(Debug)]
-pub struct Parsed {
-    pub definition: Definition,
-    pub skipped: Vec<String>,
-}
 
 #[derive(Clone, Copy)]
 struct Defaults {
