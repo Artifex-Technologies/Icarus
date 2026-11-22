@@ -6,7 +6,7 @@
 //! | --- | --- |
 //! | `ATZ`, `ATD`, `ATWS` | back to the defaults (headers off, CAN formatting on, no filters, the default header) |
 //! | `ATSP n`, `ATTP n`, `ATDPN` (its answer) | the protocol: 11-bit or 29-bit CAN, or K-line/J1850 |
-//! | `ATSH xyz`, `ATSH xxyyzz`, `ATSH xxxxxxxx`, `ATCP` | the request ID (11-bit, 29-bit with the priority byte) |
+//! | `ATSH xyz`, `ATSH xxyyzz`, `ATSH xxxxxxxx`, `ATCP` | the request ID (11-bit, 29-bit with the priority byte, or K-line and J1850 header bytes) |
 //! | `ATCRA`, `ATAR`, `ATCF` with `ATCM` | the answer ID the adapter listens to |
 //! | `ATCEA hh` | an extended address byte in front of each message |
 //! | `ATH0/1`, `ATCAF0/1`, `ATS0/1`, `ATD0/1` | headers shown, CAN formatting (ISO-TP done by the adapter), spaces, the length digit |
@@ -158,8 +158,12 @@ fn hex_digits(s: &str) -> Option<u32> {
 }
 
 impl State {
+    /// K-line or J1850: ATSP's protocol 1-5, or under automatic protocol a K-line header (`header_of`).
     fn kline(&self) -> bool {
-        matches!(self.protocol, Some(1..=5))
+        match self.protocol {
+            Some(p) => (1..=5).contains(&p),
+            None => matches!(self.header, Some((Ids::Kline, _))),
+        }
     }
 
     fn can29(&self) -> bool {
@@ -200,10 +204,21 @@ impl State {
         })
     }
 
-    /// A header in hex digits: 3 (11-bit), 6 (11-bit, or 29-bit after the priority byte) or 8 (29-bit).
+    /// A header in hex digits: 3 (11-bit), 6 (11-bit, 29-bit after the priority byte, or K-line and J1850's three
+    /// header bytes) or 8 (29-bit). Under automatic protocol (no ATSP or ATDPN seen), 6 digits above 7FF are 29-bit CAN
+    /// only when they name ISO 15765-4's formats (DA, DB) or 29-bit CAN is in use; else they are K-line or J1850 header
+    /// bytes (`81 10 F1`, `68 6A F1`).
     fn header_of(&self, h: &str) -> Option<(Ids, u32)> {
         let v = hex_digits(h)?;
-        if self.kline() && h.len() == 6 {
+        let kline = match self.protocol {
+            Some(p) => (1..=5).contains(&p),
+            None => {
+                v > 0x7FF
+                    && !matches!(v >> 16, 0xDA | 0xDB)
+                    && !matches!(self.header, Some((Ids::Can29, _)))
+            }
+        };
+        if kline && h.len() == 6 {
             return Some((Ids::Kline, v));
         }
         match h.len() {
@@ -318,15 +333,18 @@ impl State {
             }
             (id, bytes(rest)?)
         } else {
+            // no spaces: the header, with ATD1 the length digit, then the bytes; an 11-bit header's three digits make the
+            // line odd without the length digit and even with it
             let s = toks.first()?;
+            let dlc = usize::from(self.dlc);
             let head = if self.can29() {
                 8
-            } else if s.len() % 2 == 1 {
+            } else if s.len() % 2 != dlc % 2 {
                 3
             } else {
                 return None;
             };
-            let skip = head + usize::from(self.dlc);
+            let skip = head + dlc;
             if s.len() < skip || (s.len() - skip) % 2 != 0 {
                 return None;
             }
@@ -346,11 +364,11 @@ impl State {
         let mut unreadable = false;
         let framed = self.headers || !self.caf;
         if self.kline() && self.headers {
-            // header (priority, target, sender), the data, a checksum byte
+            // header (format or priority, target, sender), the data, a checksum byte; the sender's address is the module's
             for l in lines {
                 match self.split_line_bytes(l) {
                     Some(b) if b.len() >= 5 => out.push(Reply {
-                        from: Some(u32::from(b[0]) << 16 | u32::from(b[1]) << 8 | u32::from(b[2])),
+                        from: Some(u32::from(b[2])),
                         data: b[3..b.len() - 1].to_vec(),
                     }),
                     _ => unreadable = true,
@@ -786,6 +804,78 @@ mod tests {
                 data: vec![0x61, 0x01, 0x0A]
             }
         );
+    }
+
+    #[test]
+    fn the_length_digit_without_spaces_on_eleven_bit_can() {
+        // ATD1 shows each frame's length (DLC) as one digit after the header; with ATS0 nothing stands between them
+        let packed = |s: &str| s.replace(' ', "");
+        let single = packed("7E8 5 04 62 12 34 05");
+        let long = format!(
+            "{}\r{}",
+            packed("7E8 8 10 0B 62 12 35 01 02 03"),
+            packed("7E8 8 21 04 05 06 07 08 AA AA")
+        );
+        let c = talk(&[
+            ("ATH1", "OK"),
+            ("ATS0", "OK"),
+            ("ATD1", "OK"),
+            ("ATSH7E0", "OK"),
+            ("221234", single.as_str()),
+            ("221235", long.as_str()),
+            ("ATS1", "OK"),
+            ("221236", "7E8 8 04 62 12 36 07 00 00 00"),
+        ]);
+        let e = &c.exchanges;
+        assert_eq!(e.len(), 3);
+        assert_eq!(
+            e[0].replies,
+            vec![Reply {
+                from: Some(0x7E8),
+                data: vec![0x62, 0x12, 0x34, 0x05]
+            }]
+        );
+        assert_eq!(
+            e[1].replies,
+            vec![Reply {
+                from: Some(0x7E8),
+                data: vec![0x62, 0x12, 0x35, 1, 2, 3, 4, 5, 6, 7, 8]
+            }]
+        );
+        assert_eq!(e[2].replies[0].data, vec![0x62, 0x12, 0x36, 0x07]);
+        assert!(e.iter().all(|x| x.problem.is_none()), "{e:?}");
+    }
+
+    #[test]
+    fn a_k_line_header_under_automatic_protocol_is_k_line() {
+        // no ATSP n or ATDPN: the adapter finds the protocol itself, and the app's header says it is K-line
+        let c = talk(&[
+            ("ATZ", "ELM327 v1.4b"),
+            ("ATSP0", "OK"),
+            ("ATH1", "OK"),
+            ("ATSH 8110F1", "OK"),
+            ("2101", "BUS INIT: ...OK\r83 F1 10 61 01 05 EB"),
+            ("ATH0", "OK"),
+            ("2102", "61 02 06"),
+        ]);
+        let e = &c.exchanges;
+        assert_eq!(e.len(), 2);
+        for x in e {
+            assert_eq!((x.ids, x.tx), (Ids::Kline, Some(0x8110F1)), "{x:?}");
+        }
+        assert_eq!(e[0].replies.len(), 1, "{:?}", e[0]);
+        assert_eq!(e[0].replies[0].data, vec![0x61, 0x01, 0x05]);
+        assert_eq!(e[1].replies[0].data, vec![0x61, 0x02, 0x06]);
+        // six digits naming ISO 15765-4's 29-bit format stay 29-bit CAN under automatic protocol
+        let c = talk(&[
+            ("ATSP0", "OK"),
+            ("ATH1", "OK"),
+            ("ATSH DA10F1", "OK"),
+            ("221234", "18 DA F1 10 04 62 12 34 01"),
+        ]);
+        let e = &c.exchanges[0];
+        assert_eq!((e.ids, e.tx), (Ids::Can29, Some(0x18DA10F1)));
+        assert_eq!(e.replies[0].from, Some(0x18DAF110));
     }
 
     #[test]

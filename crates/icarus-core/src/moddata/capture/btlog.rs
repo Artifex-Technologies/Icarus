@@ -18,7 +18,8 @@
 //!
 //! **Layers.** HCI ACL packets (a 12-bit connection handle, a packet-boundary flag: a start or a continuation, and the
 //! length) are put back together into L2CAP packets per connection and direction (L2CAP: a length, a channel ID, the
-//! data). The signalling channel's connection requests and answers say which channels are RFCOMM (PSM 3), and its
+//! data); without directions (link type 187) a packet stays open for each side, and a continuation goes to the one it
+//! fits (`pick`: each side's own fragment size, what is left, and the RFCOMM checksum). The signalling channel's connection requests and answers say which channels are RFCOMM (PSM 3), and its
 //! disconnections which were closed; each side picks its own channel IDs (a phone's SDP query and its RFCOMM channel often
 //! both get 0x40), so a channel is known by the ID its packets carry in each direction, and an ID used again names the
 //! newer channel. A channel set up before the capture began is tried as RFCOMM, and kept only when its frames' checksums
@@ -27,8 +28,10 @@
 //! carries a credit byte before the data, which is left out. An MFi accessory such as the OBDLink MX+ talks to an iPhone
 //! app inside Apple's iAP2 link packets on its RFCOMM channel: where a stream holds them (FF 5A, a length, control,
 //! sequence and acknowledgement numbers, a session, a header checksum, then the payload and its checksum, both checksums
-//! adding up to zero), the external-accessory session's bytes (after its two-byte session number) are taken out, and a
-//! packet sent again with the same sequence number is read once. Bluetooth LE adapters are read from ATT writes (the app)
+//! adding up to zero), the external-accessory session's bytes (after its two-byte session number) are taken out (the
+//! session told by each packet's session byte: the control session, whose messages start `40 40`, is left out whole,
+//! also where a message runs on over several packets), and a packet sent again with the same sequence number is read
+//! once. Bluetooth LE adapters are read from ATT writes (the app)
 //! and notifications (the adapter) on each LE connection.
 //!
 //! A stream is the adapter's conversation when one side sends `>` prompts and the other side's lines look like AT, ST and
@@ -353,10 +356,63 @@ fn flip(d: Option<Dir>) -> Option<Dir> {
 /// receives carry its own; the direction tells the two apart (without directions, both share one key).
 type ChanKey = (u16, Option<Dir>, u16);
 
+/// An L2CAP packet being put back together: its bytes so far, and how long its first fragment was.
+struct Part {
+    buf: Vec<u8>,
+    first: usize,
+}
+
+impl Part {
+    /// The bytes still to come, once the L2CAP header (its length) is in.
+    fn room(&self) -> Option<usize> {
+        (self.buf.len() >= 4)
+            .then(|| (4 + u16le(&self.buf) as usize).saturating_sub(self.buf.len()))
+    }
+}
+
+/// A whole L2CAP packet (at least its header and length, more cut off): (handle, channel, data).
+fn whole(handle: u16, mut pdu: Vec<u8>) -> (u16, u16, Vec<u8>) {
+    pdu.truncate(4 + u16le(&pdu) as usize);
+    let cid = u16le(&pdu[2..]);
+    pdu.drain(..4);
+    (handle, cid, pdu)
+}
+
+/// Which open packet a continuation fragment belongs to, without directions (each side may have one open). Each side
+/// cuts its packets into fragments of its own size, so a fragment of a packet is as long as the packet's first and
+/// leaves more to come, or is its last, as long as what is left (and no longer than the first); failing that, one it
+/// does not run past. Of two, a last fragment that makes a whole RFCOMM frame (its checksum right) goes first, then
+/// one that leaves more to come, then the older.
+fn pick(open: &[Part], frag: &[u8]) -> Option<usize> {
+    let n = frag.len();
+    let likely = |p: &Part| {
+        p.room()
+            .is_some_and(|r| (n == p.first && n < r) || (n == r && n <= p.first))
+    };
+    let fits = |p: &Part| p.room().is_none_or(|r| n <= r);
+    // 2: it ends the packet as a whole RFCOMM frame; 1: more is to come; 0: it ends the packet as something else
+    let rank = |p: &Part| match p.room() {
+        Some(r) if r == n => {
+            let mut b = p.buf[4..].to_vec();
+            b.extend_from_slice(frag);
+            2 * usize::from(rfcomm(&b).is_some())
+        }
+        _ => 1,
+    };
+    let best = |of: &dyn Fn(&Part) -> bool| {
+        (0..open.len())
+            .filter(|i| of(&open[*i]))
+            .rev()
+            .max_by_key(|i| rank(&open[*i]))
+    };
+    best(&likely).or_else(|| best(&fits))
+}
+
 /// L2CAP packets put back together from ACL fragments, and which channels are RFCOMM.
 #[derive(Default)]
 struct L2cap {
-    partial: HashMap<(u16, Option<Dir>), Vec<u8>>,
+    /// Packets open per connection and direction: one a direction; without directions, one for each side (two).
+    partial: HashMap<(u16, Option<Dir>), Vec<Part>>,
     /// (handle, the request's direction, signalling identifier) -> the PSM asked for.
     asked: HashMap<(u16, Option<Dir>, u8), u16>,
     /// Channels open now: set up by a connection, closed by a disconnection; a newer connection replaces an older one.
@@ -381,34 +437,43 @@ impl L2cap {
             self.malformed += 1;
             return None;
         };
-        let key = (handle, a.dir);
-        let buf = if start {
-            self.partial.insert(key, data.to_vec());
-            self.partial.get_mut(&key)?
-        } else {
-            match self.partial.get_mut(&key) {
-                Some(b) => {
-                    b.extend_from_slice(data);
-                    b
-                }
-                None => {
-                    self.malformed += 1;
-                    return None;
-                }
+        let open = self.partial.entry((handle, a.dir)).or_default();
+        let i = if start {
+            let part = Part {
+                buf: data.to_vec(),
+                first: data.len(),
+            };
+            // with directions, a side's new packet ends its last one (given up)
+            if a.dir.is_some() {
+                open.clear();
             }
+            if part.room() == Some(0) {
+                return Some(whole(handle, part.buf));
+            }
+            // without, a start while one is open is the other side's: one kept for each side
+            if open.len() >= 2 {
+                open.remove(0);
+            }
+            open.push(part);
+            open.len() - 1
+        } else {
+            let i = if open.len() > 1 {
+                pick(open, data)
+            } else {
+                (!open.is_empty()).then_some(0)
+            };
+            let Some(i) = i else {
+                self.malformed += 1;
+                return None;
+            };
+            open[i].buf.extend_from_slice(data);
+            i
         };
-        if buf.len() < 4 {
+        // whole once its header's length is in
+        if open[i].room().is_none_or(|r| r > 0) {
             return None;
         }
-        let need = 4 + u16le(buf) as usize;
-        if buf.len() < need {
-            return None;
-        }
-        let mut pdu = self.partial.remove(&key)?;
-        pdu.truncate(need);
-        let cid = u16le(&pdu[2..]);
-        pdu.drain(..4);
-        Some((handle, cid, pdu))
+        Some(whole(handle, open.remove(i).buf))
     }
 
     /// The signalling channel, `dir` the way this packet went: which dynamic channels are RFCOMM (PSM 3), which are
@@ -462,6 +527,9 @@ impl L2cap {
 }
 
 /// The external-accessory bytes inside Apple's iAP2 link packets, when a side's stream holds them (None: it does not).
+/// Each packet's header names its session; a session whose messages start `40 40` is the control session, and so is
+/// every packet of it, also the rest of a control message split over several packets. Link packets that set up or
+/// reset the link (SYN, RST) carry no session's data.
 fn iap2(pieces: &[Piece]) -> Option<Vec<Piece>> {
     let mut all = Vec::new();
     let mut owner = Vec::new();
@@ -470,7 +538,9 @@ fn iap2(pieces: &[Piece]) -> Option<Vec<Piece>> {
         owner.resize(all.len(), i);
     }
     let sum = |b: &[u8]| b.iter().fold(0u8, |a, x| a.wrapping_add(*x));
-    let (mut out, mut found, mut last) = (Vec::new(), false, None);
+    // the link packets with a whole payload: (where it starts, its length with the header and checksum)
+    let mut packets = Vec::new();
+    let mut found = false;
     let mut i = 0;
     while i + 9 <= all.len() {
         if all[i] == 0xFF && all[i + 1] == 0x5A {
@@ -478,27 +548,45 @@ fn iap2(pieces: &[Piece]) -> Option<Vec<Piece>> {
             if len >= 9 && i + len <= all.len() && sum(&all[i..i + 9]) == 0 {
                 found = true;
                 if len > 10 && sum(&all[i + 9..i + len]) == 0 {
-                    let payload = &all[i + 9..i + len - 1];
-                    let seq = all[i + 5];
-                    if last != Some(seq) {
-                        last = Some(seq);
-                        // the control session's messages start 40 40; an accessory session's data has its number first
-                        if payload.len() > 2 && payload[..2] != [0x40, 0x40] {
-                            let p = &pieces[owner[i + len - 1]];
-                            out.push(Piece {
-                                seq: p.seq,
-                                clock: p.clock,
-                                side_a: p.side_a,
-                                bytes: payload[2..].to_vec(),
-                            });
-                        }
-                    }
+                    packets.push((i, len));
                 }
                 i += len;
                 continue;
             }
         }
         i += 1;
+    }
+    const SYN: u8 = 0x80;
+    const RST: u8 = 0x10;
+    let data = |&(i, _): &(usize, usize)| all[i + 4] & (SYN | RST) == 0;
+    let session = |&(i, _): &(usize, usize)| all[i + 7];
+    let payload = |&(i, len): &(usize, usize)| &all[i + 9..i + len - 1];
+    let control: HashSet<u8> = packets
+        .iter()
+        .filter(|p| data(p) && payload(p).starts_with(&[0x40, 0x40]))
+        .map(session)
+        .collect();
+    let mut out = Vec::new();
+    let mut last = None;
+    for p in &packets {
+        let (i, len) = *p;
+        let seq = all[i + 5];
+        // a packet sent again (the same sequence number) is read once
+        if last == Some(seq) {
+            continue;
+        }
+        last = Some(seq);
+        let bytes = payload(p);
+        // an accessory session's data has its two-byte number first
+        if data(p) && !control.contains(&session(p)) && bytes.len() > 2 {
+            let from = &pieces[owner[i + len - 1]];
+            out.push(Piece {
+                seq: from.seq,
+                clock: from.clock,
+                side_a: from.side_a,
+                bytes: bytes[2..].to_vec(),
+            });
+        }
     }
     found.then_some(out)
 }
@@ -877,6 +965,38 @@ mod tests {
     }
 
     #[test]
+    fn both_sides_fragments_interleaved_without_directions_are_kept_apart() {
+        let s = Session::interleaved();
+        for (what, file) in [
+            ("pcap 187", pcap_file(&s.packets, false)),
+            ("pcap 201", pcap_file(&s.packets, true)),
+            ("pklg", pklg_file(&s.packets, true)),
+        ] {
+            let r = read_ok(&file);
+            let e = &r.exchanges;
+            let reqs: Vec<String> = e.iter().map(|x| super::super::hex(&x.request)).collect();
+            assert_eq!(
+                reqs,
+                vec!["22 12 34", "21 05", "22 56 78"],
+                "{what}: {:?}",
+                r.notes
+            );
+            assert_eq!(
+                e[0].replies[0].data,
+                vec![0x62, 0x12, 0x34, 1, 2, 3, 4, 5, 6, 7, 8],
+                "{what}"
+            );
+            assert_eq!(e[1].replies[0].data, vec![0x61, 0x05, 0x09], "{what}");
+            assert_eq!(e[2].replies[0].data, vec![0x62, 0x56, 0x78, 0x0C], "{what}");
+            assert!(
+                r.notes.iter().all(|n| !n.contains("malformed")),
+                "{what}: {:?}",
+                r.notes
+            );
+        }
+    }
+
+    #[test]
     fn an_iap2_wrapped_conversation_is_unwrapped() {
         let r = read_ok(&pklg_file(&Session::iap2().packets, true));
         assert!(r.notes[0].contains("iAP2"), "{}", r.notes[0]);
@@ -884,6 +1004,34 @@ mod tests {
         assert_eq!(e.len(), 1, "a resent packet is read once");
         assert_eq!(e[0].request, vec![0x22, 0x12, 0x34]);
         assert_eq!(e[0].replies[0].data, vec![0x62, 0x12, 0x34, 0x07]);
+    }
+
+    #[test]
+    fn a_control_message_split_over_link_packets_gives_no_accessory_bytes() {
+        let piece = |seq: usize, bytes: Vec<u8>| Piece {
+            seq,
+            clock: 0.0,
+            side_a: true,
+            bytes,
+        };
+        // the control session (1): one message of 18 bytes over two link packets, the second's bytes printable
+        let mut rest = vec![0x00, 0x01];
+        rest.extend_from_slice(b"2101\r\x07");
+        let mut ea = vec![0x00, 0x01];
+        ea.extend_from_slice(b"221234\r");
+        let pieces = vec![
+            piece(
+                0,
+                iap2_packet(1, 1, &[0x40, 0x40, 0x00, 0x12, 0x1D, 0x00, 1, 2, 3, 4]),
+            ),
+            piece(1, iap2_packet(2, 1, &rest)),
+            // the accessory's session (2)
+            piece(2, iap2_packet(3, 2, &ea)),
+        ];
+        let out = iap2(&pieces).unwrap();
+        let bytes: Vec<u8> = out.iter().flat_map(|p| p.bytes.clone()).collect();
+        assert_eq!(bytes, b"221234\r", "{:?}", String::from_utf8_lossy(&bytes));
+        assert_eq!(out[0].seq, 2);
     }
 
     #[test]
