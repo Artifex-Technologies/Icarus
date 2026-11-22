@@ -250,8 +250,9 @@ wherever those values appear; none of OBDb's data is in this repository.
 A Better Routeplanner's EV PID lists ([ev-obd-pids](https://github.com/Iternio-Planning-AB/ev-obd-pids), Apache-2.0)
 give electric and hybrid vehicles' battery values: charge, health, current, voltage, temperatures. Their equations are in
 Torque Pro's style; Icarus works out what each one is by evaluating it (a scaled number from consecutive bytes, signed or
-not, or one bit) and keeps only those, so nothing is guessed. Yes/no tests over several values, raw CAN frames and 29-bit
-modules (VW, Renault, Honda, so far) are listed as left out with the reason. Modules at 7E0-7E7 (OBD-II's powertrain
+not, or one bit, or a yes/no test over one byte such as `(A==1)||(A==2)`, kept as yes or no for every raw value) and
+keeps only those, so nothing is guessed. Yes/no tests over several bytes, raw CAN frames and 29-bit modules (VW, Renault,
+Honda, so far) are listed as left out with the reason. Modules at 7E0-7E7 (OBD-II's powertrain
 addresses) are read; any other address follows the airbag rule in the gates below. DDT2000 files (Renault, Dacia, Nissan) and DBC bus
 files come in later builds (`icarus import ddt` is there, and says it is not built yet).
 

@@ -439,8 +439,26 @@ fn as_value(eq: &str) -> Result<ValueDef, String> {
             return Ok(v);
         }
     }
+    // a yes/no test over one byte (`(A==1)||(A==2)`, `!{A:1}&&{A:2}`): a state value naming every raw value yes or no,
+    // read off the equation at all 256 (every probe of a one-byte equation is one of them)
+    if n == 1 && ys.iter().all(|y| *y == 0.0 || *y == 1.0) && ys.contains(&1.0) && ys.contains(&0.0)
+    {
+        let mut v = ValueDef::new("", "", lo, 8);
+        v.kind = super::ValueKind::State;
+        v.states = probes
+            .iter()
+            .zip(&ys)
+            .map(|(r, y)| {
+                (
+                    r.to_string(),
+                    if *y == 1.0 { "yes" } else { "no" }.to_string(),
+                )
+            })
+            .collect();
+        return Ok(v);
+    }
     if ys.iter().all(|y| *y == 0.0 || *y == 1.0) {
-        return Err("a yes/no test over several values or bits: not imported yet".into());
+        return Err("a yes/no test over several bytes: not imported yet".into());
     }
     Err("not a scaled number Icarus reads (not linear in its bytes)".into())
 }
@@ -823,7 +841,10 @@ mod tests {
                 .map(|(_, y)| y.clone())
                 .unwrap_or_else(|| panic!("{k} not left out"))
         };
-        assert!(why("is_dcfc").contains("yes/no test"));
+        assert!(
+            !i.left_out.iter().any(|(w, _)| w.starts_with("is_dcfc")),
+            "a yes/no test over one byte is imported"
+        );
         assert!(
             why("_Odd_Sum").contains("not linear"),
             "A+B is not one number"
@@ -852,7 +873,25 @@ mod tests {
         assert!(as_value("42").is_err(), "reads no byte");
         assert!(as_value("A/(B-B)").is_err());
         assert!(as_value("A +").is_err());
-        assert!(as_value("!{A:1}&&{A:2}").unwrap_err().contains("yes/no"));
+        // a yes/no test over one byte: yes for exactly the raw values the equation is true for
+        let v = as_value("(A==1)||(A==2)").unwrap();
+        assert_eq!(v.kind, crate::moddata::ValueKind::State);
+        assert_eq!(
+            (
+                v.states["1"].as_str(),
+                v.states["2"].as_str(),
+                v.states["0"].as_str()
+            ),
+            ("yes", "yes", "no")
+        );
+        assert_eq!((v.states.len(), v.states["3"].as_str()), (256, "no"));
+        let shown = |d: &[u8]| crate::moddata::decode::decode(&v, d).unwrap().shown;
+        assert_eq!(shown(&[2]), crate::moddata::Shown::State("yes".into()));
+        assert_eq!(shown(&[7]), crate::moddata::Shown::State("no".into()));
+        assert_eq!(as_value("!{A:1}&&{A:2}").unwrap().states["4"], "yes");
+        assert!(as_value("(A==1)&&(B==2)")
+            .unwrap_err()
+            .contains("several bytes"));
         assert_eq!(as_value("INT16(A:B)*0.01").unwrap().bits, 16);
     }
 }
