@@ -1004,6 +1004,30 @@ impl App {
                 },
             );
         }
+        card(ui, pal, "Code history", |ui| match &info.history {
+            Err(why) => {
+                ui.colored_label(pal.amber, format!("The history could not be kept: {why}"));
+            }
+            Ok(h) if h.is_empty() => {
+                ui.label(
+                    RichText::new(if info.vin.is_some() {
+                        "No code seen on this vehicle yet. Every reading is kept in its folder (Logs/codes-history.tsv)."
+                    } else {
+                        "The VIN could not be read, so no history is kept (the codes could belong to any vehicle)."
+                    })
+                    .weak(),
+                );
+            }
+            Ok(h) => {
+                ui.label(RichText::new("When each code came and went, from every reading of this vehicle's codes.").weak());
+                for sp in h {
+                    ui.horizontal_wrapped(|ui| {
+                        dot(ui, if sp.gone.is_none() { pal.amber } else { pal.green }, sp.gone.is_none());
+                        ui.label(icarus_obd::history::describe(sp));
+                    });
+                }
+            }
+        });
         if let Some(d) = &self.nhtsa {
             card(ui, pal, "NHTSA's record for this VIN", |ui| {
                 egui::Grid::new("vpic")

@@ -130,6 +130,8 @@ Vehicles:
   icarus vehicles                            the makes Icarus knows (one editable file each)
   icarus garage [VIN \"2017 Toyota Tacoma 3.5L V6\"]
                                              name a vehicle (searches and parts links use it), or list the named ones
+  icarus garage history VIN                  when each trouble code came and went on this vehicle (every reading of its
+                                             codes is kept in its folder, Logs/codes-history.tsv)
   icarus garage read-only VIN on|off         a vehicle's Read-Only switch: on, Icarus clears, tests and changes nothing
                                              on it (the same switch as on the Garage page)
 
@@ -1066,12 +1068,23 @@ fn obd_codes(elm: &mut Elm) -> Result<(), String> {
             println!("(Name this vehicle once for better searches and parts links: icarus garage {v} \"2017 Toyota Tacoma 3.5L V6\")\n");
         }
     }
-    for (kind, label) in [
-        (DtcKind::Stored, "Stored (confirmed)"),
-        (DtcKind::Pending, "Pending (seen once)"),
-        (DtcKind::Permanent, "Permanent"),
+    let mut readings: Vec<icarus_obd::history::Reading> = Vec::new();
+    for (kind, label, key) in [
+        (DtcKind::Stored, "Stored (confirmed)", "stored"),
+        (DtcKind::Pending, "Pending (seen once)", "pending"),
+        (DtcKind::Permanent, "Permanent", "permanent"),
     ] {
         let list = j1979::dtcs(elm, kind).map_err(e)?;
+        readings.push((
+            key.to_string(),
+            list.iter()
+                .flat_map(|(from, module, codes)| {
+                    codes
+                        .iter()
+                        .map(move |c| (format!("{module} ({from})"), c.clone()))
+                })
+                .collect(),
+        ));
         let any = list.iter().any(|l| !l.2.is_empty());
         println!("{label}: {}", if any { "" } else { "none" });
         for (from, module, codes) in list.iter().filter(|l| !l.2.is_empty()) {
@@ -1080,6 +1093,9 @@ fn obd_codes(elm: &mut Elm) -> Result<(), String> {
                 print_code(c, "", profile, vehicle.as_ref(), "    ");
             }
         }
+    }
+    if let Err(why) = icarus_obd::history::record(vin.as_deref(), &readings) {
+        eprintln!("note: the code history could not be saved: {why}");
     }
     for f in j1979::freeze_frame(elm).map_err(e)? {
         println!(
@@ -1864,11 +1880,29 @@ fn cmd_garage(a: &[String]) -> Result<(), String> {
                 println!("No vehicles named yet: icarus garage VIN \"2017 Toyota Tacoma 3.5L V6\"");
             }
             for (vin, name) in &all {
-                let tag = if locked.contains(vin) { "  (Read-Only)" } else { "" };
+                let tag = if locked.contains(vin) {
+                    "  (Read-Only)"
+                } else {
+                    ""
+                };
                 println!("{vin}  {name}{tag}");
             }
             for vin in locked.iter().filter(|v| !all.contains_key(*v)) {
                 println!("{vin}  (Read-Only, not named)");
+            }
+            Ok(())
+        }
+        [what, v] if what == "history" => {
+            let i = vin::decode(v)?;
+            let h = icarus_obd::history::load(&i.vin);
+            if h.is_empty() {
+                println!(
+                    "No codes in {}'s history yet (each reading of its codes is kept).",
+                    i.vin
+                );
+            }
+            for s in &h {
+                println!("{}", icarus_obd::history::describe(s));
             }
             Ok(())
         }
@@ -1880,7 +1914,10 @@ fn cmd_garage(a: &[String]) -> Result<(), String> {
                 if on == "on" {
                     format!("{}: Read-Only on. Icarus reads it and clears, tests and changes nothing on it.", i.vin)
                 } else {
-                    format!("{}: Read-Only off (each write still has its own checks).", i.vin)
+                    format!(
+                        "{}: Read-Only off (each write still has its own checks).",
+                        i.vin
+                    )
                 }
             );
             Ok(())

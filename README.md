@@ -62,6 +62,10 @@ icarus obd report --adapter A --scan                             # everything in
 
 The freeze frame (service 02) is what the engine was doing when the code set: speed, load, temperatures, fuel trims.
 
+Every reading of a vehicle's codes (`obd codes`, connecting in the window) is kept in its folder
+(`Logs/codes-history.tsv`), and the Vehicle page's Code history (or `icarus garage history VIN`) says when each code was
+first and last seen, and since when it is gone (cleared, or its monitor passed).
+
 On-board test results (`icarus obd selftests`, Mode 06, CAN vehicles): each emissions monitor's last measurement against
 its limits (a catalyst near its limit fails soon) and misfire counts per cylinder; pass or fail compares raw numbers, real
 units only where the scaling is certain.

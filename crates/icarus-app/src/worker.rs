@@ -79,6 +79,8 @@ pub struct Info {
     pub tests: Vec<actuator::TestDef>,
     /// Module settings known for this vehicle.
     pub settings: Vec<SettingDef>,
+    /// The vehicle's code history (its folder), this reading included; or why it could not be kept.
+    pub history: Result<Vec<icarus_obd::history::Span>, String>,
 }
 
 /// A setting as the Settings page shows it.
@@ -625,17 +627,29 @@ fn gather(elm: &mut Elm, profiles: &[Profile]) -> Result<Info, String> {
     live.sort();
     live.dedup();
     let mut codes = Vec::new();
+    let mut readings: Vec<icarus_obd::history::Reading> = Vec::new();
     for (kind, label) in [
         (DtcKind::Stored, "stored"),
         (DtcKind::Pending, "pending"),
         (DtcKind::Permanent, "permanent"),
     ] {
+        let mut this = Vec::new();
         for (from, module, list) in j1979::dtcs(elm, kind).map_err(e)? {
+            for c in &list {
+                this.push((format!("{module} ({from})"), c.clone()));
+            }
             if !list.is_empty() {
                 codes.push((label, format!("{module} ({from})"), list));
             }
         }
+        readings.push((label.to_string(), this));
     }
+    // the vehicle's code history (its folder; nothing without a VIN)
+    let history = icarus_obd::history::record(vin.as_deref(), &readings).map(|()| {
+        vin.as_deref()
+            .map(icarus_obd::history::load)
+            .unwrap_or_default()
+    });
     let freeze = j1979::freeze_frame(elm).map_err(e)?;
     let vehicle = vin.as_deref().and_then(garage::get);
     let tests = vehicles::tests_for(profile.as_ref(), vin.as_deref());
@@ -662,6 +676,7 @@ fn gather(elm: &mut Elm, profiles: &[Profile]) -> Result<Info, String> {
         tests,
         settings,
         vehicle,
+        history,
     };
     Ok(info)
 }
