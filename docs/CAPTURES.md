@@ -127,9 +127,11 @@ after the gates gets no file in the set (it is listed with the reasons).
   frames or as the adapter's `0:`/`1:` lines, CAN formatting off with the app's own flow control, response pending
   (`7F xx 78`) skipped; an empty command repeats the last one.
 - **Bus logs**: `icarus bus watch --raw` lines (`time  ID  bytes`, the watch's own words skipped) and `candump` (both its
-  log format `(time) can0 ID#DATA` and its screen format). ISO-TP per sender, extended addressing told per ID by how its
-  frames read, each request paired with its answer by service and echo (from the usual answer ID first), within five
-  seconds and among the last 64 requests still waiting (a log without times waits by count).
+  log format `(time) can0 ID#DATA` and its screen format). ISO-TP per sender, extended addressing told per ID by which
+  way its frames make more whole messages (an ID that reads as well both ways, as sub-addresses 10-3F can, follows the ID
+  it talks to), each request paired with its answer by service and echo (from the usual answer ID first, and behind a
+  gateway with the request's address byte first: two modules behind 750 are told apart), within five seconds and among
+  the last 64 requests still waiting (a log without times waits by count).
 
 ## Known limitations
 

@@ -5,16 +5,18 @@
 //!
 //! Diagnostic frames (11-bit IDs 700-7FF, 29-bit IDs 18DAxxxx and 18DBxxxx) are put back together per sender with ISO-TP
 //! (`crate::diag`, the same code `icarus bus watch` uses); flow control frames carry no message. An ID whose frames make
-//! sense only with an address byte in front (extended addressing: Toyota's modules behind 750, BMW) is read that way,
-//! told by how its frames read over the whole log. Each request is then paired with its answers: the answer's service is
-//! the request's + 40 (or 7F naming it), it comes from the usual answer ID (request + 8; the two address bytes swapped on
-//! 29-bit; 7E8-7EF for 7DF) or, failing that, from the module the request went to most recently with that service, within
-//! five seconds (and among the last 64 requests still waiting). Every other frame on the bus is ignored.
+//! more whole messages with an address byte in front (extended addressing: Toyota's modules behind 750, BMW) is read
+//! that way, told by how its frames read over the whole log (an ID that reads as well both ways follows the ID it talks
+//! to). Each request is then paired with its answers: the answer's service is the request's + 40 (or 7F naming it), it
+//! comes from the usual answer ID (request + 8; the two address bytes swapped on 29-bit; 7E8-7EF for 7DF; behind a
+//! gateway with the request's address byte first) or, failing that, from the module the request went to most recently
+//! with that service, within five seconds (and among the last 64 requests still waiting). Every other frame on the bus is
+//! ignored.
 
 use super::{is_functional, usual_rx, Exchange, Read, Reply};
 use crate::diag::{self, Fed, Reassembler};
 use crate::moddata::Ids;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// How long a request waits for its answers (seconds).
 const WAIT: f64 = 5.0;
@@ -123,21 +125,87 @@ fn diagnostic(ids: Ids, id: u32) -> bool {
     }
 }
 
-/// Whether a frame reads as ISO-TP (a single frame carrying a known service, or a part of a longer message).
-fn reads(b: &[u8]) -> bool {
-    match diag::frame(b) {
-        Some(diag::Frame::Single(d)) => {
-            let s = d[0];
-            s == 0x7F
-                || diag::service_name(if diag::is_request(s) {
-                    s
-                } else {
-                    s.wrapping_sub(0x40)
-                }) != "another service"
+/// Whether a message is a known service's request or answer (or a refusal).
+fn known(m: &[u8]) -> bool {
+    match m.first() {
+        Some(0x7F) => m.len() >= 3,
+        Some(&s) => {
+            diag::service_name(if diag::is_request(s) {
+                s
+            } else {
+                s.wrapping_sub(0x40)
+            }) != "another service"
         }
-        Some(_) => true,
         None => false,
     }
+}
+
+/// How one ID's frames read with an address byte in front of each (`ext`) or without: (whole messages of a known
+/// service, frames that fit no message). Each address byte is its own sender.
+fn fit(frames: &[&[u8]], ext: bool) -> (usize, usize) {
+    let mut isotp: Reassembler<Option<u8>> = Reassembler::default();
+    let (mut good, mut broken) = (0, 0);
+    for b in frames {
+        let (addr, body) = match (ext, b.split_first()) {
+            (false, _) => (None, *b),
+            (true, Some((a, rest))) => (Some(*a), rest),
+            (true, None) => {
+                broken += 1;
+                continue;
+            }
+        };
+        match isotp.feed(addr, body) {
+            Fed::Message(m) if known(&m) => good += 1,
+            Fed::Broken(_) => broken += 1,
+            _ => {}
+        }
+    }
+    (good, broken)
+}
+
+/// The ID answers to `id` come from, or the requests it answers go to (request + 8; on 29-bit the two address bytes
+/// swapped).
+fn partner(ids: Ids, id: u32) -> Option<u32> {
+    match ids {
+        Ids::Can11 if (0x700..=0x7F7).contains(&id) && id & 0x8 == 0 => Some(id + 8),
+        Ids::Can11 if (0x708..=0x7FF).contains(&id) => Some(id - 8),
+        Ids::Can29 => Some((id & 0xFFFF_0000) | ((id & 0xFF) << 8) | ((id >> 8) & 0xFF)),
+        _ => None,
+    }
+}
+
+/// Which IDs use extended addressing (an address byte in front of each frame: Toyota's modules behind 750, BMW): those
+/// whose frames make more whole messages that way (or as many, with fewer frames left over). An ID that reads as well
+/// both ways (its sub-addresses 10-3F look like the start or the next part of a message) follows the ID it talks to;
+/// failing that, it reads without.
+fn extended(frames: &[BusFrame]) -> BTreeSet<(u8, u32)> {
+    let mut by: BTreeMap<(u8, u32), Vec<&[u8]>> = BTreeMap::new();
+    for f in frames {
+        by.entry((f.ids as u8, f.id)).or_default().push(&f.data);
+    }
+    let mut ext = BTreeSet::new();
+    let mut tied = Vec::new();
+    for (k, data) in &by {
+        let ((ng, nb), (xg, xb)) = (fit(data, false), fit(data, true));
+        match (xg, nb).cmp(&(ng, xb)) {
+            std::cmp::Ordering::Greater => {
+                ext.insert(*k);
+            }
+            std::cmp::Ordering::Equal => tied.push(*k),
+            std::cmp::Ordering::Less => {}
+        }
+    }
+    for (kind, id) in tied {
+        let ids = if kind == Ids::Can29 as u8 {
+            Ids::Can29
+        } else {
+            Ids::Can11
+        };
+        if partner(ids, id).is_some_and(|p| ext.contains(&(kind, p))) {
+            ext.insert((kind, id));
+        }
+    }
+    ext
 }
 
 /// A diagnostic message from the log.
@@ -149,8 +217,13 @@ struct Msg {
     data: Vec<u8>,
 }
 
-/// Whether `rx` is where answers to `tx` usually come from.
-fn related(ids: Ids, tx: u32, rx: u32) -> bool {
+/// Whether a message from `rx` (with address byte `rx_ext`) comes from where answers to a request to `tx` (with
+/// `ext`) usually come from: the usual answer ID, and behind a gateway the module's own address byte first, as the
+/// request had it (Toyota's 750).
+fn related(ids: Ids, (tx, ext): (u32, Option<u8>), (rx, rx_ext): (u32, Option<u8>)) -> bool {
+    if ext != rx_ext {
+        return false;
+    }
     if usual_rx(ids, tx) == Some(rx) {
         return true;
     }
@@ -183,18 +256,12 @@ pub fn read(text: &str) -> Result<Read, String> {
     let total = frames.len();
     frames.retain(|f| diagnostic(f.ids, f.id));
     // extended addressing, per ID: frames that make sense only with an address byte in front
-    let mut votes: BTreeMap<(u8, u32), (usize, usize)> = BTreeMap::new();
-    for f in &frames {
-        let v = votes.entry((f.ids as u8, f.id)).or_default();
-        v.0 += usize::from(reads(&f.data));
-        v.1 += usize::from(f.data.len() > 1 && reads(&f.data[1..]));
-    }
+    let ext_ids = extended(&frames);
     let mut isotp: Reassembler<(u32, Option<u8>)> = Reassembler::default();
     let mut msgs = Vec::new();
     let mut broken = 0;
     for f in &frames {
-        let (normal, ext) = votes[&(f.ids as u8, f.id)];
-        let (addr, body) = if ext > normal {
+        let (addr, body) = if ext_ids.contains(&(f.ids as u8, f.id)) {
             match f.data.split_first() {
                 Some((a, rest)) => (Some(*a), rest),
                 None => continue,
@@ -263,7 +330,7 @@ pub fn read(text: &str) -> Result<Read, String> {
                 && e.ids == m.ids
                 && m.at - e.at <= WAIT
                 && echo
-                && (!strict || related(e.ids, e.tx.unwrap_or(0), m.id))
+                && (!strict || related(e.ids, (e.tx.unwrap_or(0), e.ext), (m.id, m.ext)))
         };
         let pick = open
             .iter()
@@ -401,6 +468,44 @@ mod tests {
         assert_eq!(e[5].replies[0].from, Some(0x18DAF110));
         assert_eq!(e[6].problem.as_deref(), Some("no answer on the bus"));
         assert!(r.notes[0].contains("CAN frame(s)"));
+    }
+
+    #[test]
+    fn two_modules_behind_a_gateway_are_paired_by_their_address_bytes() {
+        // behind 750 at sub-addresses 10 and 29 (which read as a message's start and its next part), each answering
+        // from 758 with its own address byte first in two frames; the second asked before the first answered
+        let log = "\
+   0.400       750  10 02 21 01 00 00 00 00
+   0.401       750  29 02 21 01 00 00 00 00
+   0.410       758  10 10 0B 61 01 01 02 03
+   0.411       750  10 30 00 00 00 00 00 00
+   0.412       758  10 21 04 05 06 07 08 09
+   0.420       758  29 10 0B 61 01 0A 0B 0C
+   0.421       750  29 30 00 00 00 00 00 00
+   0.422       758  29 21 0D 0E 0F 10 11 12
+";
+        let r = read(log).unwrap();
+        let e = &r.exchanges;
+        assert_eq!(e.len(), 2, "{:?}", r.notes);
+        assert_eq!(
+            (e[0].module(), e[1].module()),
+            ("750.10".into(), "750.29".into())
+        );
+        assert_eq!(
+            e[0].replies,
+            vec![Reply {
+                from: Some(0x758),
+                data: vec![0x61, 0x01, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+            }]
+        );
+        assert_eq!(
+            e[1].replies,
+            vec![Reply {
+                from: Some(0x758),
+                data: vec![0x61, 0x01, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12]
+            }]
+        );
+        assert_eq!(r.notes.len(), 1, "nothing broken or stray: {:?}", r.notes);
     }
 
     #[test]
