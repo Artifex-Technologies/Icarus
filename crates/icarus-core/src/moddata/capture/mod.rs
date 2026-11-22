@@ -74,12 +74,21 @@ impl Exchange {
     pub fn module(&self) -> String {
         match self.tx {
             None => "adapter default (every module)".into(),
-            Some(t) if is_functional(self.ids, t) => {
-                format!("{} (every module)", id_label(self.ids, t, None))
+            Some(t) if is_functional(self.ids, t, self.ext) => {
+                format!("{} (every module)", id_label(self.ids, t, self.ext))
             }
             Some(t) => id_label(self.ids, t, self.ext),
         }
     }
+}
+
+/// BMW's tester ID: requests go out on 6F1 with the module's address first, and come back on 600 + that address with the
+/// tester's address F1 first (DF first: every module).
+pub const BMW_TESTER: u32 = 0x6F1;
+
+/// Whether a request is BMW-style: on 6F1 with a module's address first.
+pub fn is_bmw(ids: Ids, tx: u32, ext: Option<u8>) -> bool {
+    ids == Ids::Can11 && tx == BMW_TESTER && ext.is_some()
 }
 
 /// An ID as Icarus writes it: three hex digits for 11-bit, eight for 29-bit, ".EE" for an extended address.
@@ -94,21 +103,25 @@ pub fn id_label(ids: Ids, id: u32, ext: Option<u8>) -> String {
     }
 }
 
-/// Whether a request ID is the one every module hears: 7DF, a 29-bit ID with the functional format DB (18DB33F1), or
-/// K-line and J1850 header bytes to a functional address (33: ISO 14230; 6A: ISO 9141 and J1850) or with KWP2000's
-/// functional format (C0-FF; a J1850 header of priority 6 or 7 is taken for one too: more is left out rather than less).
-pub fn is_functional(ids: Ids, tx: u32) -> bool {
+/// Whether a request (its ID and extended address) is the one every module hears: 7DF, BMW's 6F1 to DF, a 29-bit ID with
+/// the functional format DB (18DB33F1), or K-line and J1850 header bytes to a functional address (33: ISO 14230; 6A:
+/// ISO 9141 and J1850) or with KWP2000's functional format (C0-FF; a J1850 header of priority 6 or 7 is taken for one
+/// too: more is left out rather than less).
+pub fn is_functional(ids: Ids, tx: u32, ext: Option<u8>) -> bool {
     match ids {
-        Ids::Can11 => tx == 0x7DF,
+        Ids::Can11 => tx == 0x7DF || (is_bmw(ids, tx, ext) && ext == Some(0xDF)),
         Ids::Can29 => (tx >> 16) & 0xFF == 0xDB,
         Ids::Kline => (tx >> 16) & 0xFF >= 0xC0 || matches!((tx >> 8) & 0xFF, 0x33 | 0x6A),
     }
 }
 
-/// The answer ID a request ID usually has: request + 8 (11-bit), or the two address bytes swapped (29-bit, 18DA); a
-/// K-line or J1850 module, known by its address (one byte), answers from that address.
-pub fn usual_rx(ids: Ids, tx: u32) -> Option<u32> {
+/// The answer ID a request (its ID and extended address) usually has: request + 8 (11-bit), GM's 24x answered on 64x,
+/// BMW's 6F1 answered on 600 + the module's address, or the two address bytes swapped (29-bit, 18DA); a K-line or J1850
+/// module, known by its address (one byte), answers from that address.
+pub fn usual_rx(ids: Ids, tx: u32, ext: Option<u8>) -> Option<u32> {
     match ids {
+        _ if is_bmw(ids, tx, ext) => ext.map(|a| 0x600 | u32::from(a)),
+        Ids::Can11 if (0x240..=0x24F).contains(&tx) => Some(tx + 0x400),
         Ids::Can11 if tx <= 0x7F7 => Some(tx + 8),
         Ids::Can29 if (tx >> 16) & 0xFF == 0xDA => {
             Some((tx & 0xFFFF_0000) | ((tx & 0xFF) << 8) | ((tx >> 8) & 0xFF))
@@ -482,10 +495,10 @@ fn split_reads(ex: &[Exchange]) -> BTreeMap<usize, Result<Vec<Exchange>, String>
         let (Some(ids), Some(tx)) = (multi_read(&e.request), e.tx) else {
             continue;
         };
-        if is_functional(e.ids, tx) {
+        if is_functional(e.ids, tx, e.ext) {
             continue;
         }
-        let usual = e.rx.or(usual_rx(e.ids, tx));
+        let usual = e.rx.or(usual_rx(e.ids, tx, e.ext));
         let positive: Vec<&Reply> = e
             .replies
             .iter()
@@ -679,7 +692,7 @@ pub fn build(ex: &[Exchange], o: &Options) -> Result<Imported, String> {
                 );
                 continue;
             }
-            let Some(tx) = e.tx.filter(|t| !is_functional(e.ids, *t)) else {
+            let Some(tx) = e.tx.filter(|t| !is_functional(e.ids, *t, e.ext)) else {
                 leave(
                     what,
                     "sent to every module (7DF, a functional address or the adapter's default): seen, not imported (one module at a time only)"
@@ -712,7 +725,7 @@ pub fn build(ex: &[Exchange], o: &Options) -> Result<Imported, String> {
                     r.data.len() >= n && r.data[0] == sid + 0x40 && r.data[1..n] == e.request[1..n]
                 })
                 .collect();
-            let usual = e.rx.or(usual_rx(e.ids, tx));
+            let usual = e.rx.or(usual_rx(e.ids, tx, e.ext));
             let Some(r) = positive
                 .iter()
                 .find(|r| r.from.is_some() && r.from == usual)
@@ -855,7 +868,7 @@ pub fn build(ex: &[Exchange], o: &Options) -> Result<Imported, String> {
                         "{}: answered from {}, not its usual answer ID {}: check that the answer is this module's",
                         id_label(a.ids, a.tx, a.ext),
                         id_label(a.ids, a.rx, None),
-                        usual_rx(a.ids, a.tx)
+                        usual_rx(a.ids, a.tx, a.ext)
                             .map(|u| id_label(a.ids, u, None))
                             .unwrap_or_default()
                     ));
@@ -877,7 +890,8 @@ pub fn build(ex: &[Exchange], o: &Options) -> Result<Imported, String> {
                         tx: a.tx,
                         rx: Some(a.rx),
                         ext: a.ext,
-                        tester: None,
+                        // BMW's answers carry the tester's address, not the module's
+                        tester: is_bmw(a.ids, a.tx, a.ext).then_some(0xF1),
                         ids: a.ids,
                         bus: None,
                         dialect: None,
@@ -1432,10 +1446,12 @@ mod tests {
 
     #[test]
     fn ids_and_names() {
-        assert_eq!(usual_rx(Ids::Can11, 0x7E0), Some(0x7E8));
-        assert_eq!(usual_rx(Ids::Can29, 0x18DA10F1), Some(0x18DAF110));
-        assert_eq!(usual_rx(Ids::Can29, 0x18DB33F1), None);
-        assert!(is_functional(Ids::Can29, 0x18DB33F1) && is_functional(Ids::Can11, 0x7DF));
+        assert_eq!(usual_rx(Ids::Can11, 0x7E0, None), Some(0x7E8));
+        assert_eq!(usual_rx(Ids::Can29, 0x18DA10F1, None), Some(0x18DAF110));
+        assert_eq!(usual_rx(Ids::Can29, 0x18DB33F1, None), None);
+        assert!(
+            is_functional(Ids::Can29, 0x18DB33F1, None) && is_functional(Ids::Can11, 0x7DF, None)
+        );
         assert_eq!(
             name_from_file("OBDLink 2026-11-19.pklg"),
             "obdlink-2026-11-19"

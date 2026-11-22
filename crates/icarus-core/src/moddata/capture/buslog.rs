@@ -3,7 +3,8 @@
 //! words between them are skipped) or by Linux's `candump` (`(1700000000.123456) can0 7E0#0322123400000000`, or its
 //! default `can0  7E0   [8]  03 22 12 34 00 00 00 00`).
 //!
-//! Diagnostic frames (11-bit IDs 700-7FF, 29-bit IDs 18DAxxxx and 18DBxxxx) are put back together per sender with ISO-TP
+//! Diagnostic frames (11-bit IDs 700-7FF, 29-bit IDs 18DAxxxx and 18DBxxxx, and where the log shows them used that way
+//! BMW's 6F1 and 6xx and GM's 24x and 64x, `make_ids`) are put back together per sender with ISO-TP
 //! (`crate::diag`, the same code `icarus bus watch` uses); flow control frames carry no message. An ID whose frames make
 //! more whole messages with an address byte in front (extended addressing: Toyota's modules behind 750, BMW) is read
 //! that way, told by how its frames read over the whole log (an ID that reads as well both ways follows the ID it talks
@@ -13,7 +14,7 @@
 //! with that service, within five seconds (and among the last 64 requests still waiting). Every other frame on the bus is
 //! ignored.
 
-use super::{is_functional, usual_rx, Exchange, Read, Reply};
+use super::{is_bmw, is_functional, usual_rx, Exchange, Read, Reply, BMW_TESTER};
 use crate::diag::{self, Fed, Reassembler};
 use crate::moddata::Ids;
 use std::collections::{BTreeMap, BTreeSet};
@@ -116,13 +117,62 @@ pub fn parse_line(line: &str, last: f64) -> Option<BusFrame> {
     })
 }
 
-/// Whether an ID carries diagnostic messages.
+/// Whether an ID carries diagnostic messages on every make.
 fn diagnostic(ids: Ids, id: u32) -> bool {
     match ids {
         Ids::Can11 => (0x700..=0x7FF).contains(&id),
         Ids::Can29 => matches!((id >> 16) & 0xFF, 0xDA | 0xDB),
         Ids::Kline => false,
     }
+}
+
+/// The 11-bit IDs outside 700-7FF read as diagnostic ones because the log shows them used that way: (BMW's, GM's).
+/// BMW's tester ID 6F1 (each frame a module's address, then ISO-TP) and the answer IDs 600 + each address it was sent to
+/// (each frame the tester's F1 first); GM's request IDs 240-24F with their answer IDs 640-64F, both in the log. An ID
+/// counts only when its frames make whole messages read that way and nearly all fit (at most one in ten left over), so
+/// other traffic on those IDs (a body module's frames) is not taken for diagnostics.
+fn make_ids(frames: &[BusFrame]) -> (BTreeSet<u32>, BTreeSet<u32>) {
+    let mut by: BTreeMap<u32, Vec<&[u8]>> = BTreeMap::new();
+    for f in frames.iter().filter(|f| {
+        f.ids == Ids::Can11 && ((0x600..=0x6FF).contains(&f.id) || (0x240..=0x24F).contains(&f.id))
+    }) {
+        by.entry(f.id).or_default().push(&f.data);
+    }
+    let mostly = |n: usize, of: usize| n * 10 >= of * 9;
+    let reads = |id: u32, ext: bool| {
+        by.get(&id).is_some_and(|d| {
+            let (good, broken) = fit(d, ext);
+            good > 0 && mostly(d.len() - broken.min(d.len()), d.len())
+        })
+    };
+    let mut bmw = BTreeSet::new();
+    if reads(BMW_TESTER, true) {
+        bmw.insert(BMW_TESTER);
+        let asked: BTreeSet<u8> = by[&BMW_TESTER]
+            .iter()
+            .filter_map(|d| d.first().copied())
+            .collect();
+        for a in asked {
+            let rx = 0x600 | u32::from(a);
+            let f1_first = by.get(&rx).is_some_and(|d| {
+                mostly(
+                    d.iter().filter(|f| f.first() == Some(&0xF1)).count(),
+                    d.len(),
+                )
+            });
+            if rx != BMW_TESTER && f1_first && reads(rx, true) {
+                bmw.insert(rx);
+            }
+        }
+    }
+    let mut gm = BTreeSet::new();
+    for tx in 0x240..=0x24F {
+        let rx = tx + 0x400;
+        if !bmw.contains(&rx) && reads(tx, false) && reads(rx, false) {
+            gm.extend([tx, rx]);
+        }
+    }
+    (bmw, gm)
 }
 
 /// Whether a message is a known service's request or answer (or a refusal).
@@ -219,19 +269,25 @@ struct Msg {
 
 /// Whether a message from `rx` (with address byte `rx_ext`) comes from where answers to a request to `tx` (with
 /// `ext`) usually come from: the usual answer ID, and behind a gateway the module's own address byte first, as the
-/// request had it (Toyota's 750).
+/// request had it (Toyota's 750), or for BMW's 6F1 the tester's F1 first on 600 + the module's address.
 fn related(ids: Ids, (tx, ext): (u32, Option<u8>), (rx, rx_ext): (u32, Option<u8>)) -> bool {
+    if is_bmw(ids, tx, ext) {
+        let from_module = rx_ext == Some(0xF1) && (0x600..=0x6FF).contains(&rx);
+        return from_module && (ext == Some(0xDF) || usual_rx(ids, tx, ext) == Some(rx));
+    }
     if ext != rx_ext {
         return false;
     }
-    if usual_rx(ids, tx) == Some(rx) {
+    if usual_rx(ids, tx, ext) == Some(rx) {
         return true;
     }
     match ids {
         Ids::Can11 => tx == 0x7DF && (0x7E8..=0x7EF).contains(&rx),
         // a functional 29-bit request (18DB33F1): answers to its sender (F1) on 18DA F1 xx
         Ids::Can29 => {
-            is_functional(ids, tx) && (rx >> 16) & 0xFF == 0xDA && (rx >> 8) & 0xFF == tx & 0xFF
+            is_functional(ids, tx, ext)
+                && (rx >> 16) & 0xFF == 0xDA
+                && (rx >> 8) & 0xFF == tx & 0xFF
         }
         Ids::Kline => false,
     }
@@ -254,9 +310,17 @@ pub fn read(text: &str) -> Result<Read, String> {
         );
     }
     let total = frames.len();
-    frames.retain(|f| diagnostic(f.ids, f.id));
-    // extended addressing, per ID: frames that make sense only with an address byte in front
-    let ext_ids = extended(&frames);
+    let (bmw, gm) = make_ids(&frames);
+    let made = |f: &BusFrame| f.ids == Ids::Can11 && (bmw.contains(&f.id) || gm.contains(&f.id));
+    frames.retain(|f| diagnostic(f.ids, f.id) || made(f));
+    // extended addressing, per ID: frames that make sense only with an address byte in front (always on BMW's IDs,
+    // never on GM's)
+    let mut ext_ids = extended(&frames);
+    let can11 = |id: &u32| (Ids::Can11 as u8, *id);
+    ext_ids.extend(bmw.iter().map(can11));
+    for k in gm.iter().map(can11) {
+        ext_ids.remove(&k);
+    }
     let mut isotp: Reassembler<(u32, Option<u8>)> = Reassembler::default();
     let mut msgs = Vec::new();
     let mut broken = 0;
@@ -292,7 +356,7 @@ pub fn read(text: &str) -> Result<Read, String> {
             // a new request from the same sender ends its last one's wait
             for o in open.iter_mut() {
                 let e = &ex[o.0];
-                if e.tx == Some(m.id) && e.ext == m.ext && !is_functional(e.ids, m.id) {
+                if e.tx == Some(m.id) && e.ext == m.ext && !is_functional(e.ids, m.id, m.ext) {
                     o.2 = false;
                 }
             }
@@ -344,7 +408,9 @@ pub fn read(text: &str) -> Result<Read, String> {
         };
         let pending = m.data.len() >= 3 && m.data[0] == 0x7F && m.data[2] == 0x78;
         if !pending {
-            let functional = ex[i].tx.is_some_and(|t| is_functional(ex[i].ids, t));
+            let functional = ex[i]
+                .tx
+                .is_some_and(|t| is_functional(ex[i].ids, t, ex[i].ext));
             ex[i].replies.push(Reply {
                 from: Some(m.id),
                 data: m.data,
@@ -372,6 +438,15 @@ pub fn read(text: &str) -> Result<Read, String> {
     }
     if stray > 0 {
         notes.push(format!("{stray} answer(s) without a request in the log"));
+    }
+    for (make, set) in [("BMW", &bmw), ("GM", &gm)] {
+        if !set.is_empty() {
+            let list: Vec<String> = set.iter().map(|id| format!("{id:03X}")).collect();
+            notes.push(format!(
+                "read as {make}'s diagnostic IDs too: {}",
+                list.join(", ")
+            ));
+        }
     }
     Ok(Read {
         from: "bus capture",
@@ -506,6 +581,96 @@ mod tests {
             }]
         );
         assert_eq!(r.notes.len(), 1, "nothing broken or stray: {:?}", r.notes);
+    }
+
+    #[test]
+    fn bmw_and_gm_diagnostic_ids_are_paired() {
+        // BMW: requests on 6F1 with the module's address first, answers on 600 + that address with F1 first (made-up
+        // identifiers); 6A0 and 6B0 are other traffic, never asked on 6F1
+        let bmw = "\
+   1.000       6F1  12 03 22 40 01 00 00 00
+   1.010       612  F1 05 62 40 01 0A 0B 00
+   1.100       6F1  18 03 22 40 02 00 00 00
+   1.110       618  F1 10 09 62 40 02 01 02
+   1.111       6F1  18 30 00 00 00 00 00 00
+   1.120       618  F1 21 03 04 05 06 00 00
+   1.200       6F1  40 02 10 03 00 00 00 00
+   1.210       640  F1 02 50 03 00 00 00 00
+   1.300       6F1  DF 02 3E 80 00 00 00 00
+   1.400       6A0  02 10 03 00 00 00 00 00
+   1.500       6B0  F1 03 62 40 01 00 00 00
+";
+        let r = read(bmw).unwrap();
+        let e = &r.exchanges;
+        let got: Vec<(String, String)> = e
+            .iter()
+            .map(|x| (x.module(), super::super::hex(&x.request)))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("6F1.12".into(), "22 40 01".into()),
+                ("6F1.18".into(), "22 40 02".into()),
+                ("6F1.40".into(), "10 03".into()),
+                ("6F1.DF (every module)".into(), "3E 80".into()),
+            ],
+            "{:?}",
+            r.notes
+        );
+        let reply = |from: u32, data: &[u8]| Reply {
+            from: Some(from),
+            data: data.to_vec(),
+        };
+        assert_eq!(
+            e[0].replies,
+            vec![reply(0x612, &[0x62, 0x40, 0x01, 0x0A, 0x0B])]
+        );
+        assert_eq!(
+            e[1].replies,
+            vec![reply(0x618, &[0x62, 0x40, 0x02, 1, 2, 3, 4, 5, 6])]
+        );
+        assert_eq!(e[2].replies, vec![reply(0x640, &[0x50, 0x03])]);
+        assert!(
+            r.notes
+                .iter()
+                .any(|n| n == "read as BMW's diagnostic IDs too: 612, 618, 640, 6F1"),
+            "{:?}",
+            r.notes
+        );
+        // as a set: answered from the usual ID, nothing assumed; the answers carry the tester's address
+        let o = super::super::Options {
+            file_name: "bmw.log".into(),
+            from: "bus capture".into(),
+            ..Default::default()
+        };
+        let imp = super::super::build(e, &o).unwrap();
+        assert!(imp.notes.is_empty(), "{:?}", imp.notes);
+        let m = &imp.modules[0].module;
+        assert_eq!(
+            (m.label(), m.rx, m.tester),
+            ("6F1.12".into(), Some(0x612), Some(0xF1))
+        );
+        // GM: requests on 24x, answers on 64x; 24A is never answered and 245/645 carry other traffic
+        let gm = "\
+   0.100       241  03 22 00 0C 00 00 00 00
+   0.110       641  05 62 00 0C 1A F8 00 00
+   0.200       242  03 22 19 40 00 00 00 00
+   0.210       642  04 62 19 40 05 00 00 00
+   0.300       24A  03 22 12 34 00 00 00 00
+   0.400       245  11 22 33 44 55 66 77 88
+   0.410       645  99 88 77 66 55 44 33 22
+";
+        let r = read(gm).unwrap();
+        let e = &r.exchanges;
+        assert_eq!(e.len(), 2, "{:?}", r.notes);
+        assert_eq!((e[0].module(), e[1].module()), ("241".into(), "242".into()));
+        assert_eq!(
+            e[0].replies,
+            vec![reply(0x641, &[0x62, 0x00, 0x0C, 0x1A, 0xF8])]
+        );
+        assert_eq!(e[1].replies, vec![reply(0x642, &[0x62, 0x19, 0x40, 0x05])]);
+        let imp = super::super::build(e, &o).unwrap();
+        assert!(imp.notes.is_empty(), "{:?}", imp.notes);
     }
 
     #[test]

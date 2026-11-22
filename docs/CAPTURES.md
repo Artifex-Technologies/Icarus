@@ -68,7 +68,9 @@ hands-free, a watch. Icarus keeps only the OBD conversation:
   model year when `--make` is not given.
 - The capture file itself is never copied: the set records its file name and sha256 only.
 
-A bus log holds only CAN frames; Icarus keeps the diagnostic ones (IDs 700-7FF, 29-bit 18DA/18DB) and ignores the rest.
+A bus log holds only CAN frames; Icarus keeps the diagnostic ones (IDs 700-7FF, 29-bit 18DA/18DB, and where the log
+shows them used for diagnostics BMW's 6F1 with its answers on 6xx and GM's 24x with their answers on 64x) and ignores
+the rest.
 
 The captures, transcripts and sets of a real vehicle stay outside this repository.
 
@@ -137,5 +139,6 @@ after the gates gets no file in the set (it is listed with the reasons).
 
 - Not yet tried on a real phone's log or a real bus log: the formats are read as their public descriptions give them, and
   tested on small files written for the tests.
-- Bus logs: only diagnostic IDs 700-7FF and 29-bit 18DA/18DB are read (not BMW's 6F1/6xx or GM's 24x/64x).
+- Bus logs: BMW's and GM's modules (requests on 6F1 and 24x) are read into the transcript, but the gates of
+  `icarus obd data` take request IDs 700-7F7 only, so they are listed as refused, not kept in the set.
 - Modules on K-line, J1850 and 29-bit CAN are imported, but `icarus obd data` does not reach them yet.
