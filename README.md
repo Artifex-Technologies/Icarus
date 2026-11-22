@@ -139,7 +139,9 @@ no satellites heard after a minute (the antenna disconnected, its cable damaged,
 (under 25 dB-Hz: the antenna or its cable), a 2D fix, poor precision. `icarus gps speed` is the speedometer check without
 typing: a steady percentage off is a tire size or axle ratio change (`icarus tires` says which), and a vehicle that reports
 no speed while GPS has it moving has lost its speed signal. The window has both on the Tools page (GPS: Listen 10 s, then
-Use in the speedometer check). Positions are shown only with `--position` and are never written to a file or sent anywhere.
+Use in the speedometer check). Positions are shown only with `--position`, and written only into a recording made with
+GPS on purpose: `icarus obd live ... --csv FILE --gps SOURCE`, or Record drive with "with GPS positions" ticked on the Live
+data page, add latitude, longitude and GPS speed columns (empty while there is no fresh fix). Nothing is sent anywhere.
 
 ## The bus
 

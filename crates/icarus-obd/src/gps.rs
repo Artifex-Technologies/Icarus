@@ -362,6 +362,87 @@ pub fn listen(src: &mut Source, seconds: f64) -> Result<Fix, String> {
     Ok(fix)
 }
 
+/// The GPS columns a recording gets when it is made with a GPS (`Follower`): latitude and longitude in degrees, and speed.
+pub const COLUMNS: [&str; 3] = ["GPS latitude [°]", "GPS longitude [°]", "GPS speed [km/h]"];
+
+/// A receiver followed in the background while a drive is recorded: the latest fix, kept by a thread that opens the
+/// source itself and reads it until the follower is dropped. A fix older than three seconds counts as none, so a lost
+/// receiver leaves empty cells, not a stale position.
+pub struct Follower {
+    latest: std::sync::Arc<std::sync::Mutex<(Fix, Option<Instant>)>>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Follower {
+    /// Opens `spec` (as `Source::open`) on a thread of its own; an error opening it comes back here.
+    pub fn start(spec: &str) -> Result<Follower, String> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Mutex};
+        let latest = Arc::new(Mutex::new((Fix::default(), None)));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (l, s, open) = (latest.clone(), stop.clone(), spec.to_string());
+        let thread = std::thread::spawn(move || {
+            let mut src = match Source::open(&open) {
+                Ok(src) => {
+                    let _ = tx.send(Ok(()));
+                    src
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(e));
+                    return;
+                }
+            };
+            let mut fix = Fix::default();
+            while !s.load(Ordering::Relaxed) {
+                match src.line(Duration::from_millis(500)) {
+                    Ok(Some(line)) => {
+                        if fix.feed(&line).is_ok() {
+                            if let Ok(mut g) = l.lock() {
+                                *g = (fix.clone(), Some(Instant::now()));
+                            }
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(_) => break,
+                }
+            }
+        });
+        match rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(Ok(())) => Ok(Follower {
+                latest,
+                stop,
+                thread: Some(thread),
+            }),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(format!("{spec}: the GPS source did not open in time")),
+        }
+    }
+
+    /// The cells for `COLUMNS` now: latitude, longitude and speed when there is a fresh, valid fix.
+    pub fn cells(&self) -> [Option<f64>; 3] {
+        let Ok(g) = self.latest.lock() else {
+            return [None; 3];
+        };
+        let (fix, at) = &*g;
+        let fresh = at.is_some_and(|t| t.elapsed() < Duration::from_secs(3));
+        if !fresh || !(fix.valid || fix.quality.is_some_and(|q| q > 0)) {
+            return [None; 3];
+        }
+        [fix.lat, fix.lon, fix.speed_kmh]
+    }
+}
+
+impl Drop for Follower {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
 /// Adds the checksum to a sentence body (`GPRMC,...` -> `$GPRMC,...*hh`).
 pub fn sentence(body: &str) -> String {
     format!("${body}*{:02X}", body.bytes().fold(0u8, |a, b| a ^ b))
@@ -500,6 +581,23 @@ mod tests {
         assert_eq!(speed_error(0.0, 2.0), None, "standing still says nothing");
         assert_eq!(speed_error(0.0, 75.6), None);
         assert!(speed_sensor_dead(0.0, 75.6) && !speed_sensor_dead(70.0, 75.6));
+    }
+
+    #[test]
+    fn following_a_receiver_while_recording() {
+        let f = Follower::start("sim").unwrap();
+        let mut cells = [None; 3];
+        for _ in 0..30 {
+            cells = f.cells();
+            if cells[0].is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(cells[..2], [Some(0.0), Some(0.0)]);
+        assert!((cells[2].unwrap() - 75.6).abs() < 0.01);
+        drop(f);
+        assert!(Follower::start("nonsense").is_err());
     }
 
     #[test]

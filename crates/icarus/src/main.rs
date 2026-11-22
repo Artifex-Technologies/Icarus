@@ -36,7 +36,7 @@ Vehicle, through an OBD adapter (read-only: nothing is cleared or written):
   icarus obd info  --adapter A               adapter, protocol, VIN, modules, calibration IDs, check-engine light, monitors
   icarus obd codes --adapter A               stored, pending and permanent trouble codes, per module
   icarus obd pids  --adapter A               the live values each module offers, and what they mean
-  icarus obd live  --adapter A [PID...] [--every MS] [--count N] [--csv FILE]
+  icarus obd live  --adapter A [PID...] [--every MS] [--count N] [--csv FILE] [--gps SOURCE]
                                              watch live values (PIDs in hex, e.g. 0C 05 06 07); Ctrl+C stops
   icarus obd scan  --adapter A [--make NAME] [--sweep]
                                              find every module (ABS, airbags, cluster...): identity and trouble codes,
@@ -661,7 +661,7 @@ fn cmd_obd(a: &[String]) -> Result<(), String> {
         a.get(1..).unwrap_or(&[]),
         &[
             "adapter", "every", "count", "csv", "make", "out", "value", "seconds", "module",
-            "battery", "set", "year", "find", "note",
+            "battery", "set", "year", "find", "note", "gps",
         ],
     )?;
     // connected, run, and the senders any broadcast left out noted however it ended
@@ -2051,6 +2051,14 @@ fn obd_live(elm: &mut Elm, args: &Args) -> Result<(), String> {
             "Vehicle speed, corrected for the tires (x{f:.3}) [km/h]"
         ));
     }
+    // --gps SOURCE: position and speed from a receiver in columns of their own (only in this file, never sent)
+    let gps = args
+        .opt("gps")
+        .map(icarus_obd::gps::Follower::start)
+        .transpose()?;
+    if gps.is_some() {
+        names.extend(icarus_obd::gps::COLUMNS.iter().map(|c| c.to_string()));
+    }
     if let Some(f) = csv.as_mut() {
         writeln!(
             f,
@@ -2093,6 +2101,13 @@ fn obd_live(elm: &mut Elm, args: &Args) -> Result<(), String> {
                 value(0x0D)
                     .map(|v| format!("{:.2}", v * f))
                     .unwrap_or_default(),
+            );
+        }
+        if let Some(g) = &gps {
+            row.extend(
+                g.cells()
+                    .iter()
+                    .map(|c| c.map(|v| format!("{v:.6}")).unwrap_or_default()),
             );
         }
         let t = format!("{:.2}", start.elapsed().as_secs_f64());
@@ -2146,4 +2161,36 @@ fn cmd_devices() -> Result<(), String> {
         println!("    {}", f.known.note);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A recording made with --gps has the GPS's three columns, one made without has none (both on the simulators, into
+    /// a file of the test's own).
+    #[test]
+    fn a_recording_with_and_without_gps() {
+        let dir = std::env::temp_dir().join(format!("icarus-rec-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (gps, file) in [(true, "with.csv"), (false, "without.csv")] {
+            let path = dir.join(file).display().to_string();
+            let mut a: Vec<String> = ["0C", "--count", "2", "--every", "100", "--csv", &path]
+                .iter()
+                .map(|x| x.to_string())
+                .collect();
+            if gps {
+                a.extend(["--gps".to_string(), "sim".to_string()]);
+            }
+            let args = parse_args(&a, &["count", "every", "csv", "gps"]).unwrap();
+            let mut elm = Elm::connect(Box::new(icarus_obd::sim::SimCar::new())).unwrap();
+            obd_live(&mut elm, &args).unwrap();
+            let text = std::fs::read_to_string(&path).unwrap();
+            let header = text.lines().find(|l| l.starts_with("time_s")).unwrap();
+            assert_eq!(header.contains("GPS latitude"), gps, "{header}");
+            assert_eq!(header.contains("GPS speed [km/h]"), gps, "{header}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

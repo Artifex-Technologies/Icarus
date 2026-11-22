@@ -73,6 +73,8 @@ pub struct Recorder {
     /// drive is recorded, until the recording stops or the window ends however it ends (the pipe closes, cat and the
     /// inhibitor end with it).
     awake: Option<std::process::Child>,
+    /// A GPS receiver followed while recording (opted into): its columns after the values.
+    gps: Option<icarus_obd::gps::Follower>,
 }
 
 impl Drop for Recorder {
@@ -100,14 +102,19 @@ fn file_name() -> String {
 impl Recorder {
     /// Starts a recording in ~/Documents/Icarus/logs: `fast` read every sweep, `rest` in turn; its first line names the
     /// `adapter` (drivelog::adapter_line).
-    pub fn start(fast: &[u8], rest: &[u8], adapter: &str) -> Result<Recorder, String> {
+    pub fn start(fast: &[u8], rest: &[u8], adapter: &str, gps: Option<&str>) -> Result<Recorder, String> {
+        // the receiver first: a source that does not open stops the recording before a file is made
+        let gps = gps.map(icarus_obd::gps::Follower::start).transpose()?;
         let pids: Vec<u8> = fast.iter().chain(rest).copied().filter(|p| j1979::pid(*p).is_some()).collect();
         let dir = drivelog::folders().into_iter().next().ok_or("no home folder")?;
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let path = dir.join(file_name());
         let mut file = std::fs::File::create(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let names: Vec<String> =
+        let mut names: Vec<String> =
             pids.iter().filter_map(|p| j1979::pid(*p)).map(|d| format!("{} [{}]", d.name, d.unit)).collect();
+        if gps.is_some() {
+            names.extend(icarus_obd::gps::COLUMNS.iter().map(|c| c.to_string()));
+        }
         writeln!(file, "{}\n{}", drivelog::adapter_line(adapter), drivelog::csv_header(&names))
             .map_err(|e| e.to_string())?;
         let awake = std::process::Command::new("systemd-inhibit")
@@ -127,6 +134,7 @@ impl Recorder {
             t0: None,
             rows: 0,
             awake,
+            gps,
         })
     }
 
@@ -137,7 +145,10 @@ impl Recorder {
         }
         let t0 = *self.t0.get_or_insert(at);
         if pid == self.pids[0] && !self.row.is_empty() {
-            let values: Vec<Option<f64>> = self.pids.iter().map(|p| self.row.get(p).copied()).collect();
+            let mut values: Vec<Option<f64>> = self.pids.iter().map(|p| self.row.get(p).copied()).collect();
+            if let Some(g) = &self.gps {
+                values.extend(g.cells());
+            }
             let _ = writeln!(self.file, "{}", drivelog::csv_row(at - t0, &values));
             self.rows += 1;
             self.row.clear();
@@ -462,6 +473,7 @@ mod tests {
             t0: None,
             rows: 0,
             awake: None,
+            gps: None,
         };
         r.add(0x0C, 650.0, 10.0);
         r.add(0x06, -1.5, 10.2);

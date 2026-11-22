@@ -277,6 +277,8 @@ struct App {
     gps_src: String,
     gps_fix: Option<(icarus_obd::gps::Fix, f64)>,
     gps_busy: bool,
+    /// Record drives with the GPS's columns too (opted into on the Live data page).
+    record_gps: bool,
     /// `--gps`: listen once the Tools page is drawn.
     gps_now: bool,
     s_obd: String,
@@ -388,6 +390,7 @@ impl App {
                 .unwrap_or_default(),
             gps_fix: None,
             gps_busy: false,
+            record_gps: false,
             gps_now: start.gps.is_some(),
             s_obd: String::new(),
             page: start.page.unwrap_or(Page::Vehicle),
@@ -490,7 +493,8 @@ impl App {
             return;
         };
         let (fast, rest) = logs::drive_set(&info.live);
-        match logs::Recorder::start(&fast, &rest, &info.adapter) {
+        let gps = (self.record_gps && !self.gps_src.trim().is_empty()).then(|| self.gps_src.trim().to_string());
+        match logs::Recorder::start(&fast, &rest, &info.adapter, gps.as_deref()) {
             Ok(r) => {
                 self.status = format!(
                     "Recording {} values to {} (the Logs page shows it as it comes in).",
@@ -1517,6 +1521,10 @@ impl App {
                 .clicked()
             {
                 self.start_recording();
+            }
+            if self.recorder.is_none() && !self.gps_src.trim().is_empty() {
+                ui.checkbox(&mut self.record_gps, "with GPS positions")
+                    .on_hover_text("Latitude, longitude and GPS speed from the Tools page's GPS source, in the recording's file only");
             }
             ui.label(
                 RichText::new(format!(
