@@ -22,6 +22,8 @@ pub enum ObdError {
     NoData,
     /// An answer that could not be read.
     Garbled(String),
+    /// A request that would change the vehicle, refused because its Read-Only switch is on (`lock`).
+    ReadOnly(String),
 }
 
 impl fmt::Display for ObdError {
@@ -39,6 +41,7 @@ impl fmt::Display for ObdError {
             ),
             ObdError::NoData => f.write_str("no module answered (the vehicle may not offer this)"),
             ObdError::Garbled(l) => write!(f, "could not read the answer {l:?}"),
+            ObdError::ReadOnly(why) => write!(f, "{why}"),
         }
     }
 }
@@ -285,10 +288,21 @@ impl Elm {
         self.command(hex, timeout)
     }
 
+    /// The backstop under every write path: a request that would change the vehicle (`lock::changes_vehicle`) is sent
+    /// only when its Read-Only switch is off, whichever part of Icarus asks. Reads, and the requests that hand control
+    /// back, always go.
+    fn read_only_check(&mut self, data: &[u8]) -> Result<(), ObdError> {
+        if crate::lock::changes_vehicle(data) {
+            crate::lock::writes_allowed(self).map_err(ObdError::ReadOnly)?;
+        }
+        Ok(())
+    }
+
     /// Sends an OBD request (e.g. `[0x01, 0x0C]`, engine speed) to every module and returns each one's answer. A sender
     /// whose message does not add up is left out and named in `dropped` (and once a connection in `take_dropped`'s notes);
     /// the other senders' answers are kept.
     pub fn request(&mut self, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
+        self.read_only_check(data)?;
         self.format_frames()?;
         if self.target.is_some() {
             self.ok_commands(&["ATSH7DF", "ATCRA", "ATFCSM0"])?;
@@ -325,6 +339,7 @@ impl Elm {
     /// Sends a request to one module on 11-bit CAN: to request ID `tx`, listening only to answer ID `rx` (usually tx + 8).
     /// Flow control for long answers goes to `tx` too, which modules outside OBD's own 7E0-7E7 need.
     pub fn request_to(&mut self, tx: u16, rx: u16, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
+        self.read_only_check(data)?;
         if !matches!(self.protocol, Protocol::Can11At500 | Protocol::Can11At250) {
             return Err(ObdError::Adapter(format!(
                 "talking to one module needs 11-bit CAN; this vehicle uses {}",

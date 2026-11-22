@@ -99,7 +99,10 @@ Each vehicle has a Read-Only switch on the Garage page (or `icarus garage read-o
 still reads everything (codes, live data, module values, reports, recordings) and refuses to clear codes, run actuator
 tests or change settings on that vehicle, before anything is sent. Each write reads
 the VIN from the vehicle on the port at that moment, so the switch follows the vehicle; while any vehicle is switched, one
-whose VIN cannot be read is refused too. The Vehicle page's Writes line shows the connected vehicle's switch. The list is
+whose VIN cannot be read is refused too. Under the write features, the adapter link itself refuses any request that would
+change a switched vehicle, whichever part of Icarus sends it: only reads (OBD-II 01-0A, KWP2000 and UDS 18, 19, 1A, 21,
+22), tester present and the requests that hand control back (the default session, an output returned to its module) go,
+so a test already running can always be ended. The Vehicle page's Writes line shows the connected vehicle's switch. The list is
 `~/.config/icarus/read-only.toml`, on this computer only.
 
 ## Tires and gears

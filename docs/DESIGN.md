@@ -78,6 +78,9 @@ A module is bricked when a write stops halfway or puts the wrong thing in. Icaru
 10. **The Read-Only switch.** Every write path asks `lock::writes_allowed` first: when the vehicle on the port (by the VIN
     read at that moment) has its Read-Only switch on (Garage page, `icarus garage read-only VIN on`), the write is refused;
     while any vehicle is switched, one whose VIN cannot be read is refused too (done: clearing, actuator tests, settings).
+    Under them, `Elm::request` and `request_to` refuse any request `lock::changes_vehicle` names (everything but reads,
+    tester present and hand-backs) to a switched vehicle, so a write path that forgets the check still cannot reach it.
+    Any other link to a vehicle (a J2534 device, SocketCAN diagnostics) must do the same before it sends.
 
 ## Writing a module (flash): the conditions
 
