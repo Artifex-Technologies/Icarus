@@ -79,30 +79,45 @@ impl Session {
         }
     }
 
-    /// An L2CAP packet on `cid`, cut into ACL fragments of at most `frag` bytes.
-    fn l2(&mut self, sent: bool, handle: u16, cid: u16, data: &[u8], frag: usize) {
+    /// An L2CAP packet on `cid` as ACL fragments of at most `frag` bytes (not yet logged: no time).
+    fn frags(sent: bool, handle: u16, cid: u16, data: &[u8], frag: usize) -> Vec<Pkt> {
         let mut pdu = (data.len() as u16).to_le_bytes().to_vec();
         pdu.extend_from_slice(&cid.to_le_bytes());
         pdu.extend_from_slice(data);
-        for (i, part) in pdu.chunks(frag.max(1)).enumerate() {
-            let flags = if i == 0 { 0x2000 } else { 0x1000 };
-            let mut acl = ((handle & 0x0FFF) | flags).to_le_bytes().to_vec();
-            acl.extend_from_slice(&(part.len() as u16).to_le_bytes());
-            acl.extend_from_slice(part);
-            self.t += 0.01;
-            self.packets.push(Pkt {
-                clock: self.t,
-                sent,
-                kind: Kind::Acl,
-                bytes: acl,
-            });
+        pdu.chunks(frag.max(1))
+            .enumerate()
+            .map(|(i, part)| {
+                let flags = if i == 0 { 0x2000 } else { 0x1000 };
+                let mut acl = ((handle & 0x0FFF) | flags).to_le_bytes().to_vec();
+                acl.extend_from_slice(&(part.len() as u16).to_le_bytes());
+                acl.extend_from_slice(part);
+                Pkt {
+                    clock: 0.0,
+                    sent,
+                    kind: Kind::Acl,
+                    bytes: acl,
+                }
+            })
+            .collect()
+    }
+
+    /// A packet logged next.
+    fn log(&mut self, mut p: Pkt) {
+        self.t += 0.01;
+        p.clock = self.t;
+        self.packets.push(p);
+    }
+
+    /// An L2CAP packet on `cid`, cut into ACL fragments of at most `frag` bytes.
+    fn l2(&mut self, sent: bool, handle: u16, cid: u16, data: &[u8], frag: usize) {
+        for p in Session::frags(sent, handle, cid, data, frag) {
+            self.log(p);
         }
     }
 
     fn event(&mut self, bytes: &[u8]) {
-        self.t += 0.01;
-        self.packets.push(Pkt {
-            clock: self.t,
+        self.log(Pkt {
+            clock: 0.0,
             sent: false,
             kind: Kind::Event,
             bytes: bytes.to_vec(),
@@ -224,6 +239,49 @@ impl Session {
             // the long answers cut into small ACL fragments
             let ans = uih(2, false, i % 2 == 0, a.as_bytes());
             s.l2(false, 0x0B, 0x40, &ans, 10);
+        }
+        s
+    }
+
+    /// An adapter conversation (handle 0x0B, RFCOMM channel 0x41/0x40) whose packets are cut into ACL fragments of each
+    /// side's own size (the phone's 6 bytes, the adapter's 10) and interleaved: each answer's fragments alternate with
+    /// those of the phone's next command.
+    pub fn interleaved() -> Session {
+        let mut s = Session::new();
+        s.connect(0x0B, 1, 3, 0x40, 0x41);
+        let talk = [
+            ("ATZ\r", "ELM327 v1.4b\r\r>"),
+            ("ATH1\r", "OK\r\r>"),
+            ("ATSH7E0\r", "OK\r\r>"),
+            (
+                "221234\r",
+                "7E8 10 0B 62 12 34 01 02 03\r7E8 21 04 05 06 07 08 AA AA\r\r>",
+            ),
+            ("2105\r", "7E8 03 61 05 09\r\r>"),
+            ("22 5678\r", "7E8 04 62 56 78 0C\r\r>"),
+        ];
+        let cmd = |c: &str| Session::frags(true, 0x0B, 0x41, &uih(2, true, false, c.as_bytes()), 6);
+        let ans =
+            |a: &str| Session::frags(false, 0x0B, 0x40, &uih(2, false, false, a.as_bytes()), 10);
+        for p in cmd(talk[0].0) {
+            s.log(p);
+        }
+        for (k, (_, a)) in talk.iter().enumerate() {
+            let mut answer = ans(a).into_iter();
+            let mut next = talk
+                .get(k + 1)
+                .map(|t| cmd(t.0))
+                .unwrap_or_default()
+                .into_iter();
+            loop {
+                let (x, y) = (answer.next(), next.next());
+                if x.is_none() && y.is_none() {
+                    break;
+                }
+                for p in [x, y].into_iter().flatten() {
+                    s.log(p);
+                }
+            }
         }
         s
     }

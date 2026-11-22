@@ -115,7 +115,9 @@ after the gates gets no file in the set (it is listed with the reasons).
 - **Apple PacketLogger** (`.pklg`): records of a 4-byte length (of what follows it), 4-byte seconds, 4-byte microseconds,
   one type byte (02 ACL data the phone sent, 03 ACL data it received; commands, events, audio and notes are skipped) and
   the packet; big-endian, or little-endian told by the first record.
-- Inside: HCI ACL fragments put back together into L2CAP packets per connection and direction; RFCOMM channels found from
+- Inside: HCI ACL fragments put back together into L2CAP packets per connection and direction (without directions, one
+  packet open for each side, each fragment given to the one it fits by the side's own fragment size, what is left and
+  the RFCOMM checksum, so the two sides' fragments may interleave); RFCOMM channels found from
   the L2CAP connection requests (PSM 3) and forgotten at their disconnection, each channel known by the ID its packets
   carry in each direction (the two sides choose their IDs apart, and reuse them: an SDP query and the RFCOMM channel after
   it often both get 0x40), or, for a channel opened before the log began, by RFCOMM frames whose checksums

@@ -18,7 +18,8 @@
 //!
 //! **Layers.** HCI ACL packets (a 12-bit connection handle, a packet-boundary flag: a start or a continuation, and the
 //! length) are put back together into L2CAP packets per connection and direction (L2CAP: a length, a channel ID, the
-//! data). The signalling channel's connection requests and answers say which channels are RFCOMM (PSM 3), and its
+//! data); without directions (link type 187) a packet stays open for each side, and a continuation goes to the one it
+//! fits (`pick`: each side's own fragment size, what is left, and the RFCOMM checksum). The signalling channel's connection requests and answers say which channels are RFCOMM (PSM 3), and its
 //! disconnections which were closed; each side picks its own channel IDs (a phone's SDP query and its RFCOMM channel often
 //! both get 0x40), so a channel is known by the ID its packets carry in each direction, and an ID used again names the
 //! newer channel. A channel set up before the capture began is tried as RFCOMM, and kept only when its frames' checksums
@@ -353,10 +354,63 @@ fn flip(d: Option<Dir>) -> Option<Dir> {
 /// receives carry its own; the direction tells the two apart (without directions, both share one key).
 type ChanKey = (u16, Option<Dir>, u16);
 
+/// An L2CAP packet being put back together: its bytes so far, and how long its first fragment was.
+struct Part {
+    buf: Vec<u8>,
+    first: usize,
+}
+
+impl Part {
+    /// The bytes still to come, once the L2CAP header (its length) is in.
+    fn room(&self) -> Option<usize> {
+        (self.buf.len() >= 4)
+            .then(|| (4 + u16le(&self.buf) as usize).saturating_sub(self.buf.len()))
+    }
+}
+
+/// A whole L2CAP packet (at least its header and length, more cut off): (handle, channel, data).
+fn whole(handle: u16, mut pdu: Vec<u8>) -> (u16, u16, Vec<u8>) {
+    pdu.truncate(4 + u16le(&pdu) as usize);
+    let cid = u16le(&pdu[2..]);
+    pdu.drain(..4);
+    (handle, cid, pdu)
+}
+
+/// Which open packet a continuation fragment belongs to, without directions (each side may have one open). Each side
+/// cuts its packets into fragments of its own size, so a fragment of a packet is as long as the packet's first and
+/// leaves more to come, or is its last, as long as what is left (and no longer than the first); failing that, one it
+/// does not run past. Of two, a last fragment that makes a whole RFCOMM frame (its checksum right) goes first, then
+/// one that leaves more to come, then the older.
+fn pick(open: &[Part], frag: &[u8]) -> Option<usize> {
+    let n = frag.len();
+    let likely = |p: &Part| {
+        p.room()
+            .is_some_and(|r| (n == p.first && n < r) || (n == r && n <= p.first))
+    };
+    let fits = |p: &Part| p.room().is_none_or(|r| n <= r);
+    // 2: it ends the packet as a whole RFCOMM frame; 1: more is to come; 0: it ends the packet as something else
+    let rank = |p: &Part| match p.room() {
+        Some(r) if r == n => {
+            let mut b = p.buf[4..].to_vec();
+            b.extend_from_slice(frag);
+            2 * usize::from(rfcomm(&b).is_some())
+        }
+        _ => 1,
+    };
+    let best = |of: &dyn Fn(&Part) -> bool| {
+        (0..open.len())
+            .filter(|i| of(&open[*i]))
+            .rev()
+            .max_by_key(|i| rank(&open[*i]))
+    };
+    best(&likely).or_else(|| best(&fits))
+}
+
 /// L2CAP packets put back together from ACL fragments, and which channels are RFCOMM.
 #[derive(Default)]
 struct L2cap {
-    partial: HashMap<(u16, Option<Dir>), Vec<u8>>,
+    /// Packets open per connection and direction: one a direction; without directions, one for each side (two).
+    partial: HashMap<(u16, Option<Dir>), Vec<Part>>,
     /// (handle, the request's direction, signalling identifier) -> the PSM asked for.
     asked: HashMap<(u16, Option<Dir>, u8), u16>,
     /// Channels open now: set up by a connection, closed by a disconnection; a newer connection replaces an older one.
@@ -381,34 +435,43 @@ impl L2cap {
             self.malformed += 1;
             return None;
         };
-        let key = (handle, a.dir);
-        let buf = if start {
-            self.partial.insert(key, data.to_vec());
-            self.partial.get_mut(&key)?
-        } else {
-            match self.partial.get_mut(&key) {
-                Some(b) => {
-                    b.extend_from_slice(data);
-                    b
-                }
-                None => {
-                    self.malformed += 1;
-                    return None;
-                }
+        let open = self.partial.entry((handle, a.dir)).or_default();
+        let i = if start {
+            let part = Part {
+                buf: data.to_vec(),
+                first: data.len(),
+            };
+            // with directions, a side's new packet ends its last one (given up)
+            if a.dir.is_some() {
+                open.clear();
             }
+            if part.room() == Some(0) {
+                return Some(whole(handle, part.buf));
+            }
+            // without, a start while one is open is the other side's: one kept for each side
+            if open.len() >= 2 {
+                open.remove(0);
+            }
+            open.push(part);
+            open.len() - 1
+        } else {
+            let i = if open.len() > 1 {
+                pick(open, data)
+            } else {
+                (!open.is_empty()).then_some(0)
+            };
+            let Some(i) = i else {
+                self.malformed += 1;
+                return None;
+            };
+            open[i].buf.extend_from_slice(data);
+            i
         };
-        if buf.len() < 4 {
+        // whole once its header's length is in
+        if open[i].room().is_none_or(|r| r > 0) {
             return None;
         }
-        let need = 4 + u16le(buf) as usize;
-        if buf.len() < need {
-            return None;
-        }
-        let mut pdu = self.partial.remove(&key)?;
-        pdu.truncate(need);
-        let cid = u16le(&pdu[2..]);
-        pdu.drain(..4);
-        Some((handle, cid, pdu))
+        Some(whole(handle, open.remove(i).buf))
     }
 
     /// The signalling channel, `dir` the way this packet went: which dynamic channels are RFCOMM (PSM 3), which are
@@ -874,6 +937,38 @@ mod tests {
         l2.signalling(0x0B, got, &sig(0x07, 10, &[0x60, 0x41]));
         assert!(l2.chans.is_empty(), "{:?}", l2.chans);
         assert_eq!(l2.others, 1);
+    }
+
+    #[test]
+    fn both_sides_fragments_interleaved_without_directions_are_kept_apart() {
+        let s = Session::interleaved();
+        for (what, file) in [
+            ("pcap 187", pcap_file(&s.packets, false)),
+            ("pcap 201", pcap_file(&s.packets, true)),
+            ("pklg", pklg_file(&s.packets, true)),
+        ] {
+            let r = read_ok(&file);
+            let e = &r.exchanges;
+            let reqs: Vec<String> = e.iter().map(|x| super::super::hex(&x.request)).collect();
+            assert_eq!(
+                reqs,
+                vec!["22 12 34", "21 05", "22 56 78"],
+                "{what}: {:?}",
+                r.notes
+            );
+            assert_eq!(
+                e[0].replies[0].data,
+                vec![0x62, 0x12, 0x34, 1, 2, 3, 4, 5, 6, 7, 8],
+                "{what}"
+            );
+            assert_eq!(e[1].replies[0].data, vec![0x61, 0x05, 0x09], "{what}");
+            assert_eq!(e[2].replies[0].data, vec![0x62, 0x56, 0x78, 0x0C], "{what}");
+            assert!(
+                r.notes.iter().all(|n| !n.contains("malformed")),
+                "{what}: {:?}",
+                r.notes
+            );
+        }
     }
 
     #[test]
