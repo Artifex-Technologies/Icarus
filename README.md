@@ -385,6 +385,12 @@ from `18DAF1xx`; `ATCP` and `ATSH` set the header): a scan asks the engine and t
 `--sweep` every `18DAxxF1`, and `icarus obd module 18DA30F1` one of them. A profile can name a range of request IDs
 answered a fixed distance away: GM's body modules (requests `240`-`24F`, answers 400 higher) are asked that way, each named
 by its number. 29-bit modules and GM's body range are read only, with no Clear button.
+A module written down with `bus = "ms-can"` (Ford's medium-speed CAN on pins 3 and 11) is asked through an OBDLink: Icarus
+switches the STN chip to that bus (`STP53`) for that module's requests only and back to the vehicle's own protocol
+(`ATSP6`) afterwards, whatever happened (a failed way back is tried again before the next request); a plain ELM327 lists
+such a module as not reachable, with the reason. A request longer than one CAN frame goes as `STPX` on an OBDLink and is
+refused on a plain ELM327. These STN commands are from the STN11xx/STN22xx reference and have been tested on the
+simulator only (`elm::STN_UNVERIFIED`).
 A module's codes are asked for in every read-only form in turn (UDS `19 02` with the status masks FF, 2F, 09 and 08;
 KWP2000 `18` with status 02 and 00; ISO 14230 `13` with and without the group), since modules refuse the forms they do not
 support; when none gives them, Icarus shows what each request got (no answer, or the module's refusal and its reason).

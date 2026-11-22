@@ -4,6 +4,7 @@
 //! Icarus switches headers on (`ATH1`) so every answer says which module sent it (several answer an OBD request: engine,
 //! transmission...), and puts multi-frame CAN messages (ISO 15765-2, "ISO-TP") back together itself.
 
+use crate::link::Bus;
 use crate::port::Port;
 use std::fmt;
 use std::io;
@@ -169,9 +170,16 @@ pub struct Elm {
     /// on 29-bit CAN).
     target: Option<(u32, u32)>,
     /// The extended address byte `request_to` uses from now on (`set_ext`: a module behind a gateway, such as Toyota's
-    /// body modules behind 750), and the one the adapter is set to (`ATCEA`), which follows it before each request.
+    /// body modules behind 750), and the one the adapter is set to (`ATCEA`), which follows it before each request (None:
+    /// not known, after a switch of bus, so it is said again).
     want_ext: Option<u8>,
-    ext: Option<u8>,
+    ext: Option<Option<u8>>,
+    /// The bus `request_to` uses from now on (`set_bus`), and the one the adapter is on (None: not known, after a switch
+    /// that failed), which follows it before each request; broadcasts and watching always go on the main bus.
+    want_bus: Bus,
+    bus: Option<Bus>,
+    /// Why this adapter cannot switch to the medium-speed CAN, once it refused to.
+    no_ms_can: Option<String>,
     /// CAN auto-formatting is off (`ATCAF0`, for watching the bus): it goes back on (`ATCAF1`) before the next request,
     /// which needs the adapter to add and strip ISO-TP's length bytes.
     raw_frames: bool,
@@ -210,7 +218,10 @@ impl Elm {
             voltage: None,
             target: None,
             want_ext: None,
-            ext: None,
+            ext: Some(None),
+            want_bus: Bus::Main,
+            bus: Some(Bus::Main),
+            no_ms_can: None,
             raw_frames: false,
             dropped: Vec::new(),
             unseen: Vec::new(),
@@ -310,6 +321,14 @@ impl Elm {
     /// the other senders' answers are kept.
     pub fn request(&mut self, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
         self.read_only_check(data)?;
+        if self.protocol.is_can() && data.len() > 7 {
+            return Err(ObdError::Adapter(format!(
+                "a request of {} bytes to every module does not fit one CAN frame, and Icarus sends no longer one to \
+                 every module",
+                data.len()
+            )));
+        }
+        self.bus_to(Bus::Main)?;
         self.format_frames()?;
         self.ext_to(None)?;
         self.point_at_everyone()?;
@@ -351,9 +370,59 @@ impl Elm {
         Ok(())
     }
 
-    /// What this adapter reaches on this vehicle: the ID width of the vehicle's CAN protocol.
+    /// What this adapter reaches on this vehicle: the ID width of the vehicle's CAN protocol, and Ford's medium-speed CAN
+    /// when the adapter has an STN chip (an OBDLink, which switches buses: `STN_UNVERIFIED`), the vehicle's OBD-II runs on
+    /// 11-bit CAN at 500 kbit/s (Ford's high-speed CAN), and the adapter has not refused the switch.
     pub fn reach(&self) -> crate::link::Reach {
-        crate::link::Reach::of(self.protocol)
+        crate::link::Reach {
+            ms_can: self.stn.is_some()
+                && self.no_ms_can.is_none()
+                && self.protocol == Protocol::Can11At500,
+            ..crate::link::Reach::of(self.protocol)
+        }
+    }
+
+    /// Moves the `request_to` calls that follow to `bus` (the switch is made now; `uds::at_module` moves them back).
+    /// Broadcasts and watching always go on the main bus, switching back first. A switch that fails is tried again before
+    /// the next request, so no request goes out on a bus other than its own.
+    pub fn set_bus(&mut self, bus: Bus) -> Result<(), ObdError> {
+        if bus == Bus::MsCan && !self.reach().ms_can {
+            return Err(ObdError::Adapter(self.no_ms_can.clone().unwrap_or_else(|| {
+                "switching to Ford's medium-speed CAN needs an OBDLink (an STN chip) on a vehicle whose OBD-II runs on \
+                 11-bit CAN at 500 kbit/s; this adapter or vehicle is not one"
+                    .into()
+            })));
+        }
+        self.want_bus = bus;
+        self.bus_to(bus)
+    }
+
+    /// Puts the adapter on `bus` when it is not there (or not known to be). After a switch the adapter's header, filters
+    /// and extended addressing are said again before the next request.
+    fn bus_to(&mut self, bus: Bus) -> Result<(), ObdError> {
+        if self.bus == Some(bus) {
+            return Ok(());
+        }
+        let cmd = match bus {
+            Bus::MsCan => STN_UNVERIFIED.ms_can,
+            Bus::Main => STN_UNVERIFIED.main_bus,
+        };
+        self.bus = None;
+        (self.target, self.ext) = (Some(UNKNOWN_TARGET), None);
+        match self.ok_commands(&[cmd]) {
+            Ok(()) => {
+                self.bus = Some(bus);
+                Ok(())
+            }
+            Err(ObdError::Adapter(why)) if bus == Bus::MsCan => {
+                let why =
+                    format!("this adapter refused to switch to Ford's medium-speed CAN ({why})");
+                self.no_ms_can = Some(why.clone());
+                self.want_bus = Bus::Main;
+                Err(ObdError::Adapter(why))
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Sends a request to one module on CAN: to request ID `tx`, listening only to answer ID `rx`. 11-bit IDs (up to 7FF;
@@ -375,6 +444,26 @@ impl Elm {
                 self.protocol.describe()
             )));
         }
+        if wide && self.want_bus == Bus::MsCan {
+            return Err(ObdError::Adapter(
+                "on the medium-speed CAN Icarus asks on 11-bit IDs only".into(),
+            ));
+        }
+        // a single frame carries 7 bytes (6 behind a gateway); longer requests go as several frames, which only an STN
+        // chip's STPX sends
+        let long = data.len() > if self.want_ext.is_some() { 6 } else { 7 };
+        if long && (self.stn.is_none() || self.want_ext.is_some()) {
+            return Err(ObdError::Adapter(format!(
+                "a request of {} bytes needs several CAN frames, which {}",
+                data.len(),
+                if self.stn.is_none() {
+                    "only an adapter with an STN chip (an OBDLink, with STPX) sends; this ELM327 sends one frame"
+                } else {
+                    "Icarus does not send to a module behind a gateway"
+                }
+            )));
+        }
+        self.bus_to(self.want_bus)?;
         self.format_frames()?;
         self.ext_to(self.want_ext)?;
         if self.target != Some((tx, rx)) {
@@ -382,7 +471,13 @@ impl Elm {
             self.ok_commands(&cmds.iter().map(String::as_str).collect::<Vec<_>>())?;
             self.target = Some((tx, rx));
         }
-        match self.ext {
+        if long {
+            let cmd = stn_long_request(tx, data);
+            let lines = self.command(&cmd, Duration::from_secs(5))?;
+            check_errors(&lines)?;
+            return parse_lines(&lines, self.protocol);
+        }
+        match self.want_ext {
             None => self.send_request(data),
             Some(a) => {
                 let lines = self.request_lines(data)?;
@@ -399,13 +494,13 @@ impl Elm {
 
     /// Puts the adapter's extended addressing (`ATCEA hh`, or `ATCEA` alone for off) where a request needs it.
     fn ext_to(&mut self, want: Option<u8>) -> Result<(), ObdError> {
-        if self.ext != want {
+        if self.ext != Some(want) {
             let cmd = match want {
                 Some(a) => format!("ATCEA{a:02X}"),
                 None => "ATCEA".to_string(),
             };
             self.ok_commands(&[&cmd])?;
-            self.ext = want;
+            self.ext = Some(want);
         }
         Ok(())
     }
@@ -434,6 +529,7 @@ impl Elm {
     /// link comes back as itself. If the watch went well but `ATCAF1` failed, the watch's result comes back, saying that
     /// auto-formatting goes back on before the next request (it stays pending until it does).
     pub fn monitor(&mut self, each: impl FnMut(&str) -> bool) -> Result<String, ObdError> {
+        self.bus_to(Bus::Main)?;
         self.point_at_everyone()?;
         let silent: &[&str] = if self.stn.is_some() {
             &["ATCSM1", "STCMM0"]
@@ -550,6 +646,46 @@ impl Elm {
         check_errors(&lines)?;
         Ok(lines)
     }
+}
+
+/// The adapter's header and filters are not known (after a switch of bus): any request says them again.
+const UNKNOWN_TARGET: (u32, u32) = (u32::MAX, u32::MAX);
+
+/// The STN-only commands Icarus sends (an OBDLink's STN chip; a plain ELM327 is never sent them), and the ELM327 command
+/// that goes back from them.
+pub struct StnCommands {
+    /// Switches to Ford's medium-speed CAN: ISO 15765, 11-bit IDs, 125 kbit/s, on OBD pins 3 and 11 (`STP 53`).
+    pub ms_can: &'static str,
+    /// Back to the vehicle's own OBD-II protocol on pins 6 and 14: ISO 15765-4 CAN, 11-bit, 500 kbit/s (`ATSP 6`, the
+    /// ELM327's own command, which the STN takes). Switching to MS-CAN is offered only on that protocol.
+    pub main_bus: &'static str,
+    /// One request longer than a CAN frame, which the STN sends as ISO-TP frames itself: the header, the data, one answer
+    /// expected (`STPX`). `{H}` and `{D}` are the header's and the data's hex digits.
+    pub long_request: &'static str,
+}
+
+/// UNVERIFIED ON HARDWARE: these are the STN11xx/STN22xx family reference's commands as I understand them (STP 53 for the
+/// MS-CAN on an OBDLink MX+ or EX, STPX for long messages), tested only against the simulated adapter. Until each has been
+/// seen to work on a real OBDLink, a scan's "no answer" from a medium-speed module, or a refused long request, may be this
+/// table's fault rather than the vehicle's. Everything Icarus sends to switch buses or send long requests is here.
+pub const STN_UNVERIFIED: StnCommands = StnCommands {
+    ms_can: "STP53",
+    main_bus: "ATSP6",
+    long_request: "STPX H:{H},D:{D},R:1",
+};
+
+/// The `STPX` command for one long request to `tx`.
+pub fn stn_long_request(tx: u32, data: &[u8]) -> String {
+    let header = if tx > 0x7FF {
+        format!("{tx:08X}")
+    } else {
+        format!("{tx:03X}")
+    };
+    let hex: String = data.iter().map(|b| format!("{b:02X}")).collect();
+    STN_UNVERIFIED
+        .long_request
+        .replace("{H}", &header)
+        .replace("{D}", &hex)
 }
 
 /// The commands that point the adapter at one module, `Some((tx, rx))`, or back at every module (OBD's broadcast), for
@@ -1090,6 +1226,57 @@ mod tests {
             check_errors(&lines(&["UNABLE TO CONNECT"])),
             Err(ObdError::NoConnection(_))
         ));
+    }
+
+    #[test]
+    fn long_requests_go_as_stpx_on_an_obdlink_only() {
+        use crate::sim::recording::Recorder;
+        use crate::sim::FORD_VIN;
+        // four identifiers in one read: nine bytes, more than a CAN frame carries
+        let req = [0x22, 0xF1, 0x87, 0xF1, 0x88, 0xF1, 0x89, 0xF1, 0x90];
+        let (port, sent) = Recorder::new(SimCar::ford(true));
+        let mut elm = Elm::connect(Box::new(port)).unwrap();
+        sent.lock().unwrap().clear();
+        let a = elm.request_to(0x7E0, 0x7E8, &req).unwrap();
+        let d = &a[0].data;
+        assert_eq!(&d[..3], &[0x62, 0xF1, 0x87]);
+        let text = String::from_utf8_lossy(d);
+        assert!(
+            text.contains("ICARUS-FORD-PCM") && text.contains(FORD_VIN),
+            "{text}"
+        );
+        let log = sent.lock().unwrap().clone();
+        let stpx = log
+            .iter()
+            .position(|l| l == "STPX H:7E0,D:22F187F188F189F190,R:1\r");
+        let sh = log.iter().position(|l| l == "ATSH7E0\r");
+        assert!(sh.is_some() && stpx > sh, "{log:?}");
+        assert!(!log.iter().any(|l| l == "22F187F188F189F190\r"), "{log:?}");
+        assert_eq!(
+            stn_long_request(0x18DA_30F1, &[0x22, 0xF1, 0x87]),
+            "STPX H:18DA30F1,D:22F187,R:1"
+        );
+        // a plain ELM327 sends single frames only: refused before anything is sent
+        let (port, sent) = Recorder::new(SimCar::ford(false));
+        let mut elm = Elm::connect(Box::new(port)).unwrap();
+        sent.lock().unwrap().clear();
+        let e = elm.request_to(0x7E0, 0x7E8, &req).unwrap_err().to_string();
+        assert!(e.contains("STN") && e.contains("9 bytes"), "{e}");
+        assert!(sent.lock().unwrap().is_empty());
+        assert!(elm
+            .request(&[0x01, 0x0C, 0x0D, 0x05, 0x0B, 0x0F, 0x11, 0x04])
+            .is_err());
+        // the Read-Only backstop holds for long requests too: a write to a switched vehicle never reaches STPX
+        crate::lock::switch_for_test(&[FORD_VIN]);
+        let (port, sent) = Recorder::new(SimCar::ford(true));
+        let mut elm = Elm::connect(Box::new(port)).unwrap();
+        sent.lock().unwrap().clear();
+        let write = [0x2E, 0xF1, 0x90, 0x31, 0x46, 0x41, 0x49, 0x43, 0x41];
+        let e = elm.request_to(0x7E0, 0x7E8, &write).unwrap_err();
+        assert!(matches!(e, ObdError::ReadOnly(_)), "{e}");
+        let log = sent.lock().unwrap().clone();
+        assert!(!log.iter().any(|l| l.starts_with("STPX")), "{log:?}");
+        crate::lock::switch_for_test(&[]);
     }
 
     #[test]

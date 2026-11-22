@@ -721,9 +721,17 @@ fn scan(
             i + 1,
             list.len()
         )));
-        if guard.present(elm, m).map_err(e)? {
+        let there = match guard.present(elm, m) {
+            // the adapter refused to switch to that module's bus: it, and the bus from now on, is listed as not reachable
+            Err(icarus_obd::elm::ObdError::Adapter(why)) if m.on_ms_can() => {
+                unreachable.push(format!("{:03X}  {}: {why}", m.tx, m.name));
+                continue;
+            }
+            r => r.map_err(e)?,
+        };
+        if there {
             found += 1;
-            let (identity, dtcs) = uds::at(elm, m.ext, |l| {
+            let (identity, dtcs) = uds::at_module(elm, m, |l| {
                 Ok((
                     uds::module_identity(l, m.tx, m.rx())?,
                     uds::module_dtcs(l, m.tx, m.rx())?,

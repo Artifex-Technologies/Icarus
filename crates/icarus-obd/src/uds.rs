@@ -436,6 +436,30 @@ pub fn at<T>(
     Ok(v)
 }
 
+/// Runs `f` with the requests to module `m`, on its bus and with its address byte (`at`): for a module on Ford's
+/// medium-speed CAN the link switches to it first and back to the main bus afterwards, whatever `f` returned (and if the
+/// way back fails, the link tries again before its next request). A module the link cannot reach is refused, with the
+/// reason, before anything is sent. Every scan and module loop goes through this.
+pub fn at_module<T>(
+    link: &mut dyn Link,
+    m: &crate::vehicles::ModuleAddr,
+    f: impl FnOnce(&mut dyn Link) -> Result<T, ObdError>,
+) -> Result<T, ObdError> {
+    if let Some(why) = m.unreachable(link.reach()) {
+        return Err(ObdError::Adapter(format!("{:03X} {}: {why}", m.tx, m.name)));
+    }
+    if !m.on_ms_can() {
+        return at(link, m.ext, f);
+    }
+    let r = link
+        .set_bus(crate::link::Bus::MsCan)
+        .and_then(|()| at(link, m.ext, f));
+    let back = link.set_bus(crate::link::Bus::Main);
+    let v = r?;
+    back?;
+    Ok(v)
+}
+
 /// Whether a module answers at request ID `tx`: any answer counts, a refusal too.
 pub fn present(elm: &mut dyn Link, tx: u32, rx: u32) -> Result<bool, ObdError> {
     for req in [&[0x3E, 0x00][..], &[0x3E, 0x01][..]] {
@@ -494,7 +518,7 @@ impl ScanGuard {
         if self.answer_of(m.tx).is_some() {
             return Ok(false);
         }
-        let there = at(elm, m.ext, |l| present(l, m.tx, m.rx()))?;
+        let there = at_module(elm, m, |l| present(l, m.tx, m.rx()))?;
         if there {
             self.answers.insert(m.rx(), m.tx);
         }
@@ -895,6 +919,148 @@ mod tests {
             .unwrap()
             .iter()
             .any(|s| s.0 == "7EA"));
+    }
+
+    /// A body control module on Ford's medium-speed CAN, as a profile names one (`bus = "ms-can"`).
+    fn ms_bcm() -> crate::vehicles::ModuleAddr {
+        crate::vehicles::ModuleAddr {
+            tx: 0x726,
+            rx: None,
+            name: "BCM (body)".into(),
+            ext: None,
+            bus: Some("ms-can".into()),
+            checked: false,
+        }
+    }
+
+    /// What was sent to the adapter since the last clear, and cleared.
+    fn taken(sent: &std::sync::Mutex<Vec<String>>) -> Vec<String> {
+        std::mem::take(&mut *sent.lock().unwrap())
+    }
+
+    #[test]
+    fn the_medium_speed_can_through_an_obdlink_in_order_and_back() {
+        use crate::sim::recording::Recorder;
+        let (port, sent) = Recorder::new(SimCar::ford(true));
+        let mut elm = Elm::connect(Box::new(port)).unwrap();
+        assert!(elm.stn.is_some() && elm.reach().ms_can);
+        let bcm = ms_bcm();
+        assert_eq!(bcm.unreachable(elm.reach()), None);
+        // on the main bus nothing answers at 726: the module is on the other one
+        assert!(!present(&mut elm, 0x726, 0x72E).unwrap());
+        taken(&sent);
+        let (id, codes) = at_module(&mut elm, &bcm, |l| {
+            Ok((
+                module_identity(l, 0x726, 0x72E)?,
+                module_dtcs(l, 0x726, 0x72E)?,
+            ))
+        })
+        .unwrap();
+        assert!(
+            id.contains(&("part number", "ICARUS-FORD-BCM".to_string())),
+            "{id:?}"
+        );
+        assert_eq!(codes.unwrap().1[0].code, "B1342");
+        // in order: the switch, the module's header, filter and flow control, its requests, then the way back last
+        let log = taken(&sent);
+        let at = |c: &str| {
+            log.iter()
+                .position(|l| *l == format!("{c}\r"))
+                .unwrap_or_else(|| panic!("{c} was not sent: {log:?}"))
+        };
+        let order = [
+            "STP53",
+            "ATSH726",
+            "ATCRA72E",
+            "ATFCSH726",
+            "ATFCSD300000",
+            "ATFCSM1",
+            "22F187",
+            "1902FF",
+        ];
+        let positions: Vec<usize> = order.iter().map(|c| at(c)).collect();
+        assert!(positions.windows(2).all(|w| w[0] < w[1]), "{log:?}");
+        assert_eq!(positions[0], 0, "the switch comes first: {log:?}");
+        assert_eq!(log.last().map(String::as_str), Some("ATSP6\r"), "{log:?}");
+        assert_eq!(log.iter().filter(|l| l.starts_with("STP53")).count(), 1);
+        assert_eq!(log.iter().filter(|l| l.starts_with("ATSP")).count(), 1);
+        // back on the main bus: the broadcast's header is said again before the next broadcast, which the engine answers
+        assert_eq!(
+            crate::j1979::vin(&mut elm).unwrap().as_deref(),
+            Some(crate::sim::FORD_VIN)
+        );
+        let log = taken(&sent);
+        let (sh, req) = (
+            log.iter().position(|l| l == "ATSH7DF\r"),
+            log.iter().position(|l| l == "0902\r"),
+        );
+        assert!(sh.is_some() && sh < req, "{log:?}");
+        assert!(!log.iter().any(|l| l.starts_with("STP")), "{log:?}");
+        // the way back whatever happened: a module whose requests fail still ends on the main bus
+        let e = at_module(&mut elm, &bcm, |_| -> Result<(), ObdError> {
+            Err(ObdError::NoData)
+        });
+        assert!(e.is_err());
+        assert_eq!(taken(&sent), ["STP53\r", "ATSP6\r"]);
+    }
+
+    #[test]
+    fn a_plain_elm327_refuses_the_medium_speed_can_with_the_reason() {
+        use crate::sim::recording::Recorder;
+        let (port, sent) = Recorder::new(SimCar::ford(false));
+        let mut elm = Elm::connect(Box::new(port)).unwrap();
+        assert!(!elm.reach().ms_can);
+        let bcm = ms_bcm();
+        let why = bcm.unreachable(elm.reach()).unwrap();
+        assert!(
+            why.contains("medium-speed") && why.contains("OBDLink"),
+            "{why}"
+        );
+        taken(&sent);
+        let e = at_module(&mut elm, &bcm, |l| present(l, 0x726, 0x72E))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("OBDLink"), "{e}");
+        assert!(elm.set_bus(crate::link::Bus::MsCan).is_err());
+        assert!(
+            taken(&sent).is_empty(),
+            "nothing is sent to an ELM327 for it"
+        );
+    }
+
+    #[test]
+    fn an_obdlink_that_refuses_the_switch_and_a_way_back_that_fails() {
+        use crate::sim::recording::Recorder;
+        let bcm = ms_bcm();
+        // refused: the reason names the command, the way back is said anyway, and the bus is unreachable from then on
+        let (mut port, sent) = Recorder::new(SimCar::ford(true));
+        port.unknown = Some("STP53");
+        let mut elm = Elm::connect(Box::new(port)).unwrap();
+        taken(&sent);
+        let e = at_module(&mut elm, &bcm, |l| present(l, 0x726, 0x72E))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("refused") && e.contains("STP53"), "{e}");
+        assert_eq!(taken(&sent), ["STP53\r", "ATSP6\r"]);
+        assert!(!elm.reach().ms_can && bcm.unreachable(elm.reach()).is_some());
+        assert!(
+            present(&mut elm, 0x7E0, 0x7E8).unwrap(),
+            "the main bus works"
+        );
+        // the way back refused once: the next request says it again before anything else
+        let (mut port, sent) = Recorder::new(SimCar::ford(true));
+        (port.unknown, port.once) = (Some("ATSP6"), true);
+        let mut elm = Elm::connect(Box::new(port)).unwrap();
+        taken(&sent);
+        assert!(at_module(&mut elm, &bcm, |l| present(l, 0x726, 0x72E)).is_err());
+        taken(&sent);
+        assert!(present(&mut elm, 0x7E0, 0x7E8).unwrap());
+        let log = taken(&sent);
+        assert_eq!(log.first().map(String::as_str), Some("ATSP6\r"), "{log:?}");
+        assert!(
+            log.iter().position(|l| l == "ATSH7E0\r") > Some(0),
+            "{log:?}"
+        );
     }
 
     #[test]

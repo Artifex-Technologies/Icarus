@@ -709,7 +709,7 @@ fn print_module(elm: &mut Elm, m: &vehicles::ModuleAddr) -> Result<(), String> {
     if let Some(a) = m.ext {
         println!("     behind the gateway at {tx:03X}, address {a:02X} (read only)");
     }
-    let (identity, codes) = uds::at(elm, m.ext, |l| {
+    let (identity, codes) = uds::at_module(elm, m, |l| {
         Ok((
             uds::module_identity(l, tx, rx)?,
             uds::module_dtcs(l, tx, rx)?,
@@ -793,7 +793,15 @@ fn obd_scan(elm: &mut Elm, args: &Args) -> Result<(), String> {
             later.push(format!("{:03X}  {}: {why}", m.tx, m.name));
             continue;
         }
-        if guard.present(elm, m).map_err(e)? {
+        let there = match guard.present(elm, m) {
+            // the adapter refused to switch to that module's bus: it, and the bus from now on, is listed as not reachable
+            Err(icarus_obd::elm::ObdError::Adapter(why)) if m.on_ms_can() => {
+                later.push(format!("{:03X}  {}: {why}", m.tx, m.name));
+                continue;
+            }
+            r => r.map_err(e)?,
+        };
+        if there {
             found += 1;
             print_module(elm, m)?;
         }

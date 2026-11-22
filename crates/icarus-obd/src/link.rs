@@ -33,6 +33,15 @@ impl Reach {
     }
 }
 
+/// The CAN bus a link's requests go out on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Bus {
+    /// The vehicle's diagnostic CAN on OBD pins 6 and 14 (high-speed CAN): every OBD-II request.
+    Main,
+    /// Ford's medium-speed CAN on pins 3 and 11 (125 kbit/s, 11-bit IDs).
+    MsCan,
+}
+
 pub trait Link {
     /// An OBD-II request to every module (CAN: the functional ID 7DF, or 18DB33F1 on 29-bit CAN); each module's answer.
     fn request(&mut self, data: &[u8]) -> Result<Vec<Answer>, ObdError>;
@@ -58,6 +67,16 @@ pub trait Link {
     /// Which modules this link can reach (`vehicles::ModuleAddr::unreachable` says why one is not).
     fn reach(&self) -> Reach {
         Reach::of(self.protocol())
+    }
+    /// Moves the `request_to` calls that follow to another bus (`uds::at_module` does, and moves them back). Broadcasts
+    /// always go on the main bus. A link that cannot switch refuses any bus but the main one.
+    fn set_bus(&mut self, bus: Bus) -> Result<(), ObdError> {
+        match bus {
+            Bus::Main => Ok(()),
+            Bus::MsCan => Err(ObdError::Adapter(
+                "this link cannot switch to Ford's medium-speed CAN".into(),
+            )),
+        }
     }
     /// The notes on modules left out of broadcasts' answers since the last call (a message that did not add up), each once
     /// a connection: whoever shows a broadcast's answers shows these too, so a module is never lost silently.
@@ -101,6 +120,9 @@ impl Link for Elm {
     }
     fn reach(&self) -> Reach {
         Elm::reach(self)
+    }
+    fn set_bus(&mut self, bus: Bus) -> Result<(), ObdError> {
+        Elm::set_bus(self, bus)
     }
     fn take_dropped(&mut self) -> Vec<String> {
         Elm::take_dropped(self)

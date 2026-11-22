@@ -353,13 +353,16 @@ fn vehicle_modules() -> Result<String, String> {
             continue;
         }
         let (tx, rx) = (m.tx, m.rx());
-        let codes = uds::at(&mut elm, m.ext, |l| {
+        let codes = match uds::at_module(&mut elm, &m, |l| {
             if !uds::present(l, tx, rx)? {
                 return Ok(None);
             }
             uds::module_dtcs(l, tx, rx).map(Some)
-        })
-        .map_err(e)?;
+        }) {
+            // the adapter refused to switch to that module's bus
+            Err(icarus_obd::elm::ObdError::Adapter(_)) if m.on_ms_can() => continue,
+            r => r.map_err(e)?,
+        };
         let Some(codes) = codes else { continue };
         match codes {
             Err(why) => {

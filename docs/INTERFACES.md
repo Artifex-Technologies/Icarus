@@ -117,6 +117,10 @@ FORScan 2.3.71 (an Inno Setup 5.5.7 installer; the program is packed): no hardwa
 ELM327 adapters, the OBDLink family (it carries their firmware updates: SX/EX on STN2230/2231, MX+ on STN2255/2256) and the
 vLinker FS, and through J2534 cables. Icarus already speaks the ELM327/STN language (the OBDLink MX+ included) and now has a
 J2534 layer, so the adapters FORScan uses are Icarus's adapters too; a vLinker FS will show its USB ID in `icarus devices`.
+Ford's medium-speed CAN (pins 3 and 11), where FORScan finds older Fords' body modules, is reached the way the OBDLink does
+it: Icarus switches the STN chip to that bus (`STP53`) for a module marked `bus = "ms-can"` and back (`ATSP6`) afterwards,
+and sends requests longer than a frame with `STPX`. These commands are in one table (`elm::STN_UNVERIFIED`) and have not
+yet been checked on a real OBDLink.
 
 ## Techstream (Toyota)
 

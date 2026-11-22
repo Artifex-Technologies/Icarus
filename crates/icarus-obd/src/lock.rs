@@ -40,6 +40,12 @@ thread_local! {
     static FOR_TEST: std::cell::RefCell<Option<BTreeSet<String>>> = const { std::cell::RefCell::new(None) };
 }
 
+/// Switches `vins` to read-only for this test thread (instead of the file in the real config folder).
+#[cfg(test)]
+pub(crate) fn switch_for_test(vins: &[&str]) {
+    FOR_TEST.with(|t| *t.borrow_mut() = Some(vins.iter().map(|v| v.to_string()).collect()));
+}
+
 /// The VINs switched to read-only.
 pub fn read_only() -> BTreeSet<String> {
     #[cfg(test)]
@@ -134,7 +140,7 @@ mod tests {
     const SWITCHED: &str = "1ABCDEFGH12345678";
 
     fn switched(vins: &[&str]) {
-        FOR_TEST.with(|t| *t.borrow_mut() = Some(vins.iter().map(|v| v.to_string()).collect()));
+        switch_for_test(vins);
     }
 
     #[test]
