@@ -167,6 +167,10 @@ pub struct Elm {
     pub voltage: Option<f64>,
     /// The one module requests go to (request ID, answer ID), or None: OBD's broadcast to every module (7DF).
     target: Option<(u16, u16)>,
+    /// The extended address byte `request_to` uses from now on (`set_ext`: a module behind a gateway, such as Toyota's
+    /// body modules behind 750), and the one the adapter is set to (`ATCEA`), which follows it before each request.
+    want_ext: Option<u8>,
+    ext: Option<u8>,
     /// CAN auto-formatting is off (`ATCAF0`, for watching the bus): it goes back on (`ATCAF1`) before the next request,
     /// which needs the adapter to add and strip ISO-TP's length bytes.
     raw_frames: bool,
@@ -204,6 +208,8 @@ impl Elm {
             protocol: Protocol::Other(0),
             voltage: None,
             target: None,
+            want_ext: None,
+            ext: None,
             raw_frames: false,
             dropped: Vec::new(),
             unseen: Vec::new(),
@@ -304,6 +310,7 @@ impl Elm {
     pub fn request(&mut self, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
         self.read_only_check(data)?;
         self.format_frames()?;
+        self.ext_to(None)?;
         if self.target.is_some() {
             self.ok_commands(&["ATSH7DF", "ATCRA", "ATFCSM0"])?;
             self.target = None;
@@ -352,6 +359,7 @@ impl Elm {
             )));
         }
         self.format_frames()?;
+        self.ext_to(self.want_ext)?;
         if self.target != Some((tx, rx)) {
             let (sh, cra, fc) = (
                 format!("ATSH{tx:03X}"),
@@ -361,7 +369,32 @@ impl Elm {
             self.ok_commands(&[&sh, &cra, &fc, "ATFCSD300000", "ATFCSM1"])?;
             self.target = Some((tx, rx));
         }
-        self.send_request(data)
+        match self.ext {
+            None => self.send_request(data),
+            Some(a) => {
+                let lines = self.request_lines(data)?;
+                parse_lines_ext(&strip_ext(&lines, a, self.protocol), self.protocol)
+            }
+        }
+    }
+
+    /// Sets the extended address byte for the requests `request_to` sends from now on (None: normal addressing). Kept
+    /// until changed; broadcasts always go without one. `uds::at` sets it for one module's requests and puts it back.
+    pub fn set_ext(&mut self, ext: Option<u8>) {
+        self.want_ext = ext;
+    }
+
+    /// Puts the adapter's extended addressing (`ATCEA hh`, or `ATCEA` alone for off) where a request needs it.
+    fn ext_to(&mut self, want: Option<u8>) -> Result<(), ObdError> {
+        if self.ext != want {
+            let cmd = match want {
+                Some(a) => format!("ATCEA{a:02X}"),
+                None => "ATCEA".to_string(),
+            };
+            self.ok_commands(&[&cmd])?;
+            self.ext = want;
+        }
+        Ok(())
     }
 
     /// Watches every frame on the bus (STMA on an STN chip, else ATMA), handing each line to `each` until it returns false or
@@ -509,6 +542,34 @@ impl Elm {
     }
 }
 
+/// Answers from a module behind a gateway carry its address byte first in each frame (Toyota: the same byte the request
+/// carried, `758 2A 03 62 ...`). Some adapters strip it, some show it: which, is read from the first frame, whose next byte
+/// must be a single or first frame's PCI (0x0_ or 0x1_), and the byte is taken off every frame that has it then.
+pub fn strip_ext(lines: &[String], addr: u8, protocol: Protocol) -> Vec<String> {
+    let hc = protocol.header_chars();
+    let a = format!("{addr:02X}");
+    let compact: Vec<String> = lines
+        .iter()
+        .map(|l| l.chars().filter(|c| !c.is_whitespace()).collect())
+        .collect();
+    let shown = compact.iter().find(|h| h.len() > hc + 2).is_some_and(|h| {
+        h[hc..].starts_with(&a) && matches!(h.as_bytes().get(hc + 2), Some(b'0' | b'1'))
+    });
+    if !shown {
+        return lines.to_vec();
+    }
+    compact
+        .into_iter()
+        .map(|h| {
+            if h.len() > hc + 2 && h[hc..].starts_with(&a) {
+                format!("{}{}", &h[..hc], &h[hc + 2..])
+            } else {
+                h
+            }
+        })
+        .collect()
+}
+
 fn check_errors(lines: &[String]) -> Result<(), ObdError> {
     for l in lines {
         let u = l.to_uppercase();
@@ -562,6 +623,21 @@ pub fn parse_broadcast(lines: &[String], protocol: Protocol) -> Result<Parsed, O
 /// Every sender's answers, and (sender, why) for each sender whose message did not add up (its answers left out, in the
 /// order the problems were found). Err only for a line that is not a frame at all.
 fn parse_each(lines: &[String], protocol: Protocol) -> Result<Parsed, ObdError> {
+    parse_sized(lines, protocol, 8)
+}
+
+/// `parse_lines` for a module behind a gateway (extended addressing, after `strip_ext`): each frame carries 7 bytes of
+/// ISO-TP, its address byte having taken the eighth.
+pub fn parse_lines_ext(lines: &[String], protocol: Protocol) -> Result<Vec<Answer>, ObdError> {
+    let (answers, bad) = parse_sized(lines, protocol, 7)?;
+    match bad.into_iter().next() {
+        Some((_, why)) => Err(ObdError::Garbled(why)),
+        None => Ok(answers),
+    }
+}
+
+/// `parse_each` for frames of `frame` ISO-TP bytes (8 on classic CAN, 7 behind a gateway).
+fn parse_sized(lines: &[String], protocol: Protocol, frame: usize) -> Result<Parsed, ObdError> {
     let hc = protocol.header_chars();
     let mut frames: Vec<(String, Vec<u8>)> = Vec::new();
     for l in lines {
@@ -618,7 +694,7 @@ fn parse_each(lines: &[String], protocol: Protocol) -> Result<Parsed, ObdError> 
         let problem = match pci >> 4 {
             0 => {
                 let len = (pci & 0x0F) as usize;
-                if len == 0 || len > 7 || b.len() < 1 + len {
+                if len == 0 || len >= frame || b.len() < 1 + len {
                     Some(format!("{from} single frame of {len} bytes"))
                 } else {
                     out.push(Message {
@@ -638,11 +714,14 @@ fn parse_each(lines: &[String], protocol: Protocol) -> Result<Parsed, ObdError> 
                 } else {
                     0
                 };
-                if b.len() < 8 {
-                    Some(format!("{from} first frame without its 6 data bytes"))
+                if b.len() < frame {
+                    Some(format!(
+                        "{from} first frame without its {} data bytes",
+                        frame - 2
+                    ))
                 } else if len == 0 {
                     Some(format!("{from} message longer than classic ISO-TP carries"))
-                } else if len <= 7 {
+                } else if len < frame {
                     Some(format!(
                         "{from} first frame of a {len}-byte message (that is a single frame's)"
                     ))
@@ -654,7 +733,7 @@ fn parse_each(lines: &[String], protocol: Protocol) -> Result<Parsed, ObdError> 
                     out.push(Message {
                         a: Answer {
                             from: from.clone(),
-                            data: b[2..8].to_vec(),
+                            data: b[2..frame].to_vec(),
                         },
                         len,
                         next: 1,
@@ -724,6 +803,29 @@ fn parse_each(lines: &[String], protocol: Protocol) -> Result<Parsed, ObdError> 
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn address_bytes_behind_a_gateway() {
+        let l = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        // shown by the adapter: taken off every frame that has it
+        let shown = l(&["758 2A 10 0B 62 F1 87 38 39", "758 2A 21 32 32 31 2D 49 43"]);
+        assert_eq!(
+            strip_ext(&shown, 0x2A, Protocol::Can11At500),
+            l(&["758100B62F1873839", "758213232312D4943"])
+        );
+        // stripped by the adapter: a first frame's PCI comes first, and a consecutive frame 2A is not mistaken for it
+        let stripped = l(&["758 10 0B 62 F1 87 38 39 32", "758 2A 32 31 2D 49 43"]);
+        assert_eq!(strip_ext(&stripped, 0x2A, Protocol::Can11At500), stripped);
+        let a = parse_lines_ext(
+            &strip_ext(&shown, 0x2A, Protocol::Can11At500),
+            Protocol::Can11At500,
+        )
+        .unwrap();
+        assert_eq!(
+            a[0].data,
+            [0x62, 0xF1, 0x87, 0x38, 0x39, 0x32, 0x32, 0x31, 0x2D, 0x49, 0x43]
+        );
+    }
     use super::*;
     use crate::sim::SimCar;
 

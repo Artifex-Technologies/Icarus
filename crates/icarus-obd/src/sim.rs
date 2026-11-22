@@ -53,6 +53,9 @@ pub struct SimCar {
     pub acked: bool,
     /// The VIN it answers (`VIN`, unless a test gives another vehicle's).
     vin: String,
+    /// The extended address byte the adapter puts first in each frame (ATCEA hh), for the modules behind the gateway at
+    /// 750 (Toyota's body module 40, the tire pressure module 2A), which answer from 758 with the same byte first.
+    cea: Option<u8>,
 }
 
 impl Default for SimCar {
@@ -95,6 +98,7 @@ impl SimCar {
             loud: false,
             acked: false,
             vin: VIN.to_string(),
+            cea: None,
         }
     }
 
@@ -155,6 +159,27 @@ impl SimCar {
     }
 
     /// One module's message as the adapter would print it.
+    /// A message from a module behind the gateway: ISO-TP frames with the module's address byte first (one byte less of
+    /// data in each), as the adapter shows them with headers on.
+    fn ext_frames(&self, header: &str, addr: u8, payload: &[u8]) -> Vec<String> {
+        let sep = if self.spaces { " " } else { "" };
+        let line = |f: Vec<u8>| format!("{header}{sep}{}", self.hex(&[&[addr][..], &f].concat()));
+        if payload.len() <= 6 {
+            return vec![line([&[payload.len() as u8][..], payload].concat())];
+        }
+        let mut out = vec![line(
+            [
+                &[0x10 | (payload.len() >> 8) as u8, payload.len() as u8][..],
+                &payload[..5],
+            ]
+            .concat(),
+        )];
+        for (i, chunk) in payload[5..].chunks(6).enumerate() {
+            out.push(line([&[0x20 | ((i + 1) as u8 & 0x0F)][..], chunk].concat()));
+        }
+        out
+    }
+
     fn frames(&self, header: &str, payload: &[u8]) -> Vec<String> {
         let sep = if self.spaces { " " } else { "" };
         if payload.len() <= 7 {
@@ -391,6 +416,19 @@ impl SimCar {
 
     fn answer(&mut self, req: &[u8]) -> Vec<String> {
         self.tick += 1;
+        if self.header == 0x750 {
+            // the gateway: only a frame with a module's address byte reaches a module behind it
+            let Some(a) = self.cea else {
+                return vec!["NO DATA".into()];
+            };
+            let Some(p) = self.module(0x7500 | a as u16, req) else {
+                return vec!["NO DATA".into()];
+            };
+            if self.filter.is_some_and(|f| f != 0x758) || !self.headers {
+                return vec!["NO DATA".into()];
+            }
+            return self.ext_frames("758", a, &p);
+        }
         let mut msgs: Vec<(String, Vec<u8>)> = if self.header == 0x7DF {
             self.broadcast(req)
                 .into_iter()
@@ -446,6 +484,9 @@ impl SimCar {
             0x780 => (b"89170-ICARUS", true, &[]),
             0x7C0 => (b"83800-ICARUS", true, &[]),
             0x7C4 => (b"88650-ICARUS", false, &[0x94, 0x21]),
+            // behind the gateway at 750 (keys above any 11-bit ID): the main body module (40), tire pressure (2A)
+            0x7540 => (b"89221-ICARUS", true, &[0x92, 0x34, 0x00, 0x09]),
+            0x752A => (b"42607-ICARUS", true, &[]),
             _ => return None,
         };
         let codes: &[u8] = if self.cleared.contains(&tx) {
@@ -756,6 +797,17 @@ impl SimCar {
                 self.filter = None;
                 ok
             }
+            "ATCEA" => {
+                self.cea = None;
+                ok
+            }
+            _ if c.starts_with("ATCEA") && c.len() == 7 => match u8::from_str_radix(&c[5..], 16) {
+                Ok(a) => {
+                    self.cea = Some(a);
+                    ok
+                }
+                Err(_) => vec!["?".into()],
+            },
             _ if c.starts_with("ATSH") || c.starts_with("ATCRA") => {
                 match u16::from_str_radix(&c[if c.starts_with("ATSH") { 4 } else { 5 }..], 16) {
                     Ok(id) if id <= 0x7FF => {

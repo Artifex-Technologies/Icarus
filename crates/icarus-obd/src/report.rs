@@ -140,12 +140,22 @@ pub fn collect(
             .map(vehicles::candidates)
             .unwrap_or_default()
         {
-            if m.unreachable().is_some() || !uds::present(elm, m.tx, m.rx())? {
+            if m.unreachable().is_some() {
                 continue;
             }
-            let id = uds::module_identity(elm, m.tx, m.rx())?;
-            let codes = uds::module_dtcs(elm, m.tx, m.rx())?;
-            d.modules.push((m, id, codes));
+            let (tx, rx) = (m.tx, m.rx());
+            let found = uds::at(elm, m.ext, |l| {
+                if !uds::present(l, tx, rx)? {
+                    return Ok(None);
+                }
+                Ok(Some((
+                    uds::module_identity(l, tx, rx)?,
+                    uds::module_dtcs(l, tx, rx)?,
+                )))
+            })?;
+            if let Some((id, codes)) = found {
+                d.modules.push((m, id, codes));
+            }
         }
     }
     Ok(d)

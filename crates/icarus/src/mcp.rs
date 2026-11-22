@@ -334,10 +334,19 @@ fn vehicle_modules() -> Result<String, String> {
         .map(vehicles::candidates)
         .unwrap_or_default()
     {
-        if m.unreachable().is_some() || !uds::present(&mut elm, m.tx, m.rx()).map_err(e)? {
+        if m.unreachable().is_some() {
             continue;
         }
-        match uds::module_dtcs(&mut elm, m.tx, m.rx()).map_err(e)? {
+        let (tx, rx) = (m.tx, m.rx());
+        let codes = uds::at(&mut elm, m.ext, |l| {
+            if !uds::present(l, tx, rx)? {
+                return Ok(None);
+            }
+            uds::module_dtcs(l, tx, rx).map(Some)
+        })
+        .map_err(e)?;
+        let Some(codes) = codes else { continue };
+        match codes {
             Err(why) => {
                 o += &format!(
                     "{:03X} {}: answered, but none of Icarus's requests gave its codes ({why}).\n",

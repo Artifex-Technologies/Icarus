@@ -710,8 +710,13 @@ fn scan(
         )));
         if guard.present(elm, m).map_err(e)? {
             found += 1;
-            let identity = uds::module_identity(elm, m.tx, m.rx()).map_err(e)?;
-            let dtcs = uds::module_dtcs(elm, m.tx, m.rx()).map_err(e)?;
+            let (identity, dtcs) = uds::at(elm, m.ext, |l| {
+                Ok((
+                    uds::module_identity(l, m.tx, m.rx())?,
+                    uds::module_dtcs(l, m.tx, m.rx())?,
+                ))
+            })
+            .map_err(e)?;
             send(Event::Module(ModuleView {
                 addr: m.clone(),
                 identity,

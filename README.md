@@ -259,8 +259,9 @@ services 21 and 22 only, built by Icarus from the identifier (files carry no raw
 identification, which is kept for a later build and never sent today); never on 7DF or any answer ID; airbag and occupant
 modules identity only, and on a make whose profile names no airbag module, a module of unknown kind gets nothing either;
 nothing that needs a diagnostic session is sent (Icarus opens none); at least 50 ms between any two sends, a busy module
-slowed, a refused request, one that keeps failing or a silent module dropped. Modules behind an extended
-address (Toyota's 750 body and TPMS), on 29-bit IDs or K-line are listed as not reachable yet. `--adapter sim` has a set of
+slowed, a refused request, one that keeps failing or a silent module dropped. Module data from modules behind an
+extended address (Toyota's 750 body and TPMS), on 29-bit IDs or K-line is listed as not reachable yet (a scan does reach
+Toyota's modules behind 750: identity and codes, read only). `--adapter sim` has a set of
 its own (made-up identifiers on 700, 701 and 7E0) to try it on.
 
 ## Learning module data from a capture
@@ -372,6 +373,9 @@ allow one value a request.
 `scan` and `module` work like a dealer tool (Techstream, FORScan): they talk to each module directly in UDS (ISO 14229) or
 the older KWP2000 that many Toyota modules still use, not only to the engine's standard OBD-II side. A guard in the code lets
 only reading services out: clearing codes, writing, actuator tests and programming are refused until the safety steps exist.
+Modules behind a gateway (Toyota's body modules at 750, each with its address byte: main body 40, tire pressure 2A) are
+reached with the adapter's extended addressing (`ATCEA`): their identity and codes, read only, with no Clear button. An
+adapter that shows the address byte in answers and one that strips it are both read.
 A module's codes are asked for in every read-only form in turn (UDS `19 02` with the status masks FF, 2F, 09 and 08;
 KWP2000 `18` with status 02 and 00; ISO 14230 `13` with and without the group), since modules refuse the forms they do not
 support; when none gives them, Icarus shows what each request got (no answer, or the module's refusal and its reason).

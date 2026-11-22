@@ -18,6 +18,16 @@ pub trait Link {
     fn adapter(&self) -> String;
     /// The voltage at the OBD port (the vehicle's battery) measured now, when the adapter can.
     fn voltage(&mut self) -> Option<f64>;
+    /// Sets the extended address byte for the `request_to` calls that follow (a module behind a gateway), or None for
+    /// normal addressing. A link that cannot address modules that way refuses Some.
+    fn set_ext(&mut self, ext: Option<u8>) -> Result<(), ObdError> {
+        match ext {
+            None => Ok(()),
+            Some(_) => Err(ObdError::Adapter(
+                "this link cannot reach modules behind a gateway (extended addressing)".into(),
+            )),
+        }
+    }
 }
 
 impl Link for Elm {
@@ -39,6 +49,10 @@ impl Link for Elm {
                 .map(|s| format!(" ({s})"))
                 .unwrap_or_default()
         )
+    }
+    fn set_ext(&mut self, ext: Option<u8>) -> Result<(), ObdError> {
+        Elm::set_ext(self, ext);
+        Ok(())
     }
     fn voltage(&mut self) -> Option<f64> {
         self.command("ATRV", std::time::Duration::from_secs(2))

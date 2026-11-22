@@ -2,7 +2,7 @@
 name = "Toyota / Lexus / Scion"
 wmi = ["JT", "2T", "3T", "4T", "5T"]
 notes = """Many Toyota modules speak KWP2000 on CAN rather than UDS; Icarus tries both. Body modules sit behind ID 750 with an
-extended address byte (main body 40), which Icarus does not reach yet. On many models the engine computer also runs the
+extended address byte (main body 40, tire pressure 2A); Icarus reads their identity and codes through it. On many models the engine computer also runs the
 automatic transmission, so 7E1 may stay silent."""
 
 [[module]]

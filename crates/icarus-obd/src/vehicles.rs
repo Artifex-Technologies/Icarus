@@ -65,9 +65,7 @@ impl ModuleAddr {
 
     /// Why Icarus cannot reach this module yet, if it cannot.
     pub fn unreachable(&self) -> Option<&'static str> {
-        if self.ext.is_some() {
-            Some("extended addressing, not supported yet")
-        } else if self
+        if self
             .bus
             .as_deref()
             .is_some_and(|b| !b.eq_ignore_ascii_case("hs-can"))
@@ -429,7 +427,7 @@ mod tests {
         let body = t.iter().find(|m| m.ext == Some(0x40)).unwrap();
         assert_eq!(
             (body.tx, body.rx(), body.unreachable().is_some()),
-            (0x750, 0x758, true)
+            (0x750, 0x758, false)
         );
         let vw = candidates(find(&all, "vw-audi").unwrap());
         assert_eq!(vw.iter().find(|m| m.tx == 0x713).unwrap().rx(), 0x77D);

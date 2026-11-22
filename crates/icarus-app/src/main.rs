@@ -1336,8 +1336,10 @@ impl App {
                                 .color(pal.dim),
                             );
                         }
+                        // a module behind a gateway is read only in this build (no clear path carries its address)
                         if !codes.is_empty()
                             && !airbag
+                            && m.addr.ext.is_none()
                             && ui.button("Clear this module's codes...").clicked()
                         {
                             ask_clear = Some((

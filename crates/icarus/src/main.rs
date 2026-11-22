@@ -706,10 +706,20 @@ fn print_module(elm: &mut Elm, m: &vehicles::ModuleAddr) -> Result<(), String> {
             "  (address not yet checked on a vehicle)"
         }
     );
-    for (what, value) in uds::module_identity(elm, tx, rx).map_err(e)? {
+    if let Some(a) = m.ext {
+        println!("     behind the gateway at {tx:03X}, address {a:02X} (read only)");
+    }
+    let (identity, codes) = uds::at(elm, m.ext, |l| {
+        Ok((
+            uds::module_identity(l, tx, rx)?,
+            uds::module_dtcs(l, tx, rx)?,
+        ))
+    })
+    .map_err(e)?;
+    for (what, value) in identity {
         println!("     {what:<17} {value}");
     }
-    match uds::module_dtcs(elm, tx, rx).map_err(e)? {
+    match codes {
         Err(why) => println!("     trouble codes     none of Icarus's requests gave them\n                       ({why})"),
         Ok((dialect, codes)) => {
             let lang = if dialect == uds::Dialect::Uds {

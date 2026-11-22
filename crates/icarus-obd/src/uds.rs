@@ -421,6 +421,21 @@ pub fn module_identity(
     Ok(out)
 }
 
+/// Runs `f` with the requests to one module: behind a gateway (`ext`, e.g. Toyota's body modules at 750), each carries the
+/// module's address byte; afterwards normal addressing again, whatever `f` returned. Every module loop goes through this.
+pub fn at<T>(
+    elm: &mut dyn Link,
+    ext: Option<u8>,
+    f: impl FnOnce(&mut dyn Link) -> Result<T, ObdError>,
+) -> Result<T, ObdError> {
+    elm.set_ext(ext)?;
+    let r = f(elm);
+    let back = elm.set_ext(None);
+    let v = r?;
+    back?;
+    Ok(v)
+}
+
 /// Whether a module answers at request ID `tx`: any answer counts, a refusal too.
 pub fn present(elm: &mut dyn Link, tx: u16, rx: u16) -> Result<bool, ObdError> {
     for req in [&[0x3E, 0x00][..], &[0x3E, 0x01][..]] {
@@ -476,7 +491,7 @@ impl ScanGuard {
         if self.answer_of(m.tx).is_some() {
             return Ok(false);
         }
-        let there = present(elm, m.tx, m.rx())?;
+        let there = at(elm, m.ext, |l| present(l, m.tx, m.rx()))?;
         if there {
             self.answers.insert(m.rx(), m.tx);
         }
@@ -654,6 +669,54 @@ mod tests {
         for id in [0x787, 0x789, 0x7B7, 0x7B9, 0x7C7, 0x7C9] {
             assert!(on.contains(&id), "{id:03X} was not asked");
         }
+    }
+
+    #[test]
+    fn modules_behind_the_gateway() {
+        let toyota = crate::vehicles::find(&crate::vehicles::builtin(), "toyota")
+            .unwrap()
+            .clone();
+        let body = crate::vehicles::candidates(&toyota)
+            .into_iter()
+            .find(|m| m.ext == Some(0x40))
+            .unwrap();
+        let mut elm = Elm::connect(Box::new(SimCar::new())).unwrap();
+        let mut guard = ScanGuard::default();
+        assert!(
+            guard.present(&mut elm, &body).unwrap(),
+            "750 with address 40 answers"
+        );
+        let (id, codes) = at(&mut elm, body.ext, |l| {
+            Ok((
+                module_identity(l, body.tx, body.rx())?,
+                module_dtcs(l, body.tx, body.rx())?,
+            ))
+        })
+        .unwrap();
+        assert!(
+            id.contains(&("part number", "89221-ICARUS".to_string())),
+            "{id:?}"
+        );
+        let (d, codes) = codes.unwrap();
+        assert_eq!((d, codes[0].code.as_str()), (Dialect::Uds, "B1234"));
+        // another module at the same gateway, its own address
+        let tpms = crate::vehicles::ModuleAddr {
+            ext: Some(0x2A),
+            name: "tire pressure".into(),
+            ..body.clone()
+        };
+        assert!(guard.present(&mut elm, &tpms).unwrap());
+        // afterwards normal addressing: 750 without an address byte reaches nothing, the engine answers as before
+        assert!(!present(&mut elm, 0x750, 0x758).unwrap());
+        assert_eq!(
+            module_dtcs(&mut elm, 0x7E0, 0x7E8).unwrap().unwrap().1[0].code,
+            "P0171"
+        );
+        // reset even when what ran for the module failed
+        let e = at(&mut elm, Some(0x40), |_| -> Result<(), ObdError> {
+            Err(ObdError::NoData)
+        });
+        assert!(e.is_err() && !present(&mut elm, 0x750, 0x758).unwrap());
     }
 
     #[test]
