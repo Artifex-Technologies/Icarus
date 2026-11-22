@@ -84,6 +84,11 @@ pub struct SimCar {
     /// a mask of 0 shows every frame. ATCRA and ATZ put both back.
     cf: u32,
     cm: u32,
+    /// The STN's pass filter (STFAP pattern, mask) for its own monitor, STMA (ATMA follows ATCF/ATCM); STFCP clears it.
+    sf: u32,
+    sm: u32,
+    /// The monitor running is the STN's (STMA).
+    stma: bool,
     /// Module settings (`sim::settings`): (module, identifier) -> value.
     settings: std::collections::HashMap<(u32, u16), Vec<u8>>,
     /// Service routines started (module, routine), whose results are then ready (`sim::services`).
@@ -144,6 +149,9 @@ impl SimCar {
             monitoring: None,
             cf: 0,
             cm: 0,
+            sf: 0,
+            sm: 0,
+            stma: false,
             routines: Default::default(),
             settings: [((0x7C0, 0xA001), vec![0x01]), ((0x7B0, 0x20), vec![0x00])]
                 .into_iter()
@@ -1033,10 +1041,28 @@ impl SimCar {
                     return;
                 }
                 self.monitoring = Some(0);
+                self.stma = c == "STMA";
                 self.acked |= !self.csm || (self.stn && self.cmm != 0);
                 return;
             }
             "STI" if self.stn => vec!["STN2255 v5.10.3".into()],
+            "STFCP" if self.stn => {
+                (self.sf, self.sm) = (0, 0);
+                ok
+            }
+            _ if c.starts_with("STFAP") && self.stn => {
+                let parts: Vec<Option<u32>> = c[5..]
+                    .split(',')
+                    .map(|p| u32::from_str_radix(p.trim(), 16).ok())
+                    .collect();
+                match parts.as_slice() {
+                    [Some(f), Some(m)] => {
+                        (self.sf, self.sm) = (*f, *m);
+                        ok
+                    }
+                    _ => vec!["?".into()],
+                }
+            }
             "STCMM0" | "STCMM1" if self.stn => {
                 self.cmm = u8::from(c.ends_with('1'));
                 ok
@@ -1210,7 +1236,12 @@ impl Port for SimCar {
                         .split_whitespace()
                         .next()
                         .and_then(|i| u32::from_str_radix(i, 16).ok());
-                    if self.cm != 0 && id.is_some_and(|i| i & self.cm != self.cf & self.cm) {
+                    let (f, m) = if self.stma {
+                        (self.sf, self.sm)
+                    } else {
+                        (self.cf, self.cm)
+                    };
+                    if m != 0 && id.is_some_and(|i| i & m != f & m) {
                         continue;
                     }
                     let line = self.monitored(&line);
@@ -1592,7 +1623,17 @@ mod monitor_tests {
 
     #[test]
     fn monitoring_can_keep_only_the_diagnostic_messages() {
-        let mut elm = crate::elm::Elm::connect(Box::new(SimCar::new())).unwrap();
+        for stn in [false, true] {
+            monitoring_keeps_only_7xx(SimCar {
+                stn,
+                ..SimCar::new()
+            });
+        }
+    }
+
+    /// The filter on an ELM327 (ATCF/ATCM, for ATMA) or an STN (STFAP, for its STMA; ATCF alone let the whole bus through).
+    fn monitoring_keeps_only_7xx(car: SimCar) {
+        let mut elm = crate::elm::Elm::connect(Box::new(car)).unwrap();
         let id = |line: &str| {
             line.split_whitespace()
                 .next()

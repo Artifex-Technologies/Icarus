@@ -623,17 +623,22 @@ impl Elm {
             other => other,
         })?;
         self.raw_frames = true;
-        let filter: Vec<String> = only
-            .map(|(f, m)| vec![format!("ATCF{f:03X}"), format!("ATCM{m:03X}")])
-            .unwrap_or_default();
+        // the STN's own monitor (STMA) follows its pass filters (STFAP), not the ELM's ATCF/ATCM: with those only, an OBDLink
+        // EX watched the whole bus and stopped with BUFFER FULL (the truck, 2026-11-22)
+        let stn = self.stn.is_some();
+        let filter: Vec<String> = match only {
+            None => vec![],
+            Some((f, m)) if stn => vec!["STFCP".into(), format!("STFAP {f:03X},{m:03X}")],
+            Some((f, m)) => vec![format!("ATCF{f:03X}"), format!("ATCM{m:03X}")],
+        };
         let filter: Vec<&str> = filter.iter().map(String::as_str).collect();
         let watched = self
             .ok_commands(&["ATCAF0"])
             .and_then(|()| self.ok_commands(&filter))
             .and_then(|()| self.watch(each));
         if only.is_some() {
-            // back to automatic receive filtering; the next request sets its own (ATCRA with its address) anyway
-            let _ = self.ok_commands(&["ATCRA"]);
+            // back to no filter (STN) or automatic receive filtering; the next request sets its own (ATCRA with its address)
+            let _ = self.ok_commands(if stn { &["STFCP"] } else { &["ATCRA"] });
         }
         // put back whatever happened to the watch; on failure `raw_frames` stays set and the next request tries again
         match (watched, self.format_frames()) {
