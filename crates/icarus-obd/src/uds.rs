@@ -407,18 +407,55 @@ pub fn module_identity(
     tx: u32,
     rx: u32,
 ) -> Result<Vec<(&'static str, String)>, ObdError> {
+    Ok(module_identity_notes(elm, tx, rx)?.0)
+}
+
+/// A module's identification values (name, value), and notes on the ones it did not give.
+pub type IdentityRead = (Vec<(&'static str, String)>, Vec<String>);
+
+/// `module_identity`, and what the module did with the values it did not give: refused (and why) or no answer, so a module
+/// that refuses says so instead of showing nothing (an older KWP2000 module refuses UDS's 22 with "service not supported").
+/// After a refusal of the service itself (11) the rest are not asked; a module that answers none of them is one note.
+pub fn module_identity_notes(
+    elm: &mut dyn Link,
+    tx: u32,
+    rx: u32,
+) -> Result<IdentityRead, ObdError> {
     let mut out = Vec::new();
+    let mut notes = Vec::new();
+    let mut silent = 0;
     for (did, name) in IDENTITY {
-        if let Some(a) = ask(elm, tx, rx, &[0x22, (did >> 8) as u8, *did as u8])? {
-            if a.data.len() > 3
-                && a.data[0] == 0x62
-                && a.data[1..3] == [(did >> 8) as u8, *did as u8]
-            {
+        let (hi, lo) = ((did >> 8) as u8, *did as u8);
+        match ask(elm, tx, rx, &[0x22, hi, lo])? {
+            Some(a) if a.data.len() > 3 && a.data[0] == 0x62 && a.data[1..3] == [hi, lo] => {
                 out.push((*name, shown(&a.data[3..])));
+            }
+            Some(a) => match a.refusal() {
+                Some((_, code)) => {
+                    notes.push(format!("{name} (22 {did:04X}): refused, {}", nrc(code)));
+                    if code == 0x11 {
+                        notes.push("the module refuses UDS reads (22) altogether: the others were not asked".into());
+                        break;
+                    }
+                }
+                None => notes.push(format!(
+                    "{name} (22 {did:04X}): an answer Icarus could not read"
+                )),
+            },
+            None => {
+                silent += 1;
+                notes.push(format!("{name} (22 {did:04X}): no answer"));
             }
         }
     }
-    Ok(out)
+    if silent == IDENTITY.len() {
+        notes = vec![format!(
+            "no answer to any identification request (22 {:04X} to {:04X})",
+            IDENTITY[0].0,
+            IDENTITY[IDENTITY.len() - 1].0
+        )];
+    }
+    Ok((out, notes))
 }
 
 /// Runs `f` with the requests to one module: behind a gateway (`ext`, e.g. Toyota's body modules at 750), each carries the
@@ -1086,6 +1123,27 @@ mod tests {
             id.contains(&("part number", "89661-ICARUS".to_string())),
             "{id:?}"
         );
+        // every identification value is either given or explained (refused and why, or no answer), never left out unsaid
+        for tx in [0x7E0, 0x7B0] {
+            let (got, notes) = module_identity_notes(&mut elm, tx, tx + 8).unwrap();
+            let explained = notes.iter().filter(|n| n.contains("(22 ")).count();
+            let whole = notes
+                .iter()
+                .any(|n| n.contains("altogether") || n.contains("any identification"));
+            assert!(
+                got.len() + explained == IDENTITY.len() || whole,
+                "{tx:03X}: {got:?} {notes:?}"
+            );
+            assert!(
+                notes.iter().all(|n| n.contains("refused, ")
+                    || n.contains("no answer")
+                    || n.contains("altogether")),
+                "{notes:?}"
+            );
+            if tx == 0x7E0 {
+                assert_eq!(got, id);
+            }
+        }
         let (d, codes) = module_dtcs(&mut elm, 0x7E0, 0x7E0 + 8).unwrap().unwrap();
         assert_eq!((d, codes[0].code.as_str()), (Dialect::Uds, "P0171"));
         let (d, codes) = module_dtcs(&mut elm, 0x7B0, 0x7B0 + 8).unwrap().unwrap();

@@ -887,15 +887,22 @@ fn print_module(elm: &mut dyn Link, m: &vehicles::ModuleAddr) -> Result<(), Stri
     if let Some(a) = m.ext {
         println!("     behind the gateway at {tx:03X}, address {a:02X} (read only)");
     }
-    let (identity, codes) = uds::at_module(elm, m, |l| {
+    let ((identity, id_notes), codes) = uds::at_module(elm, m, |l| {
         Ok((
-            uds::module_identity(l, tx, rx)?,
+            uds::module_identity_notes(l, tx, rx)?,
             uds::module_dtcs(l, tx, rx)?,
         ))
     })
     .map_err(e)?;
     for (what, value) in identity {
         println!("     {what:<17} {value}");
+    }
+    // what it refused or did not answer, and why: as useful as what it gave when finding out what a vehicle speaks
+    for (i, note) in id_notes.iter().enumerate() {
+        println!(
+            "     {:<17} {note}",
+            if i == 0 { "identification" } else { "" }
+        );
     }
     match codes {
         Err(why) => println!("     trouble codes     none of Icarus's requests gave them\n                       ({why})"),
