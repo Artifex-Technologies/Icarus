@@ -69,7 +69,7 @@ macro_rules! pid {
 /// The live values Icarus knows (service 01).
 pub static PIDS: &[Pid] = &[
     pid!(0x04, "Engine load", "%", pct, "How hard the engine works compared with the most air it can take in at this speed."),
-    pid!(0x05, "Coolant temperature", "°C", temp, "Engine temperature. Fuel and timing tables are corrected by it; most engines run 85-105 °C."),
+    pid!(0x05, "Coolant temperature", "°C", temp, "Engine temperature. Fuel and timing tables are corrected by it; most engines run 185-220 °F (85-105 °C)."),
     pid!(0x06, "Short-term fuel trim, bank 1", "%", trim, "The ECU's correction right now from the oxygen sensor: + adds fuel (it saw lean), - takes fuel away (rich)."),
     pid!(0x07, "Long-term fuel trim, bank 1", "%", trim, "The learned correction. Beyond about ±10 % the fuel tables (or injectors, MAF, a leak) do not match the engine."),
     pid!(0x08, "Short-term fuel trim, bank 2", "%", trim, "As bank 1, for the other cylinder bank of a V or flat engine."),
@@ -118,7 +118,7 @@ pub static PIDS: &[Pid] = &[
     pid!(0x39, "Wide-band lambda (current), bank 2 sensor 2", "λ", lambda, "A current-type wide-band sensor after the catalyst on bank 2."),
     pid!(0x3A, "Wide-band lambda (current), bank 2 sensor 3", "λ", lambda, "A third current-type sensor on bank 2."),
     pid!(0x3B, "Wide-band lambda (current), bank 2 sensor 4", "λ", lambda, "A fourth current-type sensor on bank 2."),
-    pid!(0x3C, "Catalyst temperature, bank 1 sensor 1", "°C", cat_temp, "Catalytic converter temperature. Too rich or misfiring makes it climb; above ~900 °C it is being damaged."),
+    pid!(0x3C, "Catalyst temperature, bank 1 sensor 1", "°C", cat_temp, "Catalytic converter temperature. Too rich or misfiring makes it climb; above ~1650 °F (900 °C) it is being damaged."),
     pid!(0x3D, "Catalyst temperature, bank 2 sensor 1", "°C", cat_temp, "As bank 1."),
     pid!(0x3E, "Catalyst temperature, bank 1 sensor 2", "°C", cat_temp, "Further down the catalyst."),
     pid!(0x3F, "Catalyst temperature, bank 2 sensor 2", "°C", cat_temp, "Further down the catalyst."),

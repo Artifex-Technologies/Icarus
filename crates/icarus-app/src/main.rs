@@ -1701,6 +1701,29 @@ impl App {
         });
         ui.add_space(6.0);
         ui.columns(2, |cols| {
+            // every value at once, or none: the same as ticking or clearing each box (a recording keeps its own values)
+            cols[0].horizontal(|ui| {
+                let mut changed = false;
+                if ui
+                    .add_enabled(self.chosen.len() < offered.len(), egui::Button::new("Select all"))
+                    .on_hover_text("Every value the vehicle offers; with many values each one updates more slowly")
+                    .clicked()
+                {
+                    self.chosen.extend(offered.iter().copied());
+                    changed = true;
+                }
+                if ui
+                    .add_enabled(!self.chosen.is_empty(), egui::Button::new("Clear selections"))
+                    .clicked()
+                {
+                    self.chosen.clear();
+                    changed = true;
+                }
+                if changed && self.live_on {
+                    self.send_live();
+                }
+            });
+            cols[0].add_space(4.0);
             egui::ScrollArea::vertical()
                 .id_salt("pick")
                 .show(&mut cols[0], |ui| {

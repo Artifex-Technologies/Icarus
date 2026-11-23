@@ -400,7 +400,7 @@ tools too).
 `icarus-app` (Icarus in the app menu): the **Vehicle** page connects to the adapter and shows the VIN, the make's profile,
 the codes explained with Look up and parts buttons, the freeze frame, the check-engine light and readiness monitors, the
 vehicle's name, and Save report; **Modules** scans every module for its identity and codes;
-**Live data** picks values and draws them as they change, each with what it means; **Tests** runs actuator tests while a
+**Live data** picks values (one by one, or Select all and Clear selections) and draws them as they change, each with what it means; **Tests** runs actuator tests while a
 button is held; **Settings** shows each module setting's value and changes it (asks first; undo puts the last change
 back); **Learning** watches another tool and names what it learned; **Bus** shows every ID and message; **Maps** opens a
 definition and an image
