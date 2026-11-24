@@ -490,15 +490,26 @@ impl Definition {
             .collect()
     }
 
-    /// The bytes an element's values come from: its cells, stored axes, and the values its formulas use (`seen` stops loops).
+    /// The bytes an element's values come from: its cells, stored axes, linked axes' elements, and the values its formulas use
+    /// (`seen` stops loops).
     fn spans_into(&self, e: &Element, out: &mut Vec<std::ops::Range<usize>>, seen: &mut Vec<u32>) {
         match &e.kind {
             Kind::Constant(d) => out.extend(self.span(d)),
             Kind::Table(t) => {
                 out.extend(self.span(&t.z));
                 for a in [&t.x, &t.y] {
-                    if let Axis::Stored(d) = a {
-                        out.extend(self.span(d));
+                    match a {
+                        Axis::Stored(d) => out.extend(self.span(d)),
+                        // the breakpoints are another element's values: a change there moves this map's axis
+                        Axis::Link { id, .. } => {
+                            if !seen.contains(id) {
+                                seen.push(*id);
+                                if let Some(l) = self.by_id(*id) {
+                                    self.spans_into(l, out, seen);
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -635,6 +646,14 @@ mod tests {
                 .map(|e| e.title.as_str())
                 .collect::<Vec<_>>(),
             vec!["spark map"]
+        );
+        // only the linked axis's breakpoints changed (ICA-57): both the axis and the map that uses it are named
+        assert_eq!(
+            def.covering(0x10..0x11)
+                .iter()
+                .map(|e| e.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["rpm axis", "spark map"]
         );
     }
 
