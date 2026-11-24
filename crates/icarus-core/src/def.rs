@@ -501,12 +501,10 @@ impl Definition {
                     match a {
                         Axis::Stored(d) => out.extend(self.span(d)),
                         // the breakpoints are another element's values: a change there moves this map's axis
-                        Axis::Link { id, .. } => {
-                            if !seen.contains(id) {
-                                seen.push(*id);
-                                if let Some(l) = self.by_id(*id) {
-                                    self.spans_into(l, out, seen);
-                                }
+                        Axis::Link { id, .. } if !seen.contains(id) => {
+                            seen.push(*id);
+                            if let Some(l) = self.by_id(*id) {
+                                self.spans_into(l, out, seen);
                             }
                         }
                         _ => {}
