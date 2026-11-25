@@ -3,15 +3,17 @@
 //! files (def.rs), so the Maps page, `icarus show` and `icarus diff` work the same with either.
 //!
 //! What is read (enough for maps and values):
-//! - `CHARACTERISTIC` of type `VALUE`, `CURVE` (its axis down the side, as TunerPro shows curves) and `MAP` (the first
-//!   `AXIS_DESCR` across the top, the second down the side), at its address, laid out by its `RECORD_LAYOUT`;
+//! - `CHARACTERISTIC` of type `VALUE`, `CURVE` (its axis down the side, as TunerPro shows curves), `MAP` (the first
+//!   `AXIS_DESCR` across the top, the second down the side) and `VAL_BLK` (`NUMBER n`, or `MATRIX_DIM x y`: a table with
+//!   numbered rows and columns), at its address, laid out by its `RECORD_LAYOUT`;
 //! - `RECORD_LAYOUT`: `FNC_VALUES` (data type; `ROW_DIR` stores the map row by row, `COLUMN_DIR` column by column; direct
 //!   addressing), `AXIS_PTS_X` / `AXIS_PTS_Y` (rising, direct), `RESERVED`, `FIX_NO_AXIS_PTS_*` and the `ALIGNMENT_*` of each
 //!   data type. The parts follow one another in the order of their positions, each starting on its data type's alignment
 //!   (1, 2, 4 and 8 bytes unless `MOD_COMMON` or the layout says otherwise);
 //! - `COMPU_METHOD`: `IDENTICAL`; `LINEAR` (`COEFFS_LINEAR a b`: real = a*stored + b); `RAT_FUNC` (`COEFFS a b c d e f`, which
 //!   give the stored number from the real value v: stored = (a*v^2 + b*v + c) / (d*v^2 + e*v + f)), read when a and d are
-//!   0, so real = (f*stored - c) / (b - e*stored), the form with one real value for each stored number; `NO_COMPU_METHOD`;
+//!   0, so real = (f*stored - c) / (b - e*stored), the form with one real value for each stored number; `FORM` when its
+//!   `FORMULA` is plain arithmetic in `X1` (numbers, + - * /, parentheses; Icarus inverts it itself); `NO_COMPU_METHOD`;
 //! - `AXIS_DESCR`: `FIX_AXIS` (`FIX_AXIS_PAR`, `FIX_AXIS_PAR_DIST`, `FIX_AXIS_PAR_LIST`; the points converted by the axis's
 //!   method), `COM_AXIS` (an `AXIS_PTS` named by `AXIS_PTS_REF`) and `STD_AXIS` (points stored with the values);
 //! - `AXIS_PTS`, also listed as elements of their own (category "Axis points"), so shared breakpoints can be seen and edited;
@@ -576,6 +578,74 @@ fn byte_order(s: &str) -> Result<bool, String> {
     }
 }
 
+/// A FORM conversion's formula in Icarus's own terms: the input X1 (or X) as X, numbers, + - * / and parentheses. Functions,
+/// bit and logic operators, and a second input are refused with the reason, never guessed.
+fn form_expr(f: &str) -> Result<Expr, String> {
+    if f.chars()
+        .any(|c| matches!(c, '^' | '&' | '|' | '<' | '>' | '!' | '~' | '%' | '?' | ':'))
+    {
+        return Err("uses bit or logic operators, which Icarus does not work out".into());
+    }
+    let cs: Vec<char> = f.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < cs.len() {
+        let c = cs[i];
+        if c == '0' && matches!(cs.get(i + 1), Some('x' | 'X')) {
+            out.push_str("0x");
+            i += 2;
+            while i < cs.len() && cs[i].is_ascii_hexdigit() {
+                out.push(cs[i]);
+                i += 1;
+            }
+            continue;
+        }
+        if c.is_ascii_digit() || c == '.' {
+            while i < cs.len() && (cs[i].is_ascii_digit() || cs[i] == '.') {
+                out.push(cs[i]);
+                i += 1;
+            }
+            if matches!(cs.get(i), Some('e' | 'E')) {
+                out.push(cs[i]);
+                i += 1;
+                if matches!(cs.get(i), Some('+' | '-')) {
+                    out.push(cs[i]);
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        if c == 'X' {
+            let mut j = i + 1;
+            let mut digits = String::new();
+            while j < cs.len() && cs[j].is_ascii_digit() {
+                digits.push(cs[j]);
+                j += 1;
+            }
+            if !(digits.is_empty() || digits == "1") {
+                return Err(format!(
+                    "uses a second input (X{digits}), which Icarus does not work out"
+                ));
+            }
+            out.push('X');
+            i = j;
+            continue;
+        }
+        if c.is_ascii_alphabetic() || c == '_' {
+            return Err(
+                "uses functions (sin, exp, sqrt, ...), which Icarus does not work out".into(),
+            );
+        }
+        out.push(c);
+        i += 1;
+    }
+    let e = Expr::parse(&out).map_err(|e| format!("is not a formula Icarus reads ({e})"))?;
+    if !e.vars().is_empty() || !out.contains('X') {
+        return Err("does not depend on the stored number".into());
+    }
+    Ok(e)
+}
+
 fn type_bytes(datatype: &str) -> Result<u64, String> {
     match datatype {
         "UBYTE" | "SBYTE" => Ok(1),
@@ -597,6 +667,11 @@ fn cell(datatype: &str, big_endian: Option<bool>) -> Result<Cell, String> {
         "SLONG" => (32, true, false),
         "FLOAT32_IEEE" => (32, false, true),
         "FLOAT64_IEEE" => (64, false, true),
+        "A_UINT64" | "A_INT64" => {
+            return Err(format!(
+                "data type {datatype}: 64-bit integers are not read (past 2^53 they cannot be shown exactly)"
+            ))
+        }
         o => return Err(format!("data type {o} is not read")),
     };
     let little_endian = match (bits, big_endian) {
@@ -931,6 +1006,17 @@ impl Ctx<'_> {
                     bin(Op::Sub, Expr::Num(sb), bin(Op::Mul, Expr::Num(se), Expr::X)),
                 )
             }
+            // a formula from the stored number X1 to the real value (ICA-56): read when it is one Icarus's own formulas can
+            // say (numbers, + - * /, parentheses); Icarus inverts it itself, so FORMULA_INV is not needed
+            "FORM" => {
+                let f = b
+                    .block("FORMULA")
+                    .and_then(|f| f.toks().next())
+                    .map(|t| t.text().to_string())
+                    .ok_or_else(|| format!("conversion {name}: FORM without a FORMULA"))?;
+                form_expr(&f)
+                    .map_err(|why| format!("conversion {name}: its FORMULA {f:?} {why}"))?
+            }
             o => {
                 return Err(format!(
                     "its conversion {name} is {o}, which Icarus does not read"
@@ -1084,10 +1170,29 @@ impl Ctx<'_> {
         let a = b.args(9)?;
         let opts = b.options(9, CHARACTERISTIC_KEYS)?;
         let kind = a[2].text();
+        // a block of values (ICA-56): NUMBER n, or MATRIX_DIM x [y [z]]; shown as a table with numbered rows and columns
+        let mut block: Option<(usize, usize)> = None;
         let n_axes = match kind {
             "VALUE" => 0,
             "CURVE" => 1,
             "MAP" => 2,
+            "VAL_BLK" => {
+                let dims: Vec<f64> =
+                    match (opt_nums(&opts, "MATRIX_DIM"), opt_nums(&opts, "NUMBER")) {
+                        (Some(m), _) => m?,
+                        (None, Some(n)) => n?,
+                        (None, None) => return Err("a VAL_BLK without NUMBER or MATRIX_DIM".into()),
+                    };
+                let d = |k: usize| dims.get(k).copied().unwrap_or(1.0);
+                if dims.is_empty() || dims.iter().any(|v| *v < 1.0 || v.fract() != 0.0) {
+                    return Err("a VAL_BLK whose size is not whole numbers of 1 or more".into());
+                }
+                if d(2) > 1.0 || dims.len() > 3 {
+                    return Err("a VAL_BLK of three dimensions is not read".into());
+                }
+                block = Some((d(0) as usize, d(1) as usize));
+                0
+            }
             o => return Err(format!("{o} characteristics are not read")),
         };
         if opts.contains_key("BIT_MASK") {
@@ -1111,7 +1216,10 @@ impl Ctx<'_> {
             .map(|d| self.axis_descr(d, big))
             .collect::<Result<Vec<_>, _>>()?;
         let counts: Vec<usize> = axes.iter().map(AxisSpec::count).collect();
-        let n_values: usize = counts.iter().product();
+        let n_values: usize = match block {
+            Some((cols, rows)) => cols.saturating_mul(rows),
+            None => counts.iter().product(),
+        };
         if n_values > 1 << 20 {
             return Err(format!(
                 "{n_values} values is more than Icarus reads in one element"
@@ -1150,9 +1258,10 @@ impl Ctx<'_> {
         let axis_count = |k: usize| counts.get(k).copied().unwrap_or(0) as u64;
         let (at, axis_at) =
             layout.place(addr(a[3])?, n_values as u64, [axis_count(0), axis_count(1)])?;
-        let (rows, cols) = match n_axes {
-            0 => (1, 1),
-            1 => (counts[0], 1),
+        let (rows, cols) = match (block, n_axes) {
+            (Some((c, r)), _) => (r, c),
+            (None, 0) => (1, 1),
+            (None, 1) => (counts[0], 1),
             _ => (counts[1], counts[0]),
         };
         let z = Data {
@@ -1204,6 +1313,13 @@ impl Ctx<'_> {
             });
         }
         let mut built = built.into_iter();
+        if let Some((cols, rows)) = block {
+            return Ok(Kind::Table(Table {
+                x: Axis::Index(cols),
+                y: Axis::Index(rows),
+                z,
+            }));
+        }
         Ok(match n_axes {
             0 => Kind::Constant(z),
             1 => Kind::Table(Table {
@@ -1419,7 +1535,10 @@ ASAP2_VERSION 1 61
             "the image begins at the calibration segment, not the RAM one"
         );
         let titles: Vec<&str> = ad.elements.iter().map(|e| e.title.as_str()).collect();
-        assert_eq!(titles, vec!["RpmPoints", "IgnBase", "WarmUp", "IdleTarget"]);
+        assert_eq!(
+            titles,
+            vec!["RpmPoints", "IgnBase", "WarmUp", "IdleTarget", "Block"]
+        );
         assert_eq!(ad.element("IgnBase").unwrap().categories, vec!["Ignition"]);
         assert_eq!(
             ad.element("RpmPoints").unwrap().categories,
@@ -1534,10 +1653,104 @@ ASAP2_VERSION 1 61
         assert!(why("FanMode").contains("TAB_VERB"));
         assert!(why("Squared").contains("squared terms"));
         assert!(why("Counted").contains("NO_AXIS_PTS_X"));
-        assert!(why("Block").contains("VAL_BLK characteristics are not read"));
         assert!(why("Rescaled").contains("RES_AXIS axes are not read"));
         assert!(why("Mystery").contains("SOMETHING_NEW is a keyword Icarus does not read"));
-        assert_eq!(a.skipped.len(), 6, "{:?}", a.skipped);
+        assert_eq!(a.skipped.len(), 5, "{:?}", a.skipped);
+    }
+
+    /// ICA-56: an A2L written for this test with the constructs the twin leaves out: value blocks (NUMBER and MATRIX_DIM)
+    /// and FORM conversions that Icarus's own formulas can say load; the rest is named with the reason (a three-dimensional
+    /// block, FORM with a function, a second input or bit operators, TAB_INTP, BIT_MASK, 64-bit integers, CURVE_AXIS, and
+    /// /include).
+    #[test]
+    fn more_constructs_load_or_are_named() {
+        const MORE: &str = r#"/* Written by hand for Icarus's tests */
+ASAP2_VERSION 1 61
+/begin PROJECT More "more constructs"
+  /begin MODULE M ""
+    /begin MOD_COMMON "" BYTE_ORDER MSB_LAST /end MOD_COMMON
+    /begin MOD_PAR ""
+      /begin MEMORY_SEGMENT Cal "calibration" DATA FLASH INTERN 0x8000 0x100 -1 -1 -1 -1 -1 /end MEMORY_SEGMENT
+    /end MOD_PAR
+    /begin COMPU_METHOD CM_form "a formula" FORM "%5.1" "kPa"
+      /begin FORMULA "X1*0.5+3" /end FORMULA
+    /end COMPU_METHOD
+    /begin COMPU_METHOD CM_hex "a formula in hex" FORM "%5.0" ""
+      /begin FORMULA "(X1 - 0x10) / 2" FORMULA_INV "X1*2+0x10" /end FORMULA
+    /end COMPU_METHOD
+    /begin COMPU_METHOD CM_sin "a function" FORM "%5.1" "" /begin FORMULA "sin(X1)" /end FORMULA /end COMPU_METHOD
+    /begin COMPU_METHOD CM_two "two inputs" FORM "%5.1" "" /begin FORMULA "X1+X2" /end FORMULA /end COMPU_METHOD
+    /begin COMPU_METHOD CM_bits "bits" FORM "%5.1" "" /begin FORMULA "X1&0x0F" /end FORMULA /end COMPU_METHOD
+    /begin COMPU_METHOD CM_interp "a table" TAB_INTP "%5.1" "" COMPU_TAB_REF T1 /end COMPU_METHOD
+    /begin RECORD_LAYOUT RL_u8 FNC_VALUES 1 UBYTE ROW_DIR DIRECT /end RECORD_LAYOUT
+    /begin RECORD_LAYOUT RL_i64 FNC_VALUES 1 A_INT64 ROW_DIR DIRECT /end RECORD_LAYOUT
+    /begin CHARACTERISTIC Pressure "" VALUE 0x8000 RL_u8 0 CM_form 0 200 /end CHARACTERISTIC
+    /begin CHARACTERISTIC Hexed "" VALUE 0x8001 RL_u8 0 CM_hex 0 200 /end CHARACTERISTIC
+    /begin CHARACTERISTIC Row "four values" VAL_BLK 0x8010 RL_u8 0 NO_COMPU_METHOD 0 255 NUMBER 4 /end CHARACTERISTIC
+    /begin CHARACTERISTIC Grid "three by two" VAL_BLK 0x8020 RL_u8 0 NO_COMPU_METHOD 0 255 MATRIX_DIM 3 2 1 /end CHARACTERISTIC
+    /begin CHARACTERISTIC Cube "" VAL_BLK 0x8030 RL_u8 0 NO_COMPU_METHOD 0 255 MATRIX_DIM 2 2 2 /end CHARACTERISTIC
+    /begin CHARACTERISTIC Sine "" VALUE 0x8040 RL_u8 0 CM_sin 0 1 /end CHARACTERISTIC
+    /begin CHARACTERISTIC Two "" VALUE 0x8041 RL_u8 0 CM_two 0 1 /end CHARACTERISTIC
+    /begin CHARACTERISTIC Bits "" VALUE 0x8042 RL_u8 0 CM_bits 0 1 /end CHARACTERISTIC
+    /begin CHARACTERISTIC Interp "" VALUE 0x8043 RL_u8 0 CM_interp 0 1 /end CHARACTERISTIC
+    /begin CHARACTERISTIC Masked "" VALUE 0x8044 RL_u8 0 NO_COMPU_METHOD 0 1 BIT_MASK 0x04 /end CHARACTERISTIC
+    /begin CHARACTERISTIC Wide "" VALUE 0x8048 RL_i64 0 NO_COMPU_METHOD 0 1 /end CHARACTERISTIC
+    /begin CHARACTERISTIC Shaped "" CURVE 0x8050 RL_u8 0 NO_COMPU_METHOD 0 255
+      /begin AXIS_DESCR CURVE_AXIS x NO_COMPU_METHOD 4 0 255 CURVE_AXIS_REF Row /end AXIS_DESCR
+    /end CHARACTERISTIC
+    /include "more.a2l"
+  /end MODULE
+/end PROJECT
+"#;
+        let a = parse(MORE).unwrap();
+        let d = &a.definition;
+        let mut img = vec![0u8; 0x100];
+        img[0x00] = 100;
+        img[0x01] = 0x30;
+        img[0x10..0x14].copy_from_slice(&[1, 2, 3, 4]);
+        img[0x20..0x26].copy_from_slice(&[10, 11, 12, 20, 21, 22]);
+        let rom = Rom::new(img);
+        let value = |name: &str| {
+            let z = match &d.element(name).unwrap().kind {
+                Kind::Constant(z) => z,
+                Kind::Table(t) => &t.z,
+                Kind::Flag(_) => panic!("{name} is a flag"),
+            };
+            d.values(&rom, z).unwrap()
+        };
+        assert_eq!(value("Pressure"), vec![vec![53.0]], "100 * 0.5 + 3");
+        assert_eq!(value("Hexed"), vec![vec![16.0]], "(0x30 - 0x10) / 2");
+        assert_eq!(
+            value("Row"),
+            vec![vec![1.0, 2.0, 3.0, 4.0]],
+            "one row of four"
+        );
+        assert_eq!(
+            value("Grid"),
+            vec![vec![10.0, 11.0, 12.0], vec![20.0, 21.0, 22.0]],
+            "two rows of three, row by row"
+        );
+        let why = |name: &str| {
+            a.skipped
+                .iter()
+                .find(|s| s.starts_with(&format!("{name}: ")))
+                .cloned()
+                .unwrap_or_else(|| panic!("{name} not listed: {:?}", a.skipped))
+        };
+        assert!(why("Cube").contains("three dimensions"));
+        assert!(why("Sine").contains("functions"));
+        assert!(why("Two").contains("second input (X2)"));
+        assert!(why("Bits").contains("bit or logic"));
+        assert!(why("Interp").contains("TAB_INTP"));
+        assert!(why("Masked").contains("BIT_MASK"));
+        assert!(why("Wide").contains("64-bit integers"));
+        assert!(why("Shaped").contains("CURVE_AXIS axes are not read"));
+        assert!(
+            a.skipped.iter().any(|s| s.starts_with("/include more.a2l")),
+            "{:?}",
+            a.skipped
+        );
+        assert_eq!(a.skipped.len(), 9, "{:?}", a.skipped);
     }
 
     #[test]

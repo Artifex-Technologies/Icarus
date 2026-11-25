@@ -455,12 +455,14 @@ map that changed and shows each cell's old and new value.
 
 A definition (DEF) is a TunerPro `.xdf` or an ASAM MCD-2 MC `.a2l` (ASAP2, what calibration tools use); Icarus tells them
 apart by their contents, and both work the same everywhere (`def`, `show`, `set`, `diff`, the Maps page). From an A2L it
-reads `CHARACTERISTIC`s of type `VALUE`, `CURVE` and `MAP` with their record layouts (`FNC_VALUES` row or column order,
-`AXIS_PTS_X/Y`, alignment, byte order), `COMPU_METHOD` `IDENTICAL`, `LINEAR` and `RAT_FUNC` (the form with one real value
-per stored number), fixed axes, shared axes (`COM_AXIS` and its `AXIS_PTS`, which are listed as elements too) and axes stored
+reads `CHARACTERISTIC`s of type `VALUE`, `CURVE`, `MAP` and `VAL_BLK` (a block of values, `NUMBER` or a two-dimensional
+`MATRIX_DIM`, shown as a table with numbered rows and columns) with their record layouts (`FNC_VALUES` row or column order,
+`AXIS_PTS_X/Y`, alignment, byte order), `COMPU_METHOD` `IDENTICAL`, `LINEAR`, `RAT_FUNC` (the form with one real value
+per stored number) and `FORM` when its formula is plain arithmetic in `X1` (numbers, `+ - * /`, parentheses), fixed axes, shared axes (`COM_AXIS` and its `AXIS_PTS`, which are listed as elements too) and axes stored
 with the values; `FUNCTION`s become categories. The image is taken to start at the A2L's lowest memory segment that is not
-RAM (`icarus def` prints the offset). Everything else (conversion tables and formulas, bit masks, point counts stored in
-the image, rescale axes, keywords it does not know) leaves that element out, listed with the reason, rather than guessed.
+RAM (`icarus def` prints the offset). Everything else (conversion tables, formulas with functions, bit operators or a second
+input, bit masks, 64-bit integers, point counts stored in the image, rescale and curve axes, three-dimensional blocks,
+`/include`d files, keywords it does not know) leaves that element out, listed with the reason, rather than guessed.
 
 **Vehicle**, through an OBD-II adapter:
 
