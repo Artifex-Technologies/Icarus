@@ -593,13 +593,19 @@ impl SimCar {
         })
     }
 
-    fn engine_pid(&self, pid: u8) -> Option<Vec<u8>> {
-        let t = self.tick as f64;
-        let rpm = if self.engine_on {
-            790.0 + 40.0 * (t * 0.7).sin()
+    /// Engine speed now: idling around 790 rpm, rising and falling slowly over about 300 requests (slow enough that values
+    /// read in turn line up in time, as on a vehicle: `naming`); 0 with the engine off.
+    fn engine_rpm(&self) -> f64 {
+        if self.engine_on {
+            790.0 + 40.0 * (self.tick as f64 * 0.02).sin()
         } else {
             0.0
-        };
+        }
+    }
+
+    fn engine_pid(&self, pid: u8) -> Option<Vec<u8>> {
+        let t = self.tick as f64;
+        let rpm = self.engine_rpm();
         let r = (rpm * 4.0) as u16;
         if !self.engine_on {
             // key on, engine off: nothing turns; the throttle rests at ~15 % unless a test drives it
@@ -953,6 +959,12 @@ impl SimCar {
                 d.extend(b"ICARUS");
                 d.extend([0u8; 7]);
                 Some(d)
+            }
+            // an identifier no definition names (as a capture leaves it): a constant, engine speed (x 2, high byte first),
+            // another constant
+            ([0x22, 0x1F, 0x06], true) if tx == 0x700 => {
+                let raw = (self.engine_rpm() * 2.0) as u16;
+                Some([&[0x62, 0x1F, 0x06, 0x01][..], &raw.to_be_bytes(), &[0x5A]].concat())
             }
             ([0x22, 0x1F, 0x02], true) if tx == 0x700 => {
                 if self.data_busy {

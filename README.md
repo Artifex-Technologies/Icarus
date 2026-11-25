@@ -362,6 +362,15 @@ but not kept, and VINs (in answers and in requests, also split over several mess
 the set unless `--keep-vin`. How to capture, what is read and how
 to name a value afterwards: [docs/CAPTURES.md](docs/CAPTURES.md).
 
+**Suggested names.** `icarus obd suggest [MODULE...] --adapter A [--set SET] [--seconds 60]` reads the standard values
+(engine speed, load, temperatures, throttle, voltage...) and the set's requests in turn, through the same gates and pacing
+as `icarus obd data`, then compares every byte and pair of bytes no value names (a capture's placeholders) with each
+standard value: one that rises and falls with it (Pearson's r 0.98 or more over 20 reads or more) is suggested as it, with
+the scale, for example `700 22 1F06, bytes 1-2 (16 bits): follows engine speed (r 1.000 over 369 reads): engine speed = raw
+x 0.5004 - 0.4998 rpm` on the simulated vehicle. A suggestion is a guess to check (then `icarus data name` it); nothing is
+written. Values that change with something done (a door, the lights, the steering) are not found this way, and a value
+that only rose while compared is marked, since a counter fits that as well.
+
 ## Editing maps and checksums
 
 ```sh

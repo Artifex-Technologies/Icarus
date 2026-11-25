@@ -142,3 +142,17 @@ needs_session = "10 03"
   name = "a value behind a session"
   byte = 0
   bits = 8
+
+# an identifier nobody has named yet, as a capture leaves it (one placeholder over its answer): `icarus obd suggest`
+# finds that bytes 1-2 follow engine speed (x 2)
+[[request]]
+service = 0x22
+ident = 0x1F06
+
+  [[request.value]]
+  id = "RAW_22_1F06"
+  name = "22 1F06 (4 bytes)"
+  byte = 0
+  bits = 32
+  kind = "hex"
+  note = "made up for the simulated vehicle: not named, not checked"

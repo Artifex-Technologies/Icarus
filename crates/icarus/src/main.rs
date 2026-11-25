@@ -70,6 +70,13 @@ Vehicle, through an OBD adapter (read-only: nothing is cleared or written):
                                              learned
   icarus obd data --check MODULE VALUE_ID [--note TEXT] --adapter A
                                              mark a value as checked on this vehicle (it read right against a gauge)
+  icarus obd suggest [MODULE...] --adapter A [--set SET] [--seconds N (60)]
+                                             what a set's unnamed bytes (a capture's placeholders) are: the standard
+                                             values and the set's requests read in turn (the same gates and pacing as
+                                             obd data), and each byte or pair of bytes that rises and falls with a
+                                             standard value (r 0.98 or more over 20 reads) suggested as it, with its
+                                             scale. Guesses to check; nothing is written. Keep the engine running and the
+                                             values moving
 
 Module data (definition files; nothing is sent to a vehicle):
   icarus import obdb FILE.json [--name SET] [--make NAME] [--dry-run] [--replace]
@@ -951,6 +958,7 @@ fn cmd_obd(a: &[String]) -> Result<(), String> {
         Some("module") => with(&|e| obd_module(e, &args)),
         Some("asbuilt") => with(&|e| obd_asbuilt(e, &args)),
         Some("data") => data::obd_data(&args),
+        Some("suggest") => data::obd_suggest(&args),
         Some("report") => with(&|e| obd_report(e, &args)),
         Some("tests") => with(&obd_tests),
         Some("services") => with(&obd_services),

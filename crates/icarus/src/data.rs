@@ -6,7 +6,7 @@ use super::{connect, e, parse_args, profiles, Args};
 use icarus_core::moddata::{self as md, capture, obdb, units, ModuleDef, Shown, ValueDef};
 use icarus_obd::link::Link;
 use icarus_obd::moddata::{self, Loaded, Outcome, Pacer, Scope, State};
-use icarus_obd::{actuator, garage, j1979, report, uds, vehicles, vin};
+use icarus_obd::{actuator, garage, j1979, naming, report, uds, vehicles, vin};
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::time::{Duration, Instant};
@@ -1206,7 +1206,18 @@ impl Watch<'_> {
 }
 
 /// `icarus obd data [MODULE...] --adapter A ...` and `icarus obd data --check MODULE VALUE_ID [--note TEXT]`.
-pub fn obd_data(args: &Args) -> Result<(), String> {
+/// What `obd data` and `obd suggest` start from: the link, the vehicle's model year, where its state is kept and the
+/// state, and the set chosen for it (as used on this vehicle: its gates rebuilt for the make).
+struct Opened {
+    elm: Box<dyn Link>,
+    year: Option<u16>,
+    state_path: Option<std::path::PathBuf>,
+    state: State,
+    set: Loaded,
+    new_set: bool,
+}
+
+fn open_set(args: &Args) -> Result<Opened, String> {
     let all = profiles();
     let mut elm = connect(args)?;
     let vin_s = j1979::vin(&mut elm).map_err(e)?;
@@ -1252,9 +1263,119 @@ pub fn obd_data(args: &Args) -> Result<(), String> {
         vin,
     )?;
     // the airbag caution follows the vehicle's make, not only the set's
-    let set = &on_vehicle(set, &all, make.as_deref());
+    let set = on_vehicle(set, &all, make.as_deref());
     let new_set = state.set.as_deref() != Some(set.set.name.as_str());
     state.set = Some(set.set.name.clone());
+    Ok(Opened {
+        elm,
+        year,
+        state_path,
+        state,
+        set,
+        new_set,
+    })
+}
+
+/// The modules named on the command line ("701", or "750.2A" behind an extended address), or every one with requests.
+fn chosen_modules<'s>(set: &'s Loaded, pos: &[String]) -> Result<Vec<&'s ModuleDef>, String> {
+    if pos.is_empty() {
+        return Ok(set
+            .modules
+            .iter()
+            .filter(|m| !m.requests.is_empty())
+            .collect());
+    }
+    pos.iter()
+        .map(|p| {
+            if let Some(m) = set
+                .modules
+                .iter()
+                .find(|m| m.module.label().eq_ignore_ascii_case(p))
+            {
+                return Ok(m);
+            }
+            let tx = hex_id(p)?;
+            set.module(tx).ok_or(format!(
+                "{} has no module {tx:03X} (icarus data {} lists them)",
+                set.set.name, set.set.name
+            ))
+        })
+        .collect()
+}
+
+/// `icarus obd suggest [MODULE...] [--seconds N] [--set SET]` (ICA-7, `naming`): the standard values and the set's requests
+/// read in turn, then what the bytes no definition names follow. Guesses to check; nothing is written.
+pub fn obd_suggest(args: &Args) -> Result<(), String> {
+    let mut o = open_set(args)?;
+    let secs = args
+        .opt("seconds")
+        .map(|v| v.parse::<f64>().map_err(|_| "--seconds needs a number"))
+        .transpose()?
+        .unwrap_or(60.0);
+    let modules: Vec<ModuleDef> = chosen_modules(&o.set, &args.pos)?
+        .into_iter()
+        .cloned()
+        .collect();
+    let scope = Scope {
+        year: o.year,
+        all_years: args.opt("all-years").is_some(),
+        refused_before: o.state.refused_keys(),
+        retry: args.opt("all").is_some(),
+    };
+    actuator::catch_interrupt();
+    println!(
+        "Reading the standard values and {} module(s) of set {} in turn for {secs} s (Ctrl+C stops early). Keep the engine \
+         running; values that rise and fall (rev it, or drive) are what can be matched.",
+        modules.len(),
+        o.set.set.name
+    );
+    let got = naming::sample(
+        &mut o.elm,
+        &mut Pacer::real(),
+        &o.set.gates,
+        &modules,
+        &scope,
+        naming::PIDS,
+        &Instant::now,
+        &mut |t| t >= secs || actuator::interrupted(),
+    );
+    let found = naming::suggest(&got.standard, &got.unknown);
+    let reads: usize = got.unknown.iter().map(|u| u.reads.len()).sum();
+    println!(
+        "{} pass(es): {} standard value(s), {} request(s) with unnamed bytes ({reads} answers).",
+        got.passes,
+        got.standard.iter().filter(|s| !s.reads.is_empty()).count(),
+        got.unknown.len()
+    );
+    if found.is_empty() {
+        println!(
+            "Nothing follows a standard value closely enough (r {} or more over {} reads). A longer run, with the values \
+             moving, may find more.",
+            naming::MIN_R,
+            naming::MIN_READS
+        );
+    } else {
+        println!("Suggestions (guesses to check, not written anywhere):");
+        for f in &found {
+            println!("  {}", f.text());
+        }
+    }
+    for (what, why) in &got.left_out {
+        println!("  not read: {what}: {why}");
+    }
+    Ok(())
+}
+
+pub fn obd_data(args: &Args) -> Result<(), String> {
+    let Opened {
+        mut elm,
+        year,
+        state_path,
+        mut state,
+        set,
+        new_set,
+    } = open_set(args)?;
+    let set = &set;
     let mut save = |st: &State| match &state_path {
         Some(p) => st.save(p),
         None => Ok(()),
@@ -1294,31 +1415,7 @@ pub fn obd_data(args: &Args) -> Result<(), String> {
         );
         return Ok(());
     }
-    let chosen: Vec<&ModuleDef> = if args.pos.is_empty() {
-        set.modules
-            .iter()
-            .filter(|m| !m.requests.is_empty())
-            .collect()
-    } else {
-        args.pos
-            .iter()
-            .map(|p| {
-                // "701", or "750.2A" for a module behind an extended address
-                if let Some(m) = set
-                    .modules
-                    .iter()
-                    .find(|m| m.module.label().eq_ignore_ascii_case(p))
-                {
-                    return Ok(m);
-                }
-                let tx = hex_id(p)?;
-                set.module(tx).ok_or(format!(
-                    "{} has no module {tx:03X} (icarus data {} lists them)",
-                    set.set.name, set.set.name
-                ))
-            })
-            .collect::<Result<_, String>>()?
-    };
+    let chosen = chosen_modules(set, &args.pos)?;
     let us = units::us_customary();
     println!(
         "Module data: set {} ({}){}",
@@ -1487,7 +1584,7 @@ mod tests {
         let ect = cols.iter().find(|c| c.0 .1 == "SIM_ECT").unwrap();
         assert_eq!(ect.1, "700 coolant temperature [°F]");
         // nothing for a request that is never sent: other years (1F04), a session (1F05)
-        let never: Vec<&str> = set.modules[0].requests[3..]
+        let never: Vec<&str> = set.modules[0].requests[3..5]
             .iter()
             .flat_map(|r| &r.values)
             .map(|v| v.id.as_str())

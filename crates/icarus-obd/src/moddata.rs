@@ -707,36 +707,54 @@ pub fn read_request(
     r: &RequestDef,
     scope: &Scope,
 ) -> Outcome {
+    match fetch_request(link, pacer, gates, m, r, scope) {
+        Ok(d) => decode_all(r, &d, scope.year),
+        Err(o) => o,
+    }
+}
+
+/// `read_request` up to the answer: every gate checked again, paced and sent; the answer's data (after the echo), or the
+/// outcome when there is none. Naming unknown values (`naming`) works on the bytes themselves.
+pub fn fetch_request(
+    link: &mut dyn Link,
+    pacer: &mut Pacer,
+    gates: &Gates,
+    m: &ModuleDef,
+    r: &RequestDef,
+    scope: &Scope,
+) -> Result<Vec<u8>, Outcome> {
     if let Err(why) = reachable(m) {
-        return Outcome::Skipped(why.into());
+        return Err(Outcome::Skipped(why.into()));
     }
     if let Some(why) = gates.request_refused(m, r) {
-        return Outcome::Skipped(why);
+        return Err(Outcome::Skipped(why));
     }
     if r.needs_session.is_some() {
-        return Outcome::Skipped("needs a diagnostic session (Icarus does not open one)".into());
+        return Err(Outcome::Skipped(
+            "needs a diagnostic session (Icarus does not open one)".into(),
+        ));
     }
     if !r.years.is_empty() {
         match scope.year {
             Some(y) if !md::year_in(&r.years, y) => {
-                return Outcome::Skipped(format!("not for {y}"))
+                return Err(Outcome::Skipped(format!("not for {y}")))
             }
             None if !scope.all_years => {
-                return Outcome::Skipped(
+                return Err(Outcome::Skipped(
                     "for some model years only, and the year is not known (--year or --all-years)"
                         .into(),
-                )
+                ))
             }
             _ => {}
         }
     }
     let k = key(m, r);
     if scope.refused_before.contains(&k) && !scope.retry {
-        return Outcome::Skipped("this vehicle refused it before (--all asks again)".into());
+        return Err(Outcome::Skipped(
+            "this vehicle refused it before (--all asks again)".into(),
+        ));
     }
-    if let Err(hold) = pacer.before(k, r.every) {
-        return hold;
-    }
+    pacer.before(k, r.every)?;
     // `reachable` and the gates hold both to 11 bits
     let (tx, rx) = (m.module.tx, m.module.rx());
     let nap = pacer.sleep;
@@ -744,20 +762,28 @@ pub fn read_request(
     let ask = |link: &mut dyn Link| match uds::at(link, ext, |l| {
         uds::read_data_with(l, tx, rx, r.service, r.ident, &mut |d| nap(d))
     }) {
-        Ok(DataAnswer::Data(d)) => decode_all(r, &d, scope.year),
-        Ok(DataAnswer::Refused(c)) => Outcome::Refused(c),
-        Ok(DataAnswer::Silent) => Outcome::Silent,
-        Err(e) => Outcome::Failed(e.to_string()),
+        Ok(DataAnswer::Data(d)) => Ok(d),
+        Ok(DataAnswer::Refused(c)) => Err(Outcome::Refused(c)),
+        Ok(DataAnswer::Silent) => Err(Outcome::Silent),
+        Err(e) => Err(Outcome::Failed(e.to_string())),
     };
     let mut out = ask(link);
     // A negative answer names no identifier, so it could be a late refusal of an earlier request: one that would drop
     // this request for the session (or be kept for the vehicle as "not there") is asked once more, paced, and believed
     // only when the module refuses again.
-    if matches!(out, Outcome::Refused(c) if lasting_refusal(c)) {
+    if matches!(out, Err(Outcome::Refused(c)) if lasting_refusal(c)) {
         pacer.again(k);
         out = ask(link);
     }
-    pacer.after(k, &out);
+    // an answer is paced as any answer with data is, whether or not its values decode
+    let data = Outcome::Values(Vec::new());
+    pacer.after(
+        k,
+        match &out {
+            Ok(_) => &data,
+            Err(o) => o,
+        },
+    );
     out
 }
 
@@ -1294,7 +1320,7 @@ mod tests {
         let labels: Vec<String> = got.iter().map(|g| g.0.label()).collect();
         assert_eq!(
             labels,
-            vec!["22 1F01", "22 1F02", "22 1F03", "22 1F04", "22 1F05"]
+            vec!["22 1F01", "22 1F02", "22 1F03", "22 1F04", "22 1F05", "22 1F06"]
         );
         // a 20-byte answer over several frames
         let v = values(&got[0].1);
