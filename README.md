@@ -406,7 +406,7 @@ back); **Learning** watches another tool and names what it learned; **Bus** show
 definition and an image
 (and a second image or a version to compare: it starts on the first map that changed, changed cells outlined; tables as
 cells, a 2D graph or a 3D surface; versions of the image); **Logs** summarizes a recording (fuel trims by driving
-condition), charts it on one time line, lays a chosen value out over engine speed and load like a tuner's table (each cell
+condition, with fuel cut while coasting and the warm-up counted apart and left out), charts it on one time line, lays a chosen value out over engine speed and load like a tuner's table (each cell
 the mean of its readings), and draws the drive's GPS track coloured by speed when it was recorded with GPS (the shape only:
 no map is fetched). Start options:
 `--connect [--adapter A] --page modules --scan`, `--live`, `--maps DEF.xdf|.a2l IMAGE.bin [SECOND.bin|VERSION.version.toml]` with `--map NAME` and `--view cells|2d|3d`, `--learn [--mark TEXT]

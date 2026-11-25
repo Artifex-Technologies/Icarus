@@ -554,6 +554,26 @@ fn summary_ui(ui: &mut egui::Ui, pal: &theme::Palette, s: &Summary) {
                 ui.end_row();
             }
         });
+    if s.warming > 0 {
+        ui.label(
+            RichText::new(format!(
+                "Warming up: {} readings, left out of the trims (the engine runs richer on purpose until it is warm).",
+                s.warming
+            ))
+            .small()
+            .color(pal.dim),
+        );
+    }
+    if s.fuel_cut > 0 {
+        ui.label(
+            RichText::new(format!(
+                "Fuel cut while coasting: {} readings, left out of the trims (commanded lambda can read well below 1 there; that is not running rich).",
+                s.fuel_cut
+            ))
+            .small()
+            .color(pal.dim),
+        );
+    }
     ui.label(
         RichText::new(format!(
             "Long-term trims from start to end: bank 1 {} to {}, bank 2 {} to {}. Timing drops under load: {} at the rev limiter or a shift, {} others.",

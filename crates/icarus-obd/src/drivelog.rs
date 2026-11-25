@@ -1,8 +1,10 @@
 //! Reading a recorded drive: the CSV `icarus obd live --csv` writes (a time column, then one column per value, named as
 //! `"Short-term fuel trim, bank 1 [%]"`). Summarized the way a person reads fuel trims: by driving condition (idle, light,
 //! moderate, hard), each bank's total trim (short + long term), the gap between the banks, the rear oxygen sensors, and the
-//! sudden timing drops under load sorted into the rev limiter or a shift (RPM falls right after) and the rest. Offline: only
-//! the file is read.
+//! sudden timing drops under load sorted into the rev limiter or a shift (RPM falls right after) and the rest. Readings in
+//! fuel cut (coasting: moving, short-term trims at 0, the rear oxygen sensors near 0 V, the pedal at rest) are counted apart
+//! and left out of the trims: there the trims say nothing and the rear sensors read lean, and on some engines commanded
+//! lambda reads well below 1 (0.48 on a Tacoma, ICA-86), which is not running rich. Offline: only the file is read.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -23,6 +25,7 @@ struct Cols {
     o2_1: Option<usize>,
     o2_2: Option<usize>,
     volts: Option<usize>,
+    pedal: Option<usize>,
 }
 
 fn find(header: &[String], want: &[&str]) -> Option<usize> {
@@ -47,6 +50,7 @@ fn cols(header: &[String]) -> Cols {
         o2_1: find(header, &["bank 1 sensor 2"]),
         o2_2: find(header, &["bank 2 sensor 2"]),
         volts: find(header, &["module voltage"]),
+        pedal: find(header, &["accelerator pedal"]),
     }
 }
 
@@ -92,7 +96,15 @@ pub struct Summary {
     /// Long-term trims at the start and at the end (bank 1, bank 2).
     pub ltft_start: (Option<f64>, Option<f64>),
     pub ltft_end: (Option<f64>, Option<f64>),
+    /// Readings in fuel cut while coasting, left out of the bands.
+    pub fuel_cut: usize,
+    /// Readings while the engine warms up (coolant under `WARM_C`), left out of the bands.
+    pub warming: usize,
 }
+
+/// Below this coolant temperature (°C; 158 °F) the engine is still warming up: it runs richer on purpose and its trims have
+/// not settled, so those readings say little about the fuelling.
+pub const WARM_C: f64 = 70.0;
 
 fn mean(v: &[f64]) -> Option<f64> {
     (!v.is_empty()).then(|| v.iter().sum::<f64>() / v.len() as f64)
@@ -328,6 +340,29 @@ pub fn summarize(text: &str) -> Result<Summary, String> {
             (None, None) => None,
             (a, b) => Some(a.unwrap_or(0.0) + b.unwrap_or(0.0)),
         };
+    // fuel cut while coasting: moving, the short-term trims at 0 (no correction while no fuel goes in), the rear oxygen
+    // sensors near 0 V (only air passes), and the pedal at rest (its lowest reading in this log, which is not 0 on every
+    // vehicle); a log without a rear sensor or a short-term trim marks none
+    let pedal_rest = rows
+        .iter()
+        .filter_map(|r| get(r, c.pedal))
+        .fold(f64::MAX, f64::min);
+    let fuel_cut = |r: &Vec<Option<f64>>| {
+        let near0 = |i: Option<usize>| get(r, i).map(|x| x.abs() < 0.05);
+        let lean = |i: Option<usize>| get(r, i).map(|x| x < 0.15);
+        get(r, c.speed).is_some_and(|k| k >= 1.6)
+            && near0(c.stft1) == Some(true)
+            && near0(c.stft2) != Some(false)
+            && lean(c.o2_1) == Some(true)
+            && lean(c.o2_2) != Some(false)
+            && get(r, c.pedal).is_none_or(|p| p <= pedal_rest + 3.0)
+    };
+    s.fuel_cut = rows.iter().filter(|r| fuel_cut(r)).count();
+    let warming = |r: &Vec<Option<f64>>| get(r, c.coolant).is_some_and(|t| t < WARM_C);
+    s.warming = rows
+        .iter()
+        .filter(|r| warming(r) && get(r, c.rpm).is_some_and(|x| x > 400.0))
+        .count();
     type Cond = fn(f64, f64, f64, f64) -> bool;
     let conds: [(&'static str, Cond); 4] = [
         ("idle", |rpm, kmh, _maf, _thr| kmh < 1.6 && rpm > 400.0),
@@ -342,7 +377,7 @@ pub fn summarize(text: &str) -> Result<Summary, String> {
             .iter()
             .filter(|r| {
                 let v = |i| get(r, i).unwrap_or(0.0);
-                cond(v(c.rpm), v(c.speed), v(c.maf), v(c.throttle))
+                !fuel_cut(r) && !warming(r) && cond(v(c.rpm), v(c.speed), v(c.maf), v(c.throttle))
             })
             .collect();
         if pick.is_empty() {
@@ -440,6 +475,19 @@ pub fn words(name: &str, s: &Summary) -> String {
             pct(gap),
             volts(b.o2_1),
             volts(b.o2_2)
+        ));
+    }
+    if s.warming > 0 {
+        o.push_str(&format!(
+            "\nWarming up (coolant under {WARM_C:.0} °C, {:.0} °F): {} readings, left out of the trims above (the engine runs richer on purpose until it is warm).\n",
+            WARM_C * 1.8 + 32.0,
+            s.warming
+        ));
+    }
+    if s.fuel_cut > 0 {
+        o.push_str(&format!(
+            "\nFuel cut while coasting: {} readings (short-term trims at 0, rear oxygen sensors near 0 V, the pedal at rest), left out of the trims above. Commanded lambda can read well below 1 there; that is not running rich.\n",
+            s.fuel_cut
         ));
     }
     o.push_str(&format!(
@@ -616,6 +664,46 @@ mod tests {
             summarize("time_s,\"Engine speed [rpm]\"\n0,700\n").is_err(),
             "no trims, no summary"
         );
+    }
+
+    #[test]
+    fn fuel_cut_is_counted_apart_and_never_read_as_rich() {
+        // closed loop at cruise, then coasting in fuel cut (lambda read 0.48, trims 0, rear sensors at 0 V, pedal at rest),
+        // then a stop at idle
+        let head = format!("{HEAD},\"Accelerator pedal position D [%]\",\"Commanded lambda [λ]\"");
+        let log = format!(
+            "{head}\n\
+             0.0,1500,60,90,-1.0,-4.0,-0.5,-2.0,30,10.0,20,25,0.72,0.74,13.6,25.0,1.00\n\
+             0.5,1500,60,90,1.0,-4.0,0.5,-2.0,30,10.0,20,25,0.70,0.72,13.6,25.0,1.00\n\
+             1.0,1400,55,90,0.0,-4.0,0.0,-2.0,25,3.0,14,10,0.01,0.01,13.6,15.7,0.48\n\
+             1.5,1300,50,90,0.0,-4.0,0.0,-2.0,25,3.0,14,10,0.00,0.01,13.6,15.7,0.48\n\
+             2.0,700,0,90,1.0,-4.0,0.0,-2.0,15,3.0,14,15,0.75,0.75,13.6,15.7,1.00\n\
+             2.5,900,0,20,0.0,-4.0,0.0,-2.0,10,4.0,15,20,0.20,0.20,13.6,15.7,0.85\n"
+        );
+        let s = summarize(&log).unwrap();
+        assert_eq!(s.fuel_cut, 2);
+        // the cold start's reading is not idle's: idle keeps its warm reading alone
+        assert_eq!(s.warming, 1);
+        let idle = s.bands.iter().find(|b| b.name == "idle").unwrap();
+        assert_eq!((idle.readings, idle.o2_1), (1, Some(0.75)));
+        let cruise = s.bands.iter().find(|b| b.name == "cruise / light").unwrap();
+        // the two closed-loop readings only: the trims and the rear sensors are not dragged toward 0
+        assert_eq!(
+            (cruise.readings, cruise.bank1, cruise.o2_1),
+            (2, Some(-4.0), Some(0.71))
+        );
+        let w = words("drive.csv", &s);
+        assert!(
+            w.contains("Fuel cut while coasting: 2 readings") && w.contains("not running rich"),
+            "{w}"
+        );
+        assert!(
+            w.contains("Warming up (coolant under 70 °C, 158 °F): 1 readings"),
+            "{w}"
+        );
+        // the same readings with the pedal pressed are not fuel cut (a lean moment under way is not coasting)
+        let pressed = log.replace(",15.7,0.48", ",40.0,0.48");
+        assert_eq!(summarize(&pressed).unwrap().fuel_cut, 0);
     }
 
     #[test]
