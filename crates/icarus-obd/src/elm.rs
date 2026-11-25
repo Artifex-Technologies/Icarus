@@ -37,17 +37,58 @@ pub fn connect_target(target: &crate::port::Target) -> Result<(Elm, Option<Strin
     }
 }
 
+/// Opens the adapter `target` names to listen only (ICA-80): `Elm::listen` on `protocol`, with `connect_target`'s search for
+/// a serial adapter's speed (which speaks only to the adapter). Nothing goes onto the bus.
+pub fn listen_target(
+    target: &crate::port::Target,
+    protocol: u8,
+) -> Result<(Elm, Option<String>), String> {
+    use crate::port::Target;
+    let how = |p: Box<dyn Port>| Elm::listen(p, protocol);
+    match target {
+        Target::Serial { path, baud } => connect_serial_with(
+            path,
+            *baud,
+            &mut |b| {
+                Target::Serial {
+                    path: path.clone(),
+                    baud: b,
+                }
+                .open()
+            },
+            &how,
+        ),
+        Target::Can(_) | Target::Slcan { .. } => {
+            Err("a CAN interface or an SLCAN adapter is watched with icarus bus watch, which is listen-only already".into())
+        }
+        t => {
+            let port = t.open().map_err(|e| e.to_string())?;
+            how(port).map(|e| (e, None)).map_err(|e| e.to_string())
+        }
+    }
+}
+
 /// `connect_target` for a serial port, opened at a speed by `open` (a missing port or no permission is said at once).
 fn connect_serial(
     path: &str,
     first: u32,
     open: &mut dyn FnMut(u32) -> io::Result<Box<dyn Port>>,
 ) -> Result<(Elm, Option<String>), String> {
+    connect_serial_with(path, first, open, &Elm::connect)
+}
+
+/// `connect_serial` with the adapter set up by `how` (`Elm::connect`, or `Elm::listen` for a listener).
+fn connect_serial_with(
+    path: &str,
+    first: u32,
+    open: &mut dyn FnMut(u32) -> io::Result<Box<dyn Port>>,
+    how: &dyn Fn(Box<dyn Port>) -> Result<Elm, ObdError>,
+) -> Result<(Elm, Option<String>), String> {
     let mut tried: Vec<u32> = vec![];
     let mut first_err: Option<ObdError> = None;
     for baud in std::iter::once(first).chain(SERIAL_SPEEDS.into_iter().filter(|b| *b != first)) {
         let port = open(baud).map_err(|e| format!("{path}: {e}"))?;
-        match Elm::connect(port) {
+        match how(port) {
             Ok(elm) => {
                 let note = (baud != first).then(|| {
                     format!("{path} answered at {baud} baud, not {first} ({path}@{baud} names it)")
@@ -270,6 +311,38 @@ const LINE_ERRORS: [&str; 12] = [
 impl Elm {
     /// Resets the adapter, sets it up, and finds the vehicle's protocol (the vehicle's ignition must be on).
     pub fn connect(port: Box<dyn Port>) -> Result<Elm, ObdError> {
+        let mut elm = Elm::setup(port, "ATSP0")?;
+        // the first request makes the adapter try each protocol until one answers
+        elm.protocol = Protocol::Other(0);
+        let first = elm.raw_request("0100", Duration::from_secs(15))?;
+        check_errors(&first)?;
+        let dpn = elm.command("ATDPN", Duration::from_secs(2))?;
+        let n = dpn
+            .first()
+            .map(|s| s.trim_start_matches('A'))
+            .and_then(|s| u8::from_str_radix(s, 16).ok());
+        elm.protocol = Protocol::from_number(n.ok_or_else(|| ObdError::Garbled(dpn.join(" ")))?);
+        Ok(elm)
+    }
+
+    /// Sets the adapter up to listen only (ICA-80): reset, its formatting and the protocol given (an ELM327 protocol number:
+    /// 6 is ISO 15765-4 CAN, 11-bit, 500 kbit/s, what most vehicles since 2008 use), and nothing else. No request goes onto
+    /// the bus, not even the protocol search `connect` makes with its first request. Watch with `monitor` or `monitor_ids`,
+    /// which make the adapter silent first (it acknowledges nothing).
+    pub fn listen(port: Box<dyn Port>, protocol: u8) -> Result<Elm, ObdError> {
+        if !(1..=0xC).contains(&protocol) {
+            return Err(ObdError::Adapter(format!(
+                "no protocol {protocol:X} to listen on"
+            )));
+        }
+        let mut elm = Elm::setup(port, &format!("ATSP{protocol:X}"))?;
+        elm.protocol = Protocol::from_number(protocol);
+        Ok(elm)
+    }
+
+    /// Reset and setup: echo, line feeds and spaces as Icarus reads them, headers on, the protocol command `sp`; then the
+    /// adapter's chip (STI) and the battery's voltage. Only the adapter is spoken to.
+    fn setup(port: Box<dyn Port>, sp: &str) -> Result<Elm, ObdError> {
         let mut elm = Elm {
             port,
             id: String::new(),
@@ -294,7 +367,7 @@ impl Elm {
             .find(|l| l.to_uppercase().contains("ELM"))
             .cloned()
             .unwrap_or_else(|| reset.join(" "));
-        for c in ["ATE0", "ATL0", "ATS1", "ATH1", "ATSP0"] {
+        for c in ["ATE0", "ATL0", "ATS1", "ATH1", sp] {
             let r = elm.command(c, Duration::from_secs(2))?;
             if !r.iter().any(|l| l == "OK") {
                 return Err(ObdError::Adapter(format!("{c} gave {r:?}")));
@@ -308,16 +381,6 @@ impl Elm {
             .command("ATRV", Duration::from_secs(2))
             .ok()
             .and_then(|r| r.first().and_then(|v| v.trim_end_matches('V').parse().ok()));
-        // the first request makes the adapter try each protocol until one answers
-        elm.protocol = Protocol::Other(0);
-        let first = elm.raw_request("0100", Duration::from_secs(15))?;
-        check_errors(&first)?;
-        let dpn = elm.command("ATDPN", Duration::from_secs(2))?;
-        let n = dpn
-            .first()
-            .map(|s| s.trim_start_matches('A'))
-            .and_then(|s| u8::from_str_radix(s, 16).ok());
-        elm.protocol = Protocol::from_number(n.ok_or_else(|| ObdError::Garbled(dpn.join(" ")))?);
         Ok(elm)
     }
 

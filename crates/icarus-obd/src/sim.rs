@@ -14,6 +14,80 @@ use std::io;
 use std::time::Duration;
 
 pub const VIN: &str = "5TFICARUSSIM00001";
+
+/// One bus for every simulated adapter in this program (ICA-80): a simulated adapter that answers a request puts the request
+/// and its answers on it as CAN frames, and one watching the bus (monitor mode) sees them besides the vehicle's own traffic,
+/// as an adapter listening on a Y-splitter sees another tool's requests. (the next line's number, the last lines)
+static SHARED: std::sync::Mutex<(u64, VecDeque<(u64, String)>)> =
+    std::sync::Mutex::new((0, VecDeque::new()));
+/// How many frames the shared bus keeps for its listeners.
+const SHARED_KEEP: usize = 1024;
+
+fn publish(lines: Vec<String>) {
+    let mut g = SHARED.lock().unwrap_or_else(|p| p.into_inner());
+    for l in lines {
+        let n = g.0;
+        g.0 += 1;
+        g.1.push_back((n, l));
+        if g.1.len() > SHARED_KEEP {
+            g.1.pop_front();
+        }
+    }
+}
+
+/// The shared bus's frames from number `seen` on, and the number after them.
+fn shared_since(seen: u64) -> (u64, Vec<String>) {
+    let g = SHARED.lock().unwrap_or_else(|p| p.into_inner());
+    (
+        g.0,
+        g.1.iter()
+            .filter(|(n, _)| *n >= seen)
+            .map(|(_, l)| l.clone())
+            .collect(),
+    )
+}
+
+/// The shared bus's next line number: a watch that starts now sees what comes after it.
+fn shared_now() -> u64 {
+    SHARED.lock().unwrap_or_else(|p| p.into_inner()).0
+}
+
+/// A message as the CAN frames it goes as (ISO-TP: a single frame, or a first frame and consecutive frames), each with its
+/// ID and all 8 data bytes, as a bus monitor shows them before formatting.
+fn bus_frames(id: u32, payload: &[u8]) -> Vec<String> {
+    let idt = if id > 0x7FF {
+        format!("{id:08X}")
+    } else {
+        format!("{id:03X}")
+    };
+    let line = |mut b: Vec<u8>| {
+        b.resize(8, 0);
+        format!(
+            "{idt} {}",
+            b.iter()
+                .map(|x| format!("{x:02X}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+    };
+    if payload.len() <= 7 {
+        return vec![line([&[payload.len() as u8][..], payload].concat())];
+    }
+    let mut out = vec![line(
+        [
+            &[
+                0x10 | (payload.len() >> 8) as u8 & 0x0F,
+                payload.len() as u8,
+            ][..],
+            &payload[..6],
+        ]
+        .concat(),
+    )];
+    for (i, chunk) in payload[6..].chunks(7).enumerate() {
+        out.push(line([&[0x20 | ((i + 1) as u8 & 0x0F)][..], chunk].concat()));
+    }
+    out
+}
 /// The Honda-like simulation's VIN (Honda's JHM prefix; the I makes it no real VIN).
 pub const HONDA_VIN: &str = "JHMICARUSSIM00002";
 /// The GM-like simulation's VIN (Chevrolet's 1G1 prefix; the I makes it no real VIN).
@@ -114,6 +188,10 @@ pub struct SimCar {
     /// The extended address byte the adapter puts first in each frame (ATCEA hh), for the modules behind the gateway at
     /// 750 (Toyota's body module 40, the tire pressure module 2A), which answer from 758 with the same byte first.
     cea: Option<u8>,
+    /// While watching: the shared bus's next line this adapter has not shown yet.
+    bus_seen: u64,
+    /// A second adapter on the same bus (`sim:listen`): its watch also shows the shared bus.
+    listener: bool,
 }
 
 impl Default for SimCar {
@@ -167,6 +245,8 @@ impl SimCar {
             acked: false,
             vin: VIN.to_string(),
             cea: None,
+            bus_seen: 0,
+            listener: false,
         }
     }
 
@@ -290,6 +370,15 @@ impl SimCar {
     }
 
     /// Ignition on, engine off: what most actuator tests need.
+    /// A second adapter on the same simulated bus (`sim:listen`, ICA-80): watching, it also shows what the other simulated
+    /// adapters asked and were answered.
+    pub fn listening() -> SimCar {
+        SimCar {
+            listener: true,
+            ..SimCar::new()
+        }
+    }
+
     pub fn engine_off() -> SimCar {
         SimCar {
             engine_on: false,
@@ -594,6 +683,12 @@ impl SimCar {
                 .into_iter()
                 .collect()
         };
+        // on the shared bus: the request and every answer (a filter only hides answers from this adapter, not from the bus)
+        let mut on_bus = bus_frames(self.header, req);
+        for (h, p) in &msgs {
+            on_bus.extend(bus_frames(*h, p));
+        }
+        publish(on_bus);
         if let Some(f) = self.filter {
             msgs.retain(|(h, _)| *h == f);
         }
@@ -1044,6 +1139,7 @@ impl SimCar {
                     return;
                 }
                 self.monitoring = Some(0);
+                self.bus_seen = shared_now();
                 self.stma = c != "ATMA";
                 self.stm_filtered = c == "STM";
                 self.acked |= !self.csm || (self.stn && self.cmm != 0);
@@ -1235,7 +1331,14 @@ impl Port for SimCar {
         if let Some(t) = self.monitoring {
             if self.output.len() < 4096 {
                 std::thread::sleep(Duration::from_millis(5));
-                for line in self.bus_tick(t) {
+                // the vehicle's own traffic, then what other simulated adapters asked and were answered since the last tick
+                let (next, shared) = if self.listener {
+                    shared_since(self.bus_seen)
+                } else {
+                    (self.bus_seen, vec![])
+                };
+                self.bus_seen = next;
+                for line in self.bus_tick(t).into_iter().chain(shared) {
                     let id = line
                         .split_whitespace()
                         .next()
@@ -1280,6 +1383,73 @@ mod tests {
         s.send(b"ATE0\r0902\r").unwrap();
         let n = s.recv(&mut [0u8; 512], Duration::ZERO).unwrap();
         assert!(n > 0);
+    }
+
+    /// ICA-80: a second simulated adapter listening on the same bus sees another adapter's requests and their answers, and
+    /// is itself sent no request (Elm::listen sets it up without the protocol search; the watch is silent).
+    #[test]
+    fn a_listener_sees_another_adapters_requests_and_is_sent_none() {
+        use std::sync::{Arc, Mutex};
+        // what the listening adapter is sent, recorded
+        struct Rec(SimCar, Arc<Mutex<Vec<u8>>>);
+        impl Port for Rec {
+            fn send(&mut self, d: &[u8]) -> io::Result<()> {
+                self.1.lock().unwrap().extend_from_slice(d);
+                self.0.send(d)
+            }
+            fn recv(&mut self, b: &mut [u8], t: Duration) -> io::Result<usize> {
+                self.0.recv(b, t)
+            }
+        }
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let mut talker = Elm::connect(Box::new(SimCar::new())).unwrap();
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let (s2, sent2, until) = (
+            seen.clone(),
+            sent.clone(),
+            std::time::Instant::now() + Duration::from_secs(10),
+        );
+        let watch = std::thread::spawn(move || {
+            // opened in the thread that watches (an adapter's link stays with its thread, as in the window's worker)
+            let mut listener = Elm::listen(Box::new(Rec(SimCar::listening(), sent2)), 6).unwrap();
+            listener
+                .monitor(|line| {
+                    let mut s = s2.lock().unwrap();
+                    s.push(line.to_string());
+                    !s.iter().any(|l| l.contains("41 0C")) && std::time::Instant::now() < until
+                })
+                .unwrap();
+        });
+        // the talker asks for engine speed until the listener has seen the answer
+        while !seen.lock().unwrap().iter().any(|l| l.contains("41 0C"))
+            && std::time::Instant::now() < until
+        {
+            j1979::read(&mut talker, 0x0C).unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        watch.join().unwrap();
+        let seen = seen.lock().unwrap();
+        assert!(
+            seen.iter()
+                .any(|l| l.starts_with("7DF") && l.contains("01 0C")),
+            "the request: {seen:?}"
+        );
+        assert!(
+            seen.iter()
+                .any(|l| l.starts_with("7E8") && l.contains("41 0C")),
+            "its answer: {seen:?}"
+        );
+        let sent = String::from_utf8_lossy(&sent.lock().unwrap()).to_string();
+        for cmd in sent.split('\r').map(str::trim).filter(|c| !c.is_empty()) {
+            assert!(
+                cmd.starts_with("AT") || cmd.starts_with("ST"),
+                "the listener was sent {cmd:?}: {sent:?}"
+            );
+        }
+        assert!(
+            sent.contains("ATSP6") && sent.contains("ATCSM1"),
+            "the protocol set, and silent: {sent:?}"
+        );
     }
 
     #[test]

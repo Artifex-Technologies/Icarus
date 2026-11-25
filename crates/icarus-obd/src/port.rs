@@ -14,6 +14,7 @@ pub trait Port {
 
 /// Where to reach the adapter, as written on the command line:
 ///   `sim` or `sim:off`             Icarus's simulated car, engine running or ignition on with the engine off
+///   `sim:listen`                   a second simulated adapter on the same simulated bus, for listening (ICA-80)
 ///   `/dev/ttyUSB0` or `/dev/ttyUSB0@115200`   a USB adapter (38400 baud unless given)
 ///   `bt:AA:BB:CC:DD:EE:FF` or `...#2`         a paired Bluetooth adapter, RFCOMM channel 1 unless given
 ///   `tcp:192.168.0.10:35000`       a Wi-Fi adapter
@@ -22,9 +23,11 @@ pub trait Port {
 ///                                             (115200 baud and 500 kbit/s unless given)
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
-    /// The simulated vehicle: engine running (`sim`) or ignition on, engine off (`sim:off`).
+    /// The simulated vehicle: engine running (`sim`) or ignition on, engine off (`sim:off`); `sim:listen` is a second adapter
+    /// on the same simulated bus, whose watch also shows what the other simulated adapters asked and were answered.
     Sim {
         engine_on: bool,
+        listen: bool,
     },
     Serial {
         path: String,
@@ -65,9 +68,10 @@ impl Target {
     }
 
     pub fn parse(s: &str) -> Result<Target, String> {
-        if s == "sim" || s == "sim:off" {
+        if s == "sim" || s == "sim:off" || s == "sim:listen" {
             return Ok(Target::Sim {
-                engine_on: s == "sim",
+                engine_on: s != "sim:off",
+                listen: s == "sim:listen",
             });
         }
         if let Some(rest) = s.strip_prefix("slcan:") {
@@ -175,8 +179,9 @@ impl Target {
                     format!("{path} is an SLCAN adapter, opened listen-only for watching the bus (icarus bus watch, icarus learn); this needs an OBD adapter or a CAN interface"),
                 ))
             }
-            Target::Sim { engine_on: true } => Box::new(crate::sim::SimCar::new()),
-            Target::Sim { engine_on: false } => Box::new(crate::sim::SimCar::engine_off()),
+            Target::Sim { listen: true, .. } => Box::new(crate::sim::SimCar::listening()),
+            Target::Sim { engine_on: true, .. } => Box::new(crate::sim::SimCar::new()),
+            Target::Sim { engine_on: false, .. } => Box::new(crate::sim::SimCar::engine_off()),
             Target::Serial { path, baud } => Box::new(open_serial(path, *baud)?),
             Target::Bluetooth { addr, channel } => Box::new(open_rfcomm(*addr, *channel)?),
             Target::Tcp(hostport) => {
@@ -417,11 +422,17 @@ mod tests {
     fn targets_from_the_command_line() {
         assert_eq!(
             Target::parse("sim").unwrap(),
-            Target::Sim { engine_on: true }
+            Target::Sim {
+                engine_on: true,
+                listen: false
+            }
         );
         assert_eq!(
             Target::parse("sim:off").unwrap(),
-            Target::Sim { engine_on: false }
+            Target::Sim {
+                engine_on: false,
+                listen: false
+            }
         );
         assert_eq!(
             Target::parse("/dev/ttyUSB0").unwrap(),

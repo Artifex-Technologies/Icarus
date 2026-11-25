@@ -815,6 +815,26 @@ fn can_interface(args: &Args) -> Option<String> {
 }
 
 /// An ELM327/STN adapter itself, for what only an adapter does (its monitor mode).
+/// The adapter set up to listen only (ICA-80): `Elm::listen` on the protocol `--protocol` names (an ELM327 protocol number,
+/// 6 by default: CAN 11-bit at 500 kbit/s). No request goes onto the bus, not even `connect`'s protocol search.
+fn listen_elm(args: &Args) -> Result<Elm, String> {
+    let (spec, target) = adapter_target(args)?;
+    let protocol = match args.opt("protocol") {
+        None => 6,
+        Some(p) => u8::from_str_radix(p.trim_start_matches('A'), 16)
+            .ok()
+            .filter(|n| (1..=0xC).contains(n))
+            .ok_or("--protocol is an ELM327 protocol number, 1 to C (6: CAN 11-bit, 500 kbit/s)")?,
+    };
+    eprintln!("connecting to {spec} to listen (protocol {protocol:X})...");
+    let (elm, note) =
+        icarus_obd::elm::listen_target(&target, protocol).map_err(|e| format!("{spec}: {e}"))?;
+    if let Some(n) = note {
+        eprintln!("note: {n}");
+    }
+    Ok(elm)
+}
+
 fn connect_elm(args: &Args) -> Result<Elm, String> {
     let (spec, target) = adapter_target(args)?;
     eprintln!("connecting to {spec}...");
@@ -1924,7 +1944,7 @@ fn watch_slcan(
 fn bus_watch(a: &[String], serial: &OpenSerial<'_>) -> Result<bus::Analyzer, String> {
     if a.first().map(String::as_str) != Some("watch") {
         return Err(
-            "usage: icarus bus watch (--adapter A | --can can0 | --adapter slcan:/dev/ttyACM0) [--seconds N] [--raw] [--diagnostic]"
+            "usage: icarus bus watch (--adapter A [--protocol N] | --can can0 | --adapter slcan:/dev/ttyACM0) [--seconds N] [--raw] [--diagnostic]"
                 .into(),
         );
     }
@@ -1938,7 +1958,7 @@ fn bus_watch(a: &[String], serial: &OpenSerial<'_>) -> Result<bus::Analyzer, Str
         .filter(|x| *x != "--raw" && *x != "--diagnostic")
         .cloned()
         .collect();
-    let args = parse_args(&rest, &["adapter", "can", "seconds"])?;
+    let args = parse_args(&rest, &["adapter", "can", "seconds", "protocol"])?;
     let secs: f64 = args
         .opt("seconds")
         .map(|v| v.parse().map_err(|_| "--seconds needs a number"))
@@ -1996,7 +2016,8 @@ fn bus_watch(a: &[String], serial: &OpenSerial<'_>) -> Result<bus::Analyzer, Str
         }
         watch_slcan(port, bitrate, start, |f| step(&mut an, f))?
     } else {
-        let mut elm = connect_elm(&args)?;
+        // listen only: the adapter is set up without the protocol search's request (it sent one 0100 before, 2026-11-22)
+        let mut elm = listen_elm(&args)?;
         let proto = elm.protocol;
         if raw {
             // the adapter first, so a firmware change shows in the log; bus::parse_line skips this line

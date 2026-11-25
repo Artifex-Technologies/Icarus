@@ -145,8 +145,9 @@ data page, add latitude, longitude and GPS speed columns (empty while there is n
 
 ## The bus
 
-`icarus bus watch --adapter A` (the OBDLink's monitor mode), `--can can0` / `--adapter can0` (a Linux CAN interface such
-as a CANable) or `--adapter slcan:/dev/ttyACM0` (an SLCAN adapter: see below),
+`icarus bus watch --adapter A [--protocol N]` (the OBDLink's monitor mode, silent; the adapter is set up on protocol N,
+6 by default: CAN 11-bit at 500 kbit/s, without the protocol search's first request), `--can can0` / `--adapter can0` (a
+Linux CAN interface such as a CANable) or `--adapter slcan:/dev/ttyACM0` (an SLCAN adapter: see below),
 or the Bus page: every ID with its rate and last bytes, the bytes that just changed lit up (press a pedal or a switch and
 watch which byte follows), and diagnostic messages between a tool and the modules put in words. Watching only: nothing
 is sent onto the bus. What another tool does while Icarus watches is learned (next section).
