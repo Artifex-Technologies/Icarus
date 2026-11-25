@@ -387,6 +387,8 @@ struct App {
     repaint: std::sync::Arc<dyn Fn() + Send + Sync>,
     /// Turning Tuning on waits for this question's yes.
     tuning_ask: bool,
+    /// The first-start welcome is open (ICA-78).
+    welcome: bool,
     tx: Sender<Cmd>,
     rx: Receiver<Event>,
     /// Connect by itself, and again whenever the adapter answers once more (a real adapter is known; autoconn.rs).
@@ -524,6 +526,8 @@ impl App {
             new_device: String::new(),
             repaint,
             tuning_ask: false,
+            // a plain first start (not one opened at a page) gets the welcome
+            welcome: !levels.welcomed && start.page.is_none(),
             tx,
             rx,
             adapter: chosen.0.clone(),
@@ -4724,6 +4728,41 @@ impl eframe::App for App {
                     }
                 }
             });
+        if self.welcome {
+            let mut done = false;
+            egui::Modal::new(egui::Id::new("welcome")).show(&ctx, |ui| {
+                ui.set_max_width(480.0);
+                ui.label(RichText::new("Welcome to Icarus").size(19.0).strong());
+                ui.add_space(6.0);
+                ui.label("Icarus reads what your vehicle's computers know: trouble codes, live values, and how each module is doing. Three steps:");
+                ui.add_space(6.0);
+                for (n, step) in [
+                    "Plug the adapter into the OBD port, under the dashboard on the driver's side.",
+                    "Switch the ignition on (the engine can stay off).",
+                    "Press Scan my vehicle on the Vehicle page: every code comes back in plain words, the most urgent first, with what to check.",
+                ]
+                .iter()
+                .enumerate()
+                {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new(format!("{}.", n + 1)).strong());
+                        ui.label(*step);
+                    });
+                }
+                ui.add_space(6.0);
+                ui.label(RichText::new("Nothing is changed in the vehicle by reading. The gear (Settings) has more: units, the theme, and Advanced for more detail and control.").weak());
+                ui.add_space(10.0);
+                if ui.button(RichText::new("Start").strong()).clicked() {
+                    done = true;
+                }
+            });
+            if done {
+                self.welcome = false;
+                self.page = Page::Vehicle;
+                self.levels.welcomed = true;
+                self.save_levels();
+            }
+        }
         if self.tuning_ask {
             let mut answer = None;
             egui::Modal::new(egui::Id::new("confirm-tuning")).show(&ctx, |ui| {

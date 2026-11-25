@@ -87,6 +87,8 @@ pub struct Levels {
     pub tuning: bool,
     pub units: Units,
     pub theme: Theme,
+    /// The first-start welcome was seen (ICA-78).
+    pub welcomed: bool,
 }
 
 impl Levels {
@@ -118,6 +120,7 @@ impl Levels {
                 let on = v == "true";
                 match k.trim() {
                     "advanced" => l.advanced = on,
+                    "welcomed" => l.welcomed = on,
                     "tuning" => l.tuning = on,
                     "units" => {
                         l.units = Units::ALL
@@ -143,11 +146,12 @@ impl Levels {
 
     pub fn text(self) -> String {
         format!(
-            "# Icarus's window: its levels (Basic unless these say otherwise), units and theme\nadvanced = {}\ntuning = {}\nunits = \"{}\"\ntheme = \"{}\"\n",
+            "# Icarus's window: its levels (Basic unless these say otherwise), units and theme\nadvanced = {}\ntuning = {}\nunits = \"{}\"\ntheme = \"{}\"\nwelcomed = {}\n",
             self.advanced,
             self.advanced && self.tuning,
             self.units.word(),
-            self.theme.word()
+            self.theme.word(),
+            self.welcomed
         )
     }
 
@@ -163,8 +167,18 @@ impl Levels {
     pub fn load() -> Levels {
         Self::path()
             .and_then(|p| std::fs::read_to_string(p).ok())
-            .map(|t| Levels::parse(&t))
+            .map(|t| Levels::read(&t))
             .unwrap_or_default()
+    }
+
+    /// `parse` for a file that exists: one written before the welcome (no `welcomed` line) belongs to someone who has used
+    /// Icarus already, so only a first start with no settings at all gets the welcome.
+    pub fn read(text: &str) -> Levels {
+        let mut l = Levels::parse(text);
+        if !text.lines().any(|x| x.trim_start().starts_with("welcomed")) {
+            l.welcomed = true;
+        }
+        l
     }
 
     pub fn save(self) -> std::io::Result<()> {
@@ -242,5 +256,13 @@ mod tests {
             Units::Metric,
             "unquoted too"
         );
+        // the welcome, once
+        let w = Levels::parse("welcomed = true\n");
+        assert!(w.welcomed && Levels::parse(&w.text()).welcomed && !Levels::default().welcomed);
+        assert!(
+            Levels::read("advanced = true\n").welcomed,
+            "a file from before the welcome: someone who knows Icarus"
+        );
+        assert!(!Levels::read("welcomed = false\n").welcomed);
     }
 }
