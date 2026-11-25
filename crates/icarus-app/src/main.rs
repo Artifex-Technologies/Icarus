@@ -1763,6 +1763,11 @@ impl App {
                                     .strong(),
                                 );
                                 ui.label(logs::shown(d.unit, 0.0).1);
+                                // both units chosen: the other beside it
+                                if let Some((x, u)) = last.and_then(|v| logs::also(d.unit, v)) {
+                                    ui.add_space(8.0);
+                                    ui.label(RichText::new(format!("{x:.1} {u}")).size(16.0).weak());
+                                }
                             });
                             if let (0x0D, Some((_, f)), Some(v)) = (*p, &self.tires, last) {
                                 let (x, unit) = logs::shown(d.unit, v * f);
@@ -2068,8 +2073,8 @@ impl App {
         });
     }
 
-    /// The window's own settings (the gear): the levels. Advanced shows more and unlocks module control; Tuning shows only while
-    /// Advanced is on and asks first.
+    /// The window's own settings (the gear): the levels (Advanced shows more and unlocks module control; Tuning shows only while
+    /// Advanced is on and asks first), the units, the theme, and the adapters, protocols and devices Icarus works with.
     fn page_app(&mut self, ui: &mut egui::Ui, pal: &theme::Palette) {
         ui.heading("Settings");
         ui.label(RichText::new("Icarus on this computer.").weak());
@@ -2110,6 +2115,55 @@ impl App {
         }
         ui.add_space(12.0);
         ui.label(RichText::new("Every change to a vehicle keeps its own checks, and a vehicle set to Read-Only in the Garage stays read-only at every level.").weak());
+        ui.add_space(18.0);
+
+        // units and looks (ICA-79): kept with the levels, on this computer
+        ui.label(RichText::new("Units").strong());
+        let mut u = self.levels.units;
+        for x in levels::Units::ALL {
+            ui.radio_value(&mut u, x, x.label());
+        }
+        ui.add(egui::Label::new(RichText::new("For speed, temperature, pressure, distance, fuel flow and torque on every page. Vehicles report metric; drive summaries give both.").weak()).wrap());
+        if u != self.levels.units {
+            self.levels.units = u;
+            self.save_levels();
+        }
+        ui.add_space(14.0);
+        ui.label(RichText::new("Theme").strong());
+        let mut t = self.levels.theme;
+        for x in levels::Theme::ALL {
+            ui.radio_value(&mut t, x, x.label());
+        }
+        if t != self.levels.theme {
+            self.levels.theme = t;
+            self.save_levels();
+        }
+        ui.add_space(18.0);
+
+        // what Icarus works with: the vehicle adapters and protocols, and the tuners and interfaces it recognises by their USB
+        // IDs (icarus_obd::devices::KNOWN, the table in docs/INTERFACES.md)
+        ui.label(RichText::new("Adapters and protocols").strong());
+        ui.add(egui::Label::new(RichText::new("ELM327 and OBDLink (STN) adapters over USB, Bluetooth or Wi-Fi; a CAN interface through Linux's SocketCAN; a CAN-to-USB (slcan) adapter for listening only. OBD-II on every protocol those adapters speak (CAN, ISO 9141-2, KWP2000 on the K-line, J1850), and each module's own diagnostics on CAN (UDS and KWP2000).").weak()).wrap());
+        ui.add_space(10.0);
+        ui.label(RichText::new("Tuners and interfaces Icarus recognises").strong());
+        egui::Grid::new("known-devices")
+            .striped(true)
+            .num_columns(3)
+            .show(ui, |ui| {
+                for h in ["Device", "USB ID", "What Icarus does with it"] {
+                    ui.label(RichText::new(h).strong());
+                }
+                ui.end_row();
+                for k in icarus_obd::devices::KNOWN {
+                    ui.label(format!("{} {}", k.maker, k.name));
+                    ui.label(match k.product {
+                        Some(p) => format!("{:04x}:{p:04x}", k.vendor),
+                        None => format!("{:04x} (any)", k.vendor),
+                    });
+                    ui.add(egui::Label::new(RichText::new(k.note).weak()).wrap());
+                    ui.end_row();
+                }
+            });
     }
 
     fn save_levels(&mut self) {
@@ -4035,7 +4089,12 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         chrome::resize_edges(&ctx);
         let accent = theme::system_accent();
-        let dark = theme::system_dark();
+        let dark = match self.levels.theme {
+            levels::Theme::System => theme::system_dark(),
+            levels::Theme::Dark => true,
+            levels::Theme::Light => false,
+        };
+        logs::set_units(self.levels.units);
         theme::apply(&ctx, dark, accent);
         let pal = theme::palette_for(dark, accent);
         self.events();
@@ -4455,6 +4514,7 @@ mod level_pages {
         let adv = levels::Levels {
             advanced: true,
             tuning: false,
+            ..Default::default()
         };
         assert_eq!(
             shown(adv),
@@ -4474,6 +4534,7 @@ mod level_pages {
         let all = levels::Levels {
             advanced: true,
             tuning: true,
+            ..Default::default()
         };
         assert_eq!(
             shown(all).len(),

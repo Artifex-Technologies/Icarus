@@ -345,6 +345,41 @@ mod tests {
         std::fs::write(d.join("devnum"), format!("{num}\n")).unwrap();
     }
 
+    /// The table here and the one in docs/INTERFACES.md ("Recognised now") list the same devices: the window's settings show
+    /// this one (ICA-79), the doc explains it.
+    #[test]
+    fn every_known_device_is_in_the_interfaces_doc() {
+        let doc = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/INTERFACES.md"
+        ))
+        .unwrap();
+        let table: String = doc
+            .split("## Recognised now")
+            .nth(1)
+            .and_then(|t| t.split("\n## ").next())
+            .unwrap()
+            .to_string();
+        for k in KNOWN {
+            let vendor = format!("{:04x}", k.vendor);
+            let found = match k.product {
+                // written in full ("5059:4040"), or after the vendor's first ID in the same cell ("1a84:0120` / `0121")
+                Some(p) => {
+                    table.contains(&format!("{vendor}:{p:04x}"))
+                        || table.lines().any(|l| {
+                            l.contains(&format!("`{vendor}:")) && l.contains(&format!("`{p:04x}`"))
+                        })
+                }
+                None => table.contains(&format!("{vendor}:")),
+            };
+            assert!(
+                found,
+                "{} {} ({vendor}:{:04x?}) is not in docs/INTERFACES.md's table",
+                k.maker, k.name, k.product
+            );
+        }
+    }
+
     #[test]
     fn known_devices_are_named_by_their_ids() {
         assert_eq!(identify(0x5059, 0x4040).unwrap().name, "X4 (7015) / MB103");

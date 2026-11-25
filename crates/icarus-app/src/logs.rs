@@ -48,20 +48,76 @@ pub fn us_units() -> bool {
     })
 }
 
-/// A value as shown: in the customary units where those are used (us_units), else as the vehicle gives it.
-pub fn shown(unit: &str, v: f64) -> (f64, &str) {
-    if us_units() {
-        match unit {
-            "km/h" => return (v * 0.621371, "mph"),
-            "km" => return (v * 0.621371, "mi"),
-            "°C" => return (v * 1.8 + 32.0, "°F"),
-            "kPa" => return (v * 0.145038, "psi"),
-            "L/h" => return (v * 0.264172, "gal/h"),
-            "Nm" => return (v * 0.737562, "lb-ft"),
-            _ => {}
-        }
+/// The units chosen in the window's settings (ICA-79), for every value it shows: set by the window each frame.
+static UNITS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub fn set_units(u: crate::levels::Units) {
+    use crate::levels::Units;
+    let n = match u {
+        Units::Auto => 0,
+        Units::Imperial => 1,
+        Units::Metric => 2,
+        Units::Both => 3,
+    };
+    UNITS.store(n, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn units() -> crate::levels::Units {
+    use crate::levels::Units;
+    match UNITS.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => Units::Imperial,
+        2 => Units::Metric,
+        3 => Units::Both,
+        _ => Units::Auto,
     }
-    (v, unit)
+}
+
+/// Whether the first unit shown is the customary one (mph, °F): chosen, or the system's custom for Auto and Both.
+fn customary_first(u: crate::levels::Units) -> bool {
+    use crate::levels::Units;
+    match u {
+        Units::Imperial => true,
+        Units::Metric => false,
+        Units::Auto | Units::Both => us_units(),
+    }
+}
+
+/// A vehicle's metric value in the customary unit, for the units that have one.
+fn customary(unit: &str, v: f64) -> Option<(f64, &'static str)> {
+    Some(match unit {
+        "km/h" => (v * 0.621371, "mph"),
+        "km" => (v * 0.621371, "mi"),
+        "°C" => (v * 1.8 + 32.0, "°F"),
+        "kPa" => (v * 0.145038, "psi"),
+        "L/h" => (v * 0.264172, "gal/h"),
+        "Nm" => (v * 0.737562, "lb-ft"),
+        _ => return None,
+    })
+}
+
+/// A value as shown first: in the chosen units (the window's settings), the vehicle's own where there is no other.
+pub fn shown(unit: &str, v: f64) -> (f64, &str) {
+    shown_in(units(), unit, v)
+}
+
+pub fn shown_in(u: crate::levels::Units, unit: &str, v: f64) -> (f64, &str) {
+    match customary(unit, v) {
+        Some(c) if customary_first(u) => c,
+        _ => (v, unit),
+    }
+}
+
+/// With both units chosen: the value in the other unit, shown beside the first (None otherwise, or for a unit with no other).
+pub fn also(unit: &str, v: f64) -> Option<(f64, &str)> {
+    also_in(units(), unit, v)
+}
+
+pub fn also_in(u: crate::levels::Units, unit: &str, v: f64) -> Option<(f64, &str)> {
+    if u != crate::levels::Units::Both {
+        return None;
+    }
+    let c = customary(unit, v)?;
+    Some(if customary_first(u) { (v, unit) } else { c })
 }
 
 /// The unit in a recording's column name (`"Vehicle speed [km/h]"`).
@@ -811,6 +867,46 @@ fn value_at(s: &Series, i: usize, t: f64) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_units_chosen_in_the_settings() {
+        use crate::levels::Units;
+        let r = |x: (f64, &str)| ((x.0 * 10.0).round() / 10.0, x.1.to_string());
+        assert_eq!(
+            r(shown_in(Units::Imperial, "km/h", 100.0)),
+            (62.1, "mph".into())
+        );
+        assert_eq!(
+            r(shown_in(Units::Imperial, "°C", 90.0)),
+            (194.0, "°F".into())
+        );
+        assert_eq!(
+            r(shown_in(Units::Imperial, "kPa", 100.0)),
+            (14.5, "psi".into())
+        );
+        assert_eq!(
+            r(shown_in(Units::Metric, "km/h", 100.0)),
+            (100.0, "km/h".into()),
+            "as the vehicle gives it"
+        );
+        assert_eq!(
+            r(shown_in(Units::Imperial, "rpm", 800.0)),
+            (800.0, "rpm".into()),
+            "a unit with no other"
+        );
+        // both: one of each, whichever comes first (the system's custom)
+        let first = shown_in(Units::Both, "°C", 90.0).1.to_string();
+        let second = also_in(Units::Both, "°C", 90.0).unwrap().1.to_string();
+        let mut pair = [first, second];
+        pair.sort();
+        assert_eq!(pair, ["°C".to_string(), "°F".to_string()]);
+        assert_eq!(
+            also_in(Units::Imperial, "°C", 90.0),
+            None,
+            "the other unit only with both"
+        );
+        assert_eq!(also_in(Units::Both, "rpm", 800.0), None);
+    }
 
     #[test]
     fn a_recording_writes_one_row_per_sweep() {
