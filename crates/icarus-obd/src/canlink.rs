@@ -92,12 +92,14 @@ pub struct CanLink<F: Frames> {
     /// Notes on senders left out of broadcasts, not yet taken (`take_dropped`), each (sender, why) once.
     unseen: Vec<String>,
     seen: BTreeSet<(String, String)>,
+    /// The interface's bit rate when known (`with_bitrate`; SocketCAN: `socketcan::bitrate`).
+    bitrate: Option<u32>,
 }
 
 impl<F: Frames> CanLink<F> {
     /// Finds the vehicle on the bus `name` ("can0"): OBD-II's first request (01 00) on 11-bit CAN, then on 29-bit CAN, as
-    /// ISO 15765-4 does. The interface's bit rate is whatever it was set up with (`ip link`); Icarus cannot read it here,
-    /// so the protocol is shown as 500 kbit/s, the rate every OBD-II CAN vehicle uses.
+    /// ISO 15765-4 does. The interface's bit rate is whatever it was set up with (`ip link`): the protocol says 500 kbit/s,
+    /// the rate of every OBD-II CAN vehicle, until `with_bitrate` tells the real one.
     pub fn connect(bus: F, name: &str) -> Result<Self, ObdError> {
         Self::with_timing(bus, name, Timing::default())
     }
@@ -112,6 +114,7 @@ impl<F: Frames> CanLink<F> {
             timing,
             unseen: Vec::new(),
             seen: BTreeSet::new(),
+            bitrate: None,
         };
         for p in [Protocol::Can11At500, Protocol::Can29At500] {
             link.protocol = p;
@@ -125,6 +128,20 @@ impl<F: Frames> CanLink<F> {
             "nothing answered OBD-II on {name}, on 11-bit or 29-bit CAN (is the interface up, at the vehicle's bit rate, \
              usually 500 kbit/s?)"
         )))
+    }
+
+    /// The interface's real bit rate (ICA-68): at 250 kbit/s the protocol is ISO 15765-4's 250 kbit/s one; any rate is named
+    /// in the adapter's description. None leaves it as it is.
+    pub fn with_bitrate(mut self, rate: Option<u32>) -> Self {
+        self.bitrate = rate;
+        if rate == Some(250_000) {
+            self.protocol = match self.protocol {
+                Protocol::Can29At500 => Protocol::Can29At250,
+                Protocol::Can11At500 => Protocol::Can11At250,
+                p => p,
+            };
+        }
+        self
     }
 
     /// The frames underneath (the socket, or the simulated bus).
@@ -420,7 +437,7 @@ impl<F: Frames> CanLink<F> {
 impl<F: Frames> Link for CanLink<F> {
     fn request(&mut self, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
         self.read_only_check(data)?;
-        let can29 = self.protocol == Protocol::Can29At500;
+        let can29 = matches!(self.protocol, Protocol::Can29At500 | Protocol::Can29At250);
         let to = if can29 { FUNCTIONAL29 } else { FUNCTIONAL11 };
         self.send_message(to, None, None, data)?;
         let from = move |id: u32| {
@@ -467,7 +484,13 @@ impl<F: Frames> Link for CanLink<F> {
     }
 
     fn adapter(&self) -> String {
-        format!("SocketCAN {}", self.name)
+        match self.bitrate {
+            Some(r) if r.is_multiple_of(1000) => {
+                format!("SocketCAN {} ({} kbit/s)", self.name, r / 1000)
+            }
+            Some(r) => format!("SocketCAN {} ({r} bit/s)", self.name),
+            None => format!("SocketCAN {}", self.name),
+        }
     }
 
     /// A CAN interface does not measure the battery.
@@ -767,6 +790,39 @@ mod tests {
         // and normal addressing afterwards
         assert!(!uds::present(&mut l, 0x750, 0x758).unwrap());
         assert!(uds::present(&mut l, 0x7B0, 0x7B8).unwrap());
+    }
+
+    /// ICA-68: the interface's bit rate as the kernel tells it: 250 kbit/s is ISO 15765-4's 250 kbit/s protocol (and a
+    /// 29-bit vehicle there still speaks 29-bit), any rate is named in the adapter's description, none leaves both alone.
+    #[test]
+    fn the_interfaces_bit_rate_is_the_one_shown() {
+        let mut l = link(SimCar::honda()).with_bitrate(Some(250_000));
+        assert_eq!(l.protocol(), Protocol::Can29At250);
+        assert_eq!(l.adapter(), "SocketCAN vcan0 (250 kbit/s)");
+        sent(&mut l);
+        assert_eq!(
+            j1979::vin(&mut l).unwrap().as_deref(),
+            Some(crate::sim::HONDA_VIN)
+        );
+        let frames = sent(&mut l);
+        assert!(
+            !frames.is_empty() && frames.iter().all(|f| f.ext),
+            "still 29-bit: {frames:?}"
+        );
+        let l = link(SimCar::new()).with_bitrate(Some(250_000));
+        assert_eq!(l.protocol(), Protocol::Can11At250);
+        let l = link(SimCar::new()).with_bitrate(Some(500_000));
+        assert_eq!(
+            (l.protocol(), l.adapter().as_str()),
+            (Protocol::Can11At500, "SocketCAN vcan0 (500 kbit/s)")
+        );
+        let l = link(SimCar::new()).with_bitrate(Some(83_333));
+        assert_eq!(l.adapter(), "SocketCAN vcan0 (83333 bit/s)");
+        let l = link(SimCar::new()).with_bitrate(None);
+        assert_eq!(
+            (l.protocol(), l.adapter().as_str()),
+            (Protocol::Can11At500, "SocketCAN vcan0")
+        );
     }
 
     #[test]

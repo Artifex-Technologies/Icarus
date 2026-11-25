@@ -792,8 +792,9 @@ fn connect(args: &Args) -> Result<Box<dyn Link>, String> {
     eprintln!("connecting to {spec}...");
     if let Target::Can(ifn) = &target {
         let sock = socketcan::open(ifn).map_err(|x| x.to_string())?;
+        // the interface's bit rate from the kernel (ICA-68): shown, and 250 kbit/s named as such
         return icarus_obd::canlink::CanLink::connect(sock, ifn)
-            .map(|l| Box::new(l) as Box<dyn Link>)
+            .map(|l| Box::new(l.with_bitrate(socketcan::bitrate(ifn))) as Box<dyn Link>)
             .map_err(|x| x.to_string());
     }
     let (elm, note) =

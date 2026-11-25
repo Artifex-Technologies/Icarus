@@ -534,7 +534,8 @@ Through a CAN interface Icarus speaks ISO 15765-2 (ISO-TP) itself over raw frame
 `can-isotp` module: OBD-II's broadcast on `7DF` (or `18DB33F1`; it tries 11-bit CAN, then 29-bit), each module at its own
 IDs, long answers and requests put together and split with flow control both ways, "response pending" waited out, a
 message that stops halfway reported, never kept short. The `obd` commands work the same (`icarus obd info --adapter can0`);
-the interface cannot measure the battery, and its bit rate is whatever `ip link` set. As on every link, a request that
+the interface cannot measure the battery, and its bit rate is whatever `ip link` set: Icarus asks the kernel for it (over
+rtnetlink) and names it beside the interface, and at 250 kbit/s the protocol is ISO 15765-4's 250 kbit/s one. As on every link, a request that
 would change a vehicle switched to Read-Only is refused before any frame is sent. Pair a Bluetooth adapter once with `bluetoothctl` (`scan on`, `pair`, `trust`); Icarus
 connects to it directly, no `rfcomm bind` needed.
 

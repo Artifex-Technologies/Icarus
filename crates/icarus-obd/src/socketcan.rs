@@ -160,9 +160,190 @@ impl crate::canlink::Frames for CanSocket {
     }
 }
 
+// rtnetlink (linux/rtnetlink.h, if_link.h, can/netlink.h): the link's CAN bit timing
+const RTM_NEWLINK: u16 = 16;
+const RTM_GETLINK: u16 = 18;
+const NLM_F_REQUEST: u16 = 1;
+const NLMSG_HDR: usize = 16;
+const IFINFOMSG: usize = 16;
+const IFLA_LINKINFO: u16 = 18;
+const IFLA_INFO_DATA: u16 = 2;
+const IFLA_CAN_BITTIMING: u16 = 1;
+
+/// The bit rate an interface was set up with (`ip link set can0 type can bitrate N`), as the kernel tells it over rtnetlink
+/// (ICA-68). None for an interface without CAN bit timing (vcan) or when the kernel does not answer.
+pub fn bitrate(ifname: &str) -> Option<u32> {
+    bitrate_in(&getlink(ifname)?)
+}
+
+/// The kernel's answer to RTM_GETLINK for one interface (read only: nothing is sent on the interface).
+fn getlink(ifname: &str) -> Option<Vec<u8>> {
+    let name = std::ffi::CString::new(ifname).ok()?;
+    let index = unsafe { libc::if_nametoindex(name.as_ptr()) };
+    if index == 0 {
+        return None;
+    }
+    let fd = unsafe {
+        libc::socket(
+            libc::AF_NETLINK,
+            libc::SOCK_RAW | libc::SOCK_CLOEXEC,
+            libc::NETLINK_ROUTE,
+        )
+    };
+    if fd < 0 {
+        return None;
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    let mut req = Vec::with_capacity(NLMSG_HDR + IFINFOMSG);
+    req.extend_from_slice(&((NLMSG_HDR + IFINFOMSG) as u32).to_ne_bytes());
+    req.extend_from_slice(&RTM_GETLINK.to_ne_bytes());
+    req.extend_from_slice(&NLM_F_REQUEST.to_ne_bytes());
+    req.extend_from_slice(&1u32.to_ne_bytes()); // sequence
+    req.extend_from_slice(&0u32.to_ne_bytes()); // port: the kernel's
+    req.extend_from_slice(&[libc::AF_UNSPEC as u8, 0, 0, 0]); // family, pad, type
+    req.extend_from_slice(&(index as i32).to_ne_bytes());
+    req.extend_from_slice(&[0; 8]); // flags, change
+    let sent = unsafe { libc::send(fd.as_raw_fd(), req.as_ptr().cast(), req.len(), 0) };
+    if sent != req.len() as isize {
+        return None;
+    }
+    let mut pfd = libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    if unsafe { libc::poll(&mut pfd, 1, 1000) } <= 0 {
+        return None;
+    }
+    let mut buf = vec![0u8; 32 << 10];
+    let n = unsafe { libc::recv(fd.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len(), 0) };
+    if n <= 0 {
+        return None;
+    }
+    buf.truncate(n as usize);
+    Some(buf)
+}
+
+/// The attributes in `b`: (type without the nested and byte-order flags, payload).
+fn attributes(mut b: &[u8]) -> Vec<(u16, &[u8])> {
+    let mut out = Vec::new();
+    while b.len() >= 4 {
+        let len = u16::from_ne_bytes([b[0], b[1]]) as usize;
+        let kind = u16::from_ne_bytes([b[2], b[3]]) & 0x3fff;
+        if len < 4 || len > b.len() {
+            break;
+        }
+        out.push((kind, &b[4..len]));
+        b = &b[((len + 3) & !3).min(b.len())..];
+    }
+    out
+}
+
+/// The bit rate in the kernel's answer to RTM_GETLINK: the link's IFLA_LINKINFO, its IFLA_INFO_DATA, its
+/// IFLA_CAN_BITTIMING, whose first field is the bit rate. None for anything else (an error, another kind of link, vcan).
+pub fn bitrate_in(answer: &[u8]) -> Option<u32> {
+    if answer.len() < NLMSG_HDR + IFINFOMSG {
+        return None;
+    }
+    let len = (u32::from_ne_bytes(answer[0..4].try_into().ok()?) as usize).min(answer.len());
+    if u16::from_ne_bytes([answer[4], answer[5]]) != RTM_NEWLINK || len < NLMSG_HDR + IFINFOMSG {
+        return None;
+    }
+    let link = attributes(&answer[NLMSG_HDR + IFINFOMSG..len]);
+    let info = link.iter().find(|(k, _)| *k == IFLA_LINKINFO)?.1;
+    let data = attributes(info)
+        .into_iter()
+        .find(|(k, _)| *k == IFLA_INFO_DATA)?
+        .1;
+    let timing = attributes(data)
+        .into_iter()
+        .find(|(k, _)| *k == IFLA_CAN_BITTIMING)?
+        .1;
+    let rate = u32::from_ne_bytes(timing.get(0..4)?.try_into().ok()?);
+    (rate > 0).then_some(rate)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One attribute, padded to four bytes as the kernel writes it.
+    fn attr(kind: u16, payload: &[u8]) -> Vec<u8> {
+        let mut a = ((4 + payload.len()) as u16).to_ne_bytes().to_vec();
+        a.extend_from_slice(&kind.to_ne_bytes());
+        a.extend_from_slice(payload);
+        while !a.len().is_multiple_of(4) {
+            a.push(0);
+        }
+        a
+    }
+
+    /// The kernel's answer to RTM_GETLINK for a link with these attributes.
+    fn answer(kind: u16, attrs: &[u8]) -> Vec<u8> {
+        let mut m = ((NLMSG_HDR + IFINFOMSG + attrs.len()) as u32)
+            .to_ne_bytes()
+            .to_vec();
+        m.extend_from_slice(&kind.to_ne_bytes());
+        m.extend_from_slice(&[0; 10]);
+        m.extend_from_slice(&[0; IFINFOMSG]);
+        m.extend_from_slice(attrs);
+        m
+    }
+
+    /// ICA-68: the bit rate is read out of a parsed netlink answer as the kernel lays it out: IFLA_IFNAME and IFLA_MTU
+    /// first, then IFLA_LINKINFO (nested) with IFLA_INFO_KIND "can" and IFLA_INFO_DATA (nested) holding the state and the
+    /// bit timing. A vcan link (no data), an error message and a cut answer give none.
+    #[test]
+    fn the_bit_rate_from_the_kernels_answer() {
+        let mut timing = 250_000u32.to_ne_bytes().to_vec();
+        timing.extend_from_slice(&[0; 28]); // sample point, tq, segments, sjw, brp
+        let data = [
+            attr(2, &0u32.to_ne_bytes()),
+            attr(IFLA_CAN_BITTIMING, &timing),
+        ]
+        .concat();
+        let info = [attr(1, b"can\0"), attr(IFLA_INFO_DATA | 0x8000, &data)].concat();
+        let link = [
+            attr(3, b"can0\0"),
+            attr(4, &16u32.to_ne_bytes()),
+            attr(IFLA_LINKINFO | 0x8000, &info),
+        ]
+        .concat();
+        let a = answer(RTM_NEWLINK, &link);
+        assert_eq!(bitrate_in(&a), Some(250_000));
+        let vcan = answer(
+            RTM_NEWLINK,
+            &[
+                attr(3, b"vcan0\0"),
+                attr(IFLA_LINKINFO, &attr(1, b"vcan\0")),
+            ]
+            .concat(),
+        );
+        assert_eq!(bitrate_in(&vcan), None);
+        assert_eq!(bitrate_in(&answer(2, &link)), None, "an error message");
+        assert_eq!(bitrate_in(&a[..a.len() - 20]), None, "cut short");
+        assert_eq!(bitrate_in(&[]), None);
+        // a made-up length longer than the answer does not read past it
+        let mut long = a.clone();
+        long[..4].copy_from_slice(&9999u32.to_ne_bytes());
+        assert_eq!(bitrate_in(&long), Some(250_000));
+    }
+
+    /// The request is one the kernel answers: the loopback interface's link (read only, nothing sent on any network) comes
+    /// back as RTM_NEWLINK with its name, and has no CAN bit timing; an interface that does not exist gives none.
+    #[test]
+    fn the_kernel_answers_the_request() {
+        let a = getlink("lo").expect("an answer for lo");
+        assert_eq!(u16::from_ne_bytes([a[4], a[5]]), RTM_NEWLINK);
+        let len = (u32::from_ne_bytes(a[0..4].try_into().unwrap()) as usize).min(a.len());
+        let name = attributes(&a[NLMSG_HDR + IFINFOMSG..len])
+            .into_iter()
+            .find(|(k, _)| *k == 3)
+            .map(|(_, v)| v.to_vec());
+        assert_eq!(name.as_deref(), Some(&b"lo\0"[..]));
+        assert_eq!(bitrate("lo"), None);
+        assert_eq!(bitrate("no-such-can9"), None);
+    }
 
     #[test]
     fn frames_from_the_kernel() {
