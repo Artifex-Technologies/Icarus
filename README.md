@@ -449,7 +449,7 @@ tools too).
 `icarus-app` (Icarus in the app menu): the **Vehicle** page connects to the adapter and shows the VIN, the make's profile,
 the codes explained with Look up and parts buttons, the freeze frame, the check-engine light and readiness monitors, the
 vehicle's name, and Save report; **Modules** scans every module for its identity and codes;
-**Live data** picks values (one by one, or Select all and Clear selections) and draws them as they change, each with what it means; **Tests** runs actuator tests while a
+**Live data** picks values (one by one, or Select all and Clear selections) and draws them as they change, each with what it means; **Trail gauges** shows the trail values the vehicle gives (coolant, oil and intake temperatures, voltage, engine and road speed, load, fuel level, outside air, air pressure) as big readouts in your units, each outlined amber when it wants watching and red when it is time to stop (general bands for a petrol engine: coolant from 230 °F and 245 °F, voltage under 12.0 V and 11.5 V or over 15.0 V and 15.5 V...), with the lowest and highest since they started and road speed corrected for the tires; **Tests** runs actuator tests while a
 button is held; **Settings** shows each module setting's value and changes it (asks first; undo puts the last change
 back); **Learning** watches another tool and names what it learned; **Bus** shows every ID and message; **Maps** opens a
 definition and an image
@@ -458,7 +458,7 @@ cells, a 2D graph or a 3D surface; versions of the image); **Logs** summarizes a
 condition, with fuel cut while coasting and the warm-up counted apart and left out), charts it on one time line, lays a chosen value out over engine speed and load like a tuner's table (each cell
 the mean of its readings), and draws the drive's GPS track coloured by speed when it was recorded with GPS (the shape only:
 no map is fetched). Start options:
-`--connect [--adapter A] --page modules --scan`, `--live`, `--maps DEF.xdf|.a2l IMAGE.bin [SECOND.bin|VERSION.version.toml]` with `--map NAME` and `--view cells|2d|3d`, `--learn [--mark TEXT]
+`--connect [--adapter A] --page modules --scan`, `--live`, `--page trail --gauges`, `--maps DEF.xdf|.a2l IMAGE.bin [SECOND.bin|VERSION.version.toml]` with `--map NAME` and `--view cells|2d|3d`, `--learn [--mark TEXT]
 [--learn-seconds N]` (a learning watch at start, for demonstrations).
 
 ## What it does today

@@ -4,6 +4,7 @@
 
 mod autoconn;
 mod devices;
+mod gauges;
 mod levels;
 mod listen;
 mod logs;
@@ -29,6 +30,8 @@ enum Page {
     Vehicle,
     Modules,
     Live,
+    /// Big readouts for the trail (ICA-27).
+    Gauges,
     Tests,
     Settings,
     Learn,
@@ -48,6 +51,7 @@ fn need(p: Page) -> levels::Need {
         Page::Vehicle
         | Page::Modules
         | Page::Live
+        | Page::Gauges
         | Page::Logs
         | Page::Garage
         | Page::Tools
@@ -57,10 +61,11 @@ fn need(p: Page) -> levels::Need {
     }
 }
 
-const PAGES: [(Page, &str); 11] = [
+const PAGES: [(Page, &str); 12] = [
     (Page::Vehicle, "Vehicle"),
     (Page::Modules, "Modules"),
     (Page::Live, "Live data"),
+    (Page::Gauges, "Trail gauges"),
     (Page::Logs, "Logs"),
     (Page::Tests, "Tests"),
     (Page::Settings, "Module settings"),
@@ -231,6 +236,8 @@ struct Start {
     /// `--module-data`: read each module's own values once connected.
     module_data: bool,
     live: bool,
+    /// `--gauges`: read the trail gauges once connected.
+    gauges: bool,
     /// `--record`: record a drive (every value the vehicle offers) once connected.
     record: bool,
     bus: bool,
@@ -256,6 +263,7 @@ impl Start {
                 "--scan" => s.scan = true,
                 "--module-data" => s.module_data = true,
                 "--live" => s.live = true,
+                "--gauges" => s.gauges = true,
                 "--record" => s.record = true,
                 "--bus" => s.bus = true,
                 "--learn" => s.learn = true,
@@ -466,6 +474,8 @@ struct App {
     scan_note: String,
     unreachable: Vec<String>,
     live_on: bool,
+    /// The live values read are the trail gauges' (their page started them), not the ones chosen on Live data.
+    gauges_on: bool,
     chosen: BTreeSet<u8>,
     history: HashMap<u8, VecDeque<(f64, f64)>>,
     recorder: Option<logs::Recorder>,
@@ -603,6 +613,7 @@ impl App {
             scan_note: String::new(),
             unreachable: Vec::new(),
             live_on: false,
+            gauges_on: false,
             chosen: [0x0C, 0x05, 0x06, 0x07, 0x44].into_iter().collect(),
             history: HashMap::new(),
             recorder: None,
@@ -646,14 +657,20 @@ impl App {
     }
 
     /// While a known adapter does not answer (asleep with the engine off), try again every few seconds.
-    /// What is polled: the chosen values, and while recording the recording's too (its rest in turn).
+    /// What is polled: the chosen values (or the trail gauges', when their page started them), and while recording the
+    /// recording's too (its rest in turn).
     fn send_live(&self) {
+        let wanted: Vec<u8> = if self.gauges_on {
+            gauges::gauge_pids(self.info.as_ref().map_or(&[][..], |i| &i.live))
+        } else {
+            self.chosen.iter().copied().collect()
+        };
         let mut fast: Vec<u8> = self
             .recorder
             .as_ref()
             .map(|r| r.fast.clone())
             .unwrap_or_default();
-        for p in &self.chosen {
+        for p in &wanted {
             if !fast.contains(p) {
                 fast.push(*p);
             }
@@ -664,7 +681,7 @@ impl App {
                 .rest
                 .iter()
                 .copied()
-                .filter(|p| !self.chosen.contains(p))
+                .filter(|p| !wanted.contains(p))
                 .collect();
             let _ = self.tx.send(Cmd::LiveRotate(rest));
         }
@@ -918,6 +935,11 @@ impl App {
                         });
                     }
                     if std::mem::take(&mut self.start.live) && !self.chosen.is_empty() {
+                        self.live_on = true;
+                        self.send_live();
+                    }
+                    if std::mem::take(&mut self.start.gauges) {
+                        self.gauges_on = true;
                         self.live_on = true;
                         self.send_live();
                     }
@@ -1893,8 +1915,11 @@ impl App {
             return;
         };
         let offered = info.live.clone();
+        if self.live_on && self.gauges_on {
+            ui.label(RichText::new("The trail gauges are being read (their page); Start here reads these values instead.").weak());
+        }
         ui.horizontal(|ui| {
-            if self.live_on {
+            if self.live_on && !self.gauges_on {
                 if ui.button("Stop").clicked() {
                     self.live_on = false;
                     self.stop_recording();
@@ -1909,6 +1934,7 @@ impl App {
                 .clicked()
             {
                 self.live_on = true;
+                self.gauges_on = false;
                 self.send_live();
             }
             if let Some((rows, n)) = self.recorder.as_ref().map(|r| (r.rows, r.fast.len() + r.rest.len())) {
@@ -2043,6 +2069,126 @@ impl App {
                     }
                 });
         });
+    }
+
+    /// Trail gauges (ICA-27): the trail values the vehicle gives as big readouts, colored when one wants watching (amber)
+    /// or stopping (red), with the lowest and highest since they started. Read through the same live polling as Live data,
+    /// in its place.
+    fn page_gauges(&mut self, ui: &mut egui::Ui, pal: &theme::Palette) {
+        let Some(info) = &self.info else {
+            ui.label("Connect on the Vehicle page first.");
+            return;
+        };
+        let pids = gauges::gauge_pids(&info.live);
+        if pids.is_empty() {
+            ui.label("This vehicle offers none of the trail values (coolant, oil and intake temperatures, voltage, speed...).");
+            return;
+        }
+        let on = self.live_on && self.gauges_on;
+        ui.horizontal(|ui| {
+            if on {
+                if ui.button(RichText::new("Stop").size(16.0)).clicked() {
+                    self.gauges_on = false;
+                    self.live_on = false;
+                    // a recording goes on reading its own values
+                    if self.recorder.is_some() {
+                        self.send_live();
+                    } else {
+                        let _ = self.tx.send(Cmd::Live(vec![]));
+                    }
+                }
+                ui.spinner();
+            } else if ui
+                .add_enabled(!self.scanning, egui::Button::new(RichText::new("Start").size(16.0)))
+                .clicked()
+            {
+                self.gauges_on = true;
+                self.live_on = true;
+                self.send_live();
+            }
+            ui.label(
+                RichText::new(format!(
+                    "{} values for the trail. Amber: watch it; red: stop and look. Lowest and highest since they started.",
+                    pids.len()
+                ))
+                .weak(),
+            );
+        });
+        ui.add_space(8.0);
+        let per_row = ((ui.available_width() / 250.0).floor() as usize).clamp(1, 4);
+        for row in pids.chunks(per_row) {
+            ui.columns(per_row, |cols| {
+                for (c, p) in cols.iter_mut().zip(row) {
+                    self.gauge_tile(c, pal, *p);
+                }
+            });
+            ui.add_space(10.0);
+        }
+        ui.label(
+            RichText::new("The bands are general ones for a petrol engine, not this vehicle's own limits: point at a gauge for them.")
+                .small()
+                .weak(),
+        );
+    }
+
+    fn gauge_tile(&self, ui: &mut egui::Ui, pal: &theme::Palette, pid: u8) {
+        let (Some(d), Some(g)) = (
+            j1979::pid(pid),
+            gauges::GAUGES.iter().find(|g| g.pid == pid),
+        ) else {
+            return;
+        };
+        let h = self.history.get(&pid);
+        let last = h.and_then(|h| h.back()).map(|x| x.1);
+        let level = last.map_or(gauges::Level::Fine, |v| gauges::level(pid, v));
+        let (color, edge, width) = match level {
+            gauges::Level::Fine => (pal.text, pal.border, 1.0),
+            gauges::Level::Watch => (pal.amber, pal.amber, 2.5),
+            gauges::Level::Act => (pal.red, pal.red, 3.0),
+        };
+        // speed corrected for the tires when they are set (Garage page)
+        let f = match (pid, &self.tires) {
+            (0x0D, Some((_, f))) => *f,
+            _ => 1.0,
+        };
+        // volts and pressure move in small steps: one decimal
+        let dec = if matches!(pid, 0x42 | 0x33) { 1 } else { 0 };
+        let unit = logs::shown(d.unit, 0.0).1;
+        egui::Frame::new()
+            .fill(pal.field)
+            .stroke(Stroke::new(width, edge))
+            .corner_radius(CornerRadius::same(12))
+            .inner_margin(Margin::symmetric(14, 12))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(RichText::new(d.name).strong());
+                ui.horizontal(|ui| {
+                    let text = last.map_or("-".to_string(), |v| {
+                        format!("{:.dec$}", logs::shown(d.unit, v * f).0)
+                    });
+                    ui.label(RichText::new(text).size(44.0).strong().color(color));
+                    ui.label(RichText::new(unit).size(16.0).weak());
+                });
+                let span =
+                    h.and_then(gauges::range)
+                        .map_or("low - · high -".to_string(), |(lo, hi)| {
+                            format!(
+                                "low {:.dec$} · high {:.dec$}",
+                                logs::shown(d.unit, lo * f).0,
+                                logs::shown(d.unit, hi * f).0
+                            )
+                        });
+                ui.label(RichText::new(span).weak());
+                if f != 1.0 {
+                    ui.label(
+                        RichText::new(format!("corrected for the tires (x{f:.3})"))
+                            .small()
+                            .color(pal.accent),
+                    );
+                }
+            })
+            .response
+            .on_hover_text(g.about);
     }
 
     fn page_tests(&mut self, ui: &mut egui::Ui, pal: &theme::Palette) {
@@ -4862,6 +5008,7 @@ impl eframe::App for App {
                                 Page::Tools => self.page_tools(ui, &pal),
                                 Page::Logs => self.logs.page(ui, &pal),
                                 Page::App => self.page_app(ui, &pal),
+                                Page::Gauges => self.page_gauges(ui, &pal),
                                 _ => self.page_live(ui, &pal),
                             });
                     }
@@ -5262,7 +5409,15 @@ mod level_pages {
         let basic = levels::Levels::default();
         assert_eq!(
             shown(basic),
-            ["Vehicle", "Modules", "Live data", "Logs", "Garage", "Tools"]
+            [
+                "Vehicle",
+                "Modules",
+                "Live data",
+                "Trail gauges",
+                "Logs",
+                "Garage",
+                "Tools"
+            ]
         );
         let adv = levels::Levels {
             advanced: true,
@@ -5275,6 +5430,7 @@ mod level_pages {
                 "Vehicle",
                 "Modules",
                 "Live data",
+                "Trail gauges",
                 "Logs",
                 "Tests",
                 "Module settings",
