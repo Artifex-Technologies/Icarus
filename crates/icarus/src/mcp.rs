@@ -84,8 +84,13 @@ fn remembered_adapter() -> Option<String> {
 
 /// The recorded drives: the list (newest first, at most 20) and the newest one's summary, or the named one's.
 fn drive_logs(file: Option<&str>) -> Result<String, String> {
+    drive_logs_in(&icarus_obd::drivelog::folders(), file)
+}
+
+/// `drive_logs` on the recordings in these folders (a test gives its own).
+fn drive_logs_in(dirs: &[std::path::PathBuf], file: Option<&str>) -> Result<String, String> {
     use icarus_obd::drivelog;
-    let dirs = drivelog::folders();
+    let dirs = dirs.to_vec();
     if let Some(f) = file.filter(|f| !f.is_empty()) {
         let p = drivelog::by_name(&dirs, f).ok_or_else(|| format!("no recording named {f}"))?;
         return drivelog::summarize_file(&p);
@@ -538,6 +543,42 @@ mod tests {
                 assert!(!n.contains(banned), "{n} would change a vehicle");
             }
         }
+    }
+
+    /// ICA-26: the drive_logs tool reads a recording as `obd live --csv` writes it (the adapter line first): listed, the newest
+    /// summarized without a name, that one by its name, and a name outside the folders refused.
+    #[test]
+    fn drive_logs_reads_a_recording() {
+        let dir = std::env::temp_dir().join(format!("icarus-mcp-logs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let head = "time_s,\"Engine speed [rpm]\",\"Vehicle speed [km/h]\",\"Coolant temperature [°C]\",\"Short-term fuel trim, bank 1 [%]\",\"Long-term fuel trim, bank 1 [%]\",\"Short-term fuel trim, bank 2 [%]\",\"Long-term fuel trim, bank 2 [%]\",\"Engine load [%]\",\"Control module voltage [V]\"";
+        let mut csv = format!(
+            "{}\n{head}\n",
+            icarus_obd::drivelog::adapter_line("ELM327 v1.4b")
+        );
+        for k in 0..20 {
+            csv.push_str(&format!(
+                "{}.0,{},{},90,1.0,-6.0,0.5,-3.0,{},13.9\n",
+                k,
+                if k < 10 { 650 } else { 1900 },
+                if k < 10 { 0 } else { 70 },
+                if k < 10 { 16 } else { 35 }
+            ));
+        }
+        std::fs::write(dir.join("drive-2026-11-24_070000.csv"), &csv).unwrap();
+        let dirs = [dir.clone()];
+        let all = drive_logs_in(&dirs, None).unwrap();
+        assert!(
+            all.contains("- drive-2026-11-24_070000.csv") && all.contains("idle"),
+            "{all}"
+        );
+        let one = drive_logs_in(&dirs, Some("drive-2026-11-24_070000.csv")).unwrap();
+        assert!(one.contains("drive-2026-11-24_070000.csv"), "{one}");
+        assert!(drive_logs_in(&dirs, Some("../x.csv")).is_err());
+        assert!(drive_logs_in(&[dir.join("none")], None)
+            .unwrap()
+            .starts_with("No recorded drives yet"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
