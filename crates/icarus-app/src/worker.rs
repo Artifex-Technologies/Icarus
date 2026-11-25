@@ -217,6 +217,9 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
     let profiles = vehicles::load(vehicles::user_dir().as_deref()).0;
     // a command that arrived while the bus was watched, handled next
     let mut queued: Option<Cmd> = None;
+    // what the modules did with each request, kept in the vehicle's record (ICA-70)
+    let mut outcomes: Vec<icarus_obd::record::Outcome> = Vec::new();
+    let mut last_kept = Instant::now();
     loop {
         // a module left out of a broadcast's answers is shown, never lost silently (each once a connection)
         for n in elm.as_mut().map(Elm::take_dropped).unwrap_or_default() {
@@ -232,6 +235,26 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
             ));
         }
         let busy = test.is_some() || (!live.is_empty() && elm.is_some());
+        // the vehicle's record: written every few seconds while busy, and whenever the worker is about to wait
+        if let Some(e) = elm.as_mut() {
+            outcomes.extend(e.take_outcomes());
+        }
+        if !outcomes.is_empty()
+            && (!busy || last_kept.elapsed() >= Duration::from_secs(5) || outcomes.len() >= 500)
+        {
+            if let (Some(v), Some(e)) = (vin.as_deref(), elm.as_ref()) {
+                let adapter = icarus_obd::link::Link::adapter(e);
+                if let Err(x) =
+                    icarus_obd::record::merge(v, &outcomes, &adapter, e.protocol.describe())
+                {
+                    send(Event::Status(format!(
+                        "The vehicle's record was not kept: {x}"
+                    )));
+                }
+            }
+            outcomes.clear();
+            last_kept = Instant::now();
+        }
         let cmd = if let Some(c) = queued.take() {
             Some(c)
         } else if !busy {

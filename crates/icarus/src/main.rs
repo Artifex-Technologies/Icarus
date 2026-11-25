@@ -846,6 +846,23 @@ fn connect_elm(args: &Args) -> Result<Elm, String> {
     Ok(elm)
 }
 
+/// Keeps what the modules did with each request in the vehicle's record (ICA-70), when the command asked single modules: the
+/// VIN says which vehicle (one more read).
+fn keep_record(link: &mut dyn Link) {
+    let outcomes = link.take_outcomes();
+    if outcomes.is_empty() {
+        return;
+    }
+    let Ok(Some(vin)) = icarus_obd::j1979::vin(link) else {
+        eprintln!("note: the vehicle gave no VIN, so what its modules answered was not kept");
+        return;
+    };
+    let protocol = link.protocol().describe();
+    if let Err(e) = icarus_obd::record::merge(&vin, &outcomes, &link.adapter(), protocol) {
+        eprintln!("note: the vehicle's record was not kept: {e}");
+    }
+}
+
 /// Prints the notes on modules left out of broadcasts' answers (`Link::take_dropped`): every command that shows a
 /// broadcast's answers calls it, so a module is never lost silently.
 pub(crate) fn note_dropped(elm: &mut dyn Link) {
@@ -867,6 +884,7 @@ fn cmd_obd(a: &[String]) -> Result<(), String> {
         let mut link = connect(&args)?;
         let r = f(&mut *link);
         note_dropped(&mut *link);
+        keep_record(&mut *link);
         r
     };
     match a.first().map(String::as_str) {

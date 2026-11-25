@@ -83,6 +83,11 @@ pub trait Link {
     fn take_dropped(&mut self) -> Vec<String> {
         Vec::new()
     }
+    /// What each request to one module brought back since the last call, for the vehicle's record (ICA-70); none where the
+    /// link does not keep them.
+    fn take_outcomes(&mut self) -> Vec<crate::record::Outcome> {
+        Vec::new()
+    }
 }
 
 /// A boxed link is a link (the command line picks the kind of link when it connects: an adapter or a CAN interface).
@@ -113,6 +118,9 @@ impl<L: Link + ?Sized> Link for Box<L> {
     }
     fn take_dropped(&mut self) -> Vec<String> {
         (**self).take_dropped()
+    }
+    fn take_outcomes(&mut self) -> Vec<crate::record::Outcome> {
+        (**self).take_outcomes()
     }
 }
 
@@ -157,5 +165,8 @@ impl Link for Elm {
     }
     fn take_dropped(&mut self) -> Vec<String> {
         Elm::take_dropped(self)
+    }
+    fn take_outcomes(&mut self) -> Vec<crate::record::Outcome> {
+        Elm::take_outcomes(self)
     }
 }

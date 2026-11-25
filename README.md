@@ -244,6 +244,15 @@ two to try.
 
 The window starts at **Basic**: the vehicle, its modules' codes, live data, logs, the garage and the tools, for diagnosing and troubleshooting. On the Vehicle page, **Scan my vehicle** is one button from connecting to every module's trouble codes, each in plain words with how soon it needs attention (serious, check soon, can wait) and what to check first, most urgent first: a starting point, not a diagnosis. The gear at the bottom of the side bar opens Icarus's own settings: **Advanced** adds the pages that control modules (Tests, Module settings, Learning, Bus), and **Tuning**, shown only while Advanced is on and turned on only after a yes, adds Maps. The same page holds the **units** (Imperial, Metric, both side by side, or as the system has it: Live data then shows "190 °F 88 °C"), the **theme** (the desktop's, dark or light), and what Icarus works with: the adapters and protocols, and the tuners and interfaces it recognises by their USB IDs (the table in docs/INTERFACES.md). The choices are kept per computer in `~/.config/icarus/window.toml`. The levels only show and hide pages: every change to a vehicle keeps its own checks, and a vehicle set to Read-Only in the Garage stays read-only at every level. The command line has everything. `icarus-app --page settings` opens the gear's page, `--page module` the Module settings page.
 
+## What each vehicle answered
+
+Every request Icarus sends to a single module, and what came back (data, a refusal and its reason, or no answer), is kept in
+the vehicle's record: `record.json` in its garage folder (the simulated vehicle's in Icarus's state folder), one entry per
+module and request with how often it was asked, when, and through which adapter. The window keeps it as it reads; the
+command line after each command that asked single modules (it reads the VIN once to know the vehicle). What a vehicle
+refuses, and why, is data a later connection learns from. It stays on this computer: nothing of it goes into this
+repository.
+
 ## Module settings
 
 What dealer tools call customizations: a feature a module keeps switched on or off, or a value it keeps (a chime, a lock

@@ -31,6 +31,7 @@ pub mod obdex;
 pub mod passthru;
 pub mod port;
 pub mod power_guard;
+pub mod record;
 pub mod report;
 pub mod service;
 pub mod settings;

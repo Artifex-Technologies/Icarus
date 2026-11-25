@@ -294,6 +294,8 @@ pub struct Elm {
     /// The requests this adapter sent onto the bus lately (ICA-80: shown beside what a listening adapter saw): (when, the
     /// request ID, the request's bytes), the last `SENT_KEEP`.
     sent: std::collections::VecDeque<(Instant, u32, Vec<u8>)>,
+    /// What each request to one module brought back, not yet taken (`take_outcomes`, ICA-70: the vehicle's record).
+    outcomes: Vec<crate::record::Outcome>,
 }
 
 /// How many sent requests an adapter keeps for `take_sent`.
@@ -371,6 +373,7 @@ impl Elm {
             unseen: Vec::new(),
             seen: Default::default(),
             sent: Default::default(),
+            outcomes: Vec::new(),
         };
         let reset = elm.command("ATZ", Duration::from_secs(4))?;
         elm.id = reset
@@ -594,6 +597,44 @@ impl Elm {
     /// on one that uses 29-bit CAN (`header_commands`). Flow control for long answers goes to `tx` too, which modules
     /// outside OBD's own 7E0-7E7 need.
     pub fn request_to(&mut self, tx: u32, rx: u32, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
+        let r = self.request_to_inner(tx, rx, data);
+        // what the module did with it, for the vehicle's record (ICA-70): data, a refusal and its reason, or silence; an
+        // adapter's own trouble says nothing about the module and is left out
+        let got = match &r {
+            Ok(answers) => {
+                let mine: Vec<&Answer> = answers
+                    .iter()
+                    .filter(|a| {
+                        u32::from_str_radix(&a.from, 16).ok() == Some(rx) || answers.len() == 1
+                    })
+                    .collect();
+                match mine.iter().find_map(|a| a.refusal()) {
+                    Some((_, code)) => Some(crate::record::Got::Refused(code)),
+                    None => mine.first().map(|a| crate::record::Got::Data(a.data.len())),
+                }
+            }
+            Err(ObdError::NoData) | Err(ObdError::Timeout(_)) => Some(crate::record::Got::Silent),
+            Err(_) => None,
+        };
+        if let Some(got) = got {
+            if self.outcomes.len() < 10_000 {
+                self.outcomes.push(crate::record::Outcome {
+                    tx,
+                    ext: self.want_ext,
+                    request: data.to_vec(),
+                    got,
+                });
+            }
+        }
+        r
+    }
+
+    /// What the requests to single modules brought back since the last call (ICA-70).
+    pub fn take_outcomes(&mut self) -> Vec<crate::record::Outcome> {
+        std::mem::take(&mut self.outcomes)
+    }
+
+    fn request_to_inner(&mut self, tx: u32, rx: u32, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
         self.read_only_check(data)?;
         if tx > 0x1FFF_FFFF || rx > 0x1FFF_FFFF || (tx > 0x7FF) != (rx > 0x7FF) {
             return Err(ObdError::Adapter(format!(
