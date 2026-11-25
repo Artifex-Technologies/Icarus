@@ -1740,9 +1740,10 @@ impl App {
         let vehicle = self.info.as_ref().and_then(|i| i.vehicle.as_ref());
         let mut ask_clear: Option<(u16, u16, Dialect, String)> = None;
         for m in &self.modules {
-            let title = format!("{:03X}  {}", m.addr.tx, m.addr.name);
+            let adv = self.levels.advanced;
+            let title = module_title(&m.addr, adv);
             card(ui, pal, &title, |ui| {
-                if !m.addr.checked {
+                if adv && !m.addr.checked {
                     ui.label(
                         RichText::new("address from public sources, not yet checked on a vehicle")
                             .small()
@@ -1757,13 +1758,26 @@ impl App {
                             row(ui, what, v);
                         }
                     });
+                // Advanced: what it did not give, each with the request and why (a refusal's words)
+                if adv && !m.notes.is_empty() {
+                    ui.label(RichText::new("Not given:").small().strong());
+                    for n in &m.notes {
+                        ui.label(RichText::new(n).small().weak());
+                    }
+                }
                 match &m.dtcs {
-                    Err(why) => {
+                    Err(why) if adv => {
                         ui.label(
-                            RichText::new("None of Icarus's requests gave its trouble codes.")
+                            RichText::new("None of Icarus's requests gave its trouble codes:")
                                 .weak(),
-                        )
-                        .on_hover_text(why);
+                        );
+                        ui.add(egui::Label::new(RichText::new(why).small().weak()).wrap());
+                    }
+                    Err(_) => {
+                        ui.label(
+                            RichText::new("This module would not tell us its trouble codes.")
+                                .weak(),
+                        );
                     }
                     Ok((d, codes)) => {
                         let lang = if *d == Dialect::Uds { "UDS" } else { "KWP2000" };
@@ -1777,11 +1791,7 @@ impl App {
                             let confirmed = c.states.iter().any(|s| {
                                 matches!(*s, "confirmed" | "stored" | "warning light requested")
                             });
-                            let ftb = c
-                                .failure_type
-                                .map(|f| format!(" -{f:02X}"))
-                                .unwrap_or_default();
-                            let extra = format!("{}{ftb}, {lang}", c.states.join(", "));
+                            let extra = code_extra(&c.states, c.failure_type, lang, adv);
                             code_row(
                                 ui,
                                 pal,
@@ -1898,6 +1908,23 @@ impl App {
                 .weak(),
             );
         });
+        // Advanced: the request going out now (ICA-76)
+        let adv = self.levels.advanced;
+        if adv {
+            if let Some((_, id, b)) = self.sent_log.back() {
+                let hex = b
+                    .iter()
+                    .map(|x| format!("{x:02X}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                ui.label(
+                    RichText::new(format!("Last request: {}  {hex}", id_text(*id)))
+                        .small()
+                        .monospace()
+                        .weak(),
+                );
+            }
+        }
         ui.add_space(6.0);
         ui.columns(2, |cols| {
             // every value at once, or none: the same as ticking or clearing each box (a recording keeps its own values)
@@ -1930,7 +1957,7 @@ impl App {
                         let d = j1979::pid(*p).unwrap();
                         let mut on = self.chosen.contains(p);
                         if ui
-                            .checkbox(&mut on, d.name)
+                            .checkbox(&mut on, pid_label(*p, d.name, adv))
                             .on_hover_text(d.about)
                             .changed()
                         {
@@ -1952,7 +1979,7 @@ impl App {
                         let d = j1979::pid(*p).unwrap();
                         let h = self.history.get(p);
                         let last = h.and_then(|h| h.back()).map(|x| x.1);
-                        card(ui, pal, d.name, |ui| {
+                        card(ui, pal, &pid_label(*p, d.name, adv), |ui| {
                             ui.horizontal(|ui| {
                                 ui.label(
                                     RichText::new(last.map_or("-".to_string(), |v| {
@@ -4474,6 +4501,45 @@ fn card(ui: &mut egui::Ui, pal: &theme::Palette, title: &str, body: impl FnOnce(
     ui.add_space(8.0);
 }
 
+/// A CAN ID as written: three digits for 11-bit, eight for 29-bit.
+fn id_text(id: u32) -> String {
+    if id > 0x7FF {
+        format!("{id:08X}")
+    } else {
+        format!("{id:03X}")
+    }
+}
+
+/// A module's title on the Modules page (ICA-76): its name, and in Advanced its request and answer IDs.
+fn module_title(a: &icarus_obd::vehicles::ModuleAddr, advanced: bool) -> String {
+    if advanced {
+        format!("{}/{}  {}", id_text(a.tx), id_text(a.rx()), a.name)
+    } else {
+        a.name.clone()
+    }
+}
+
+/// The line under a trouble code (ICA-76): its state in words, and in Advanced the failure-type byte and the protocol.
+fn code_extra(states: &[&str], failure_type: Option<u8>, lang: &str, advanced: bool) -> String {
+    let words = states.join(", ");
+    if !advanced {
+        return words;
+    }
+    let ftb = failure_type
+        .map(|f| format!(" -{f:02X}"))
+        .unwrap_or_default();
+    format!("{words}{ftb}, {lang}")
+}
+
+/// A live value's name (ICA-76): in Advanced with its PID number first.
+fn pid_label(pid: u8, name: &str, advanced: bool) -> String {
+    if advanced {
+        format!("{pid:02X}  {name}")
+    } else {
+        name.to_string()
+    }
+}
+
 /// One line of the guided scan: how urgent, the code, what it means, why that urgency, what to check first, the modules.
 type GuidedRow = (
     dtc::Urgency,
@@ -4934,6 +5000,38 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| Ok(Box::new(App::new(&cc.egui_ctx, start)))),
     )
+}
+
+#[cfg(test)]
+mod advanced_detail {
+    use super::*;
+
+    /// ICA-76: Basic speaks in words; Advanced adds the IDs, the fault byte and the protocol, and the PID numbers.
+    #[test]
+    fn advanced_adds_the_raw_detail_and_basic_keeps_to_words() {
+        let a = icarus_obd::vehicles::ModuleAddr {
+            tx: 0x7E0,
+            rx: None,
+            name: "engine (ECM)".into(),
+            ext: None,
+            bus: None,
+            checked: true,
+        };
+        assert_eq!(module_title(&a, false), "engine (ECM)");
+        assert_eq!(module_title(&a, true), "7E0/7E8  engine (ECM)");
+        let w = ["confirmed", "warning light requested"];
+        assert_eq!(
+            code_extra(&w, Some(0x1C), "UDS", false),
+            "confirmed, warning light requested"
+        );
+        assert_eq!(
+            code_extra(&w, Some(0x1C), "UDS", true),
+            "confirmed, warning light requested -1C, UDS"
+        );
+        assert_eq!(pid_label(0x0C, "Engine speed", false), "Engine speed");
+        assert_eq!(pid_label(0x0C, "Engine speed", true), "0C  Engine speed");
+        assert_eq!(id_text(0x18DA10F1), "18DA10F1");
+    }
 }
 
 #[cfg(test)]

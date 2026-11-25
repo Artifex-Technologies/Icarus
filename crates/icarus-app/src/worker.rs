@@ -149,6 +149,8 @@ fn view(a: &icarus_obd::bus::Analyzer, now: f64, running: bool, ended: Option<St
 pub struct ModuleView {
     pub addr: ModuleAddr,
     pub identity: Vec<(&'static str, String)>,
+    /// The identification values it did not give: refused (the request and why) or no answer (Advanced shows them).
+    pub notes: Vec<String>,
     pub dtcs: uds::CodesRead,
 }
 
@@ -786,9 +788,9 @@ fn scan(
         };
         if there {
             found += 1;
-            let (identity, dtcs) = uds::at_module(elm, m, |l| {
+            let ((identity, notes), dtcs) = uds::at_module(elm, m, |l| {
                 Ok((
-                    uds::module_identity(l, m.tx, m.rx())?,
+                    uds::module_identity_notes(l, m.tx, m.rx())?,
                     uds::module_dtcs(l, m.tx, m.rx())?,
                 ))
             })
@@ -796,6 +798,7 @@ fn scan(
             send(Event::Module(ModuleView {
                 addr: m.clone(),
                 identity,
+                notes,
                 dtcs,
             }));
         }
