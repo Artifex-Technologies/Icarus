@@ -146,6 +146,9 @@ pub struct SimCar {
     data_busy: bool,
     /// The engine runs (`sim`), or the ignition is on with the engine off (`sim:off`).
     engine_on: bool,
+    /// How many times `22 1F07` was answered: the brake pedal is pressed for its 30th to 59th answers and its 90th to
+    /// 119th (as if someone pressed it twice), for naming by marks (`naming`).
+    brake_reads: u32,
     /// Modules in the extended diagnostic session (10 03), which UDS output control needs.
     extended: std::collections::HashSet<u32>,
     /// Outputs driven by a test: (module, identifier) -> control state.
@@ -223,6 +226,7 @@ impl SimCar {
             meter_busy: true,
             data_busy: true,
             engine_on: true,
+            brake_reads: 0,
             extended: Default::default(),
             driven: Default::default(),
             cleared: Default::default(),
@@ -965,6 +969,12 @@ impl SimCar {
             ([0x22, 0x1F, 0x06], true) if tx == 0x700 => {
                 let raw = (self.engine_rpm() * 2.0) as u16;
                 Some([&[0x62, 0x1F, 0x06, 0x01][..], &raw.to_be_bytes(), &[0x5A]].concat())
+            }
+            // another identifier no definition names: a constant, the brake pedal switch (bit 0), another constant
+            ([0x22, 0x1F, 0x07], true) if tx == 0x700 => {
+                self.brake_reads += 1;
+                let pressed = matches!(self.brake_reads, 30..=59 | 90..=119);
+                Some(vec![0x62, 0x1F, 0x07, 0x00, 0x40 | pressed as u8, 0x10])
             }
             ([0x22, 0x1F, 0x02], true) if tx == 0x700 => {
                 if self.data_busy {

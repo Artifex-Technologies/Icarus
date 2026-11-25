@@ -75,8 +75,10 @@ Vehicle, through an OBD adapter (read-only: nothing is cleared or written):
                                              values and the set's requests read in turn (the same gates and pacing as
                                              obd data), and each byte or pair of bytes that rises and falls with a
                                              standard value (r 0.98 or more over 20 reads) suggested as it, with its
-                                             scale. Guesses to check; nothing is written. Keep the engine running and the
-                                             values moving
+                                             scale. Each line typed while it reads is a mark (\"driver door open\", then
+                                             Enter): a bit or byte that changed near every mark of a name and at no other
+                                             time is suggested as that. Guesses to check; nothing is written. Keep the
+                                             engine running and the values moving; do each marked thing twice or more
 
 Module data (definition files; nothing is sent to a vehicle):
   icarus import obdb FILE.json [--name SET] [--make NAME] [--dry-run] [--replace]

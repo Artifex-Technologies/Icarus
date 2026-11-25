@@ -7,8 +7,11 @@
 //!
 //! The reads are not simultaneous: each answer is compared with the standard value as it stood at that moment, drawn
 //! between the reads before and after it. A suggestion is a guess to check on the vehicle (and in another tool), never
-//! written into a definition by itself. Values that change with something done (a door, the lights, the steering) rather
-//! than with a standard value are not found this way.
+//! written into a definition by itself.
+//!
+//! Values that change with something done (a door, the brake pedal, the lights) are found by marks (ICA-89): the person
+//! says what they are doing as they do it, and a bit (or a whole byte) that changed near every mark of one name
+//! (`MARK_BEFORE` seconds before it to `MARK_AFTER` after) and at no time no mark explains is suggested as that.
 //!
 //! Every module request goes through module data's gates and pacer (`moddata::fetch_request`): reading services only, no
 //! airbag module, no session, at least 50 ms between requests.
@@ -268,18 +271,169 @@ pub fn suggest(standard: &[Standard], unknown: &[Unknown]) -> Vec<Suggestion> {
     out
 }
 
-/// What `sample` read, and the requests it could not use (with why).
+/// A mark's window: a change counts from this long before the mark (said a little late)...
+pub const MARK_BEFORE: f64 = 2.0;
+/// ...to this long after it (said first, then done).
+pub const MARK_AFTER: f64 = 5.0;
+
+/// (name, how many marks, the value before and after the change nearest its first mark), for each name every one of whose
+/// marks had a change near it.
+pub type MarkHits = Vec<(String, usize, u8, u8)>;
+
+/// A bit (or a whole byte) of an unnamed byte that changed near every mark of one name or more, and at no time no mark
+/// explains.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MarkSuggestion {
+    pub module: String,
+    pub request: String,
+    pub byte: usize,
+    /// None: the whole byte (several of its bits changed, differently from mark to mark).
+    pub bit: Option<u8>,
+    /// Each name every one of whose marks had a change near it: (name, how many marks, the value before and after the
+    /// change near its first mark).
+    pub marks: MarkHits,
+}
+
+impl MarkSuggestion {
+    pub fn text(&self) -> String {
+        let field = match self.bit {
+            Some(b) => format!("byte {} bit {b}", self.byte),
+            None => format!("byte {}", self.byte),
+        };
+        let what: Vec<String> = self
+            .marks
+            .iter()
+            .map(|(l, n, a, b)| match self.bit {
+                Some(_) => format!("\"{l}\" ({n} of {n}, {a} to {b})"),
+                None => format!("\"{l}\" ({n} of {n}, {a:02X} to {b:02X})"),
+            })
+            .collect();
+        let once = self.marks.iter().all(|m| m.1 == 1);
+        format!(
+            "{} {}, {field}: changed with {} and at no other time{}",
+            self.module,
+            self.request,
+            what.join(", "),
+            if once {
+                "; marked once: do it and mark it again to be sure"
+            } else {
+                ""
+            }
+        )
+    }
+}
+
+/// Every bit or byte that changed with marks (`marks`: seconds from the start, the name said). A byte of which one bit fits
+/// is suggested as that bit (a switch); one of which several bits fit, or none alone, as the whole byte when it fits. The
+/// bytes `matched` already gives to a standard value are left out: a slow value can cross a bit's edge near a mark.
+pub fn suggest_marks(
+    unknown: &[Unknown],
+    marks: &[(f64, String)],
+    matched: &[Suggestion],
+) -> Vec<MarkSuggestion> {
+    let mut out = Vec::new();
+    let mut labels: Vec<&str> = Vec::new();
+    for (_, l) in marks {
+        if !labels.contains(&l.as_str()) {
+            labels.push(l);
+        }
+    }
+    let near = |t: f64, m: f64| t >= m - MARK_BEFORE && t <= m + MARK_AFTER;
+    for u in unknown {
+        let len = u.reads.iter().map(|(_, d)| d.len()).min().unwrap_or(0);
+        let free = |b: usize| {
+            b < len
+                && !u.named.iter().any(|(s, n)| (*s..s + n).contains(&b))
+                && !matched.iter().any(|m| {
+                    m.module == u.module
+                        && m.request == u.request
+                        && (m.byte..m.byte + m.bits as usize / 8).contains(&b)
+                })
+        };
+        let check = |val: &dyn Fn(&[u8]) -> u8| -> Option<MarkHits> {
+            // (when, before, after) of each change between two reads in a row
+            let changes: Vec<(f64, u8, u8)> = u
+                .reads
+                .windows(2)
+                .filter_map(|w| {
+                    let (a, b) = (val(&w[0].1), val(&w[1].1));
+                    (a != b).then_some((w[1].0, a, b))
+                })
+                .collect();
+            // a switch changes once a mark (twice, if it bounces); a value that keeps changing is not one, however many
+            // marks there are around it
+            if changes.is_empty()
+                || changes.len() > 2 * marks.len()
+                || !changes
+                    .iter()
+                    .all(|c| marks.iter().any(|(m, _)| near(c.0, *m)))
+            {
+                return None;
+            }
+            let mut got = Vec::new();
+            for l in &labels {
+                let ms: Vec<f64> = marks
+                    .iter()
+                    .filter(|(_, x)| x == l)
+                    .map(|(t, _)| *t)
+                    .collect();
+                // the change nearest each mark (marks close together share their windows)
+                let hits: Vec<&(f64, u8, u8)> = ms
+                    .iter()
+                    .filter_map(|m| {
+                        changes
+                            .iter()
+                            .filter(|c| near(c.0, *m))
+                            .min_by(|a, b| (a.0 - m).abs().total_cmp(&(b.0 - m).abs()))
+                    })
+                    .collect();
+                if hits.len() == ms.len() {
+                    got.push((l.to_string(), ms.len(), hits[0].1, hits[0].2));
+                }
+            }
+            (!got.is_empty()).then_some(got)
+        };
+        for byte in (0..len).filter(|b| free(*b)) {
+            let bits: Vec<(u8, MarkHits)> = (0..8u8)
+                .filter_map(|k| check(&|d: &[u8]| (d[byte] >> k) & 1).map(|g| (k, g)))
+                .collect();
+            let at = |bit, marks| MarkSuggestion {
+                module: u.module.clone(),
+                request: u.request.clone(),
+                byte,
+                bit,
+                marks,
+            };
+            // one bit: a switch; several, or none alone: a value of several bits (a gear, a position), whole when it fits
+            let whole = if bits.len() == 1 {
+                None
+            } else {
+                check(&|d: &[u8]| d[byte])
+            };
+            match whole {
+                Some(g) => out.push(at(None, g)),
+                None => out.extend(bits.into_iter().map(|(k, g)| at(Some(k), g))),
+            }
+        }
+    }
+    out
+}
+
+/// What `sample` read, the marks given while it read, and the requests it could not use (with why).
 #[derive(Debug, Default)]
 pub struct Sampled {
     pub standard: Vec<Standard>,
     pub unknown: Vec<Unknown>,
+    /// Seconds from the start, and the name said.
+    pub marks: Vec<(f64, String)>,
     pub left_out: Vec<(String, String)>,
     pub passes: usize,
 }
 
 /// Reads the standard values (`pids`, those the vehicle gives) and every request of `modules`, in turn, until `done` says
-/// to stop (it is given the seconds since `start`). A request whose first answer has no byte left unnamed is not asked
-/// again; one the gates or the vehicle refuse is listed once in `left_out`.
+/// to stop (it is given the seconds since `start`), taking the marks `marks` gives at the start of each pass (when each
+/// was said, and its name). A request whose first answer has no byte left unnamed is not asked again; one the gates or the
+/// vehicle refuse is listed once in `left_out`.
 #[allow(clippy::too_many_arguments)]
 pub fn sample(
     link: &mut dyn Link,
@@ -290,6 +444,7 @@ pub fn sample(
     pids: &[u8],
     now: &dyn Fn() -> Instant,
     done: &mut dyn FnMut(f64) -> bool,
+    marks: &mut dyn FnMut() -> Vec<(Instant, String)>,
 ) -> Sampled {
     let start = now();
     let secs = |t: Instant| t.duration_since(start).as_secs_f64();
@@ -335,6 +490,9 @@ pub fn sample(
             break;
         }
         out.passes += 1;
+        for (at, name) in marks() {
+            out.marks.push((secs(at.max(start)), name));
+        }
         if let Ok(read) = j1979::read_many(link, &given) {
             let t = secs(now());
             for (p, readings) in read {
@@ -496,6 +654,7 @@ mod tests {
                 looks += 1;
                 t > 40.0 || looks > 100_000
             },
+            &mut Vec::new,
         );
         let s = suggest(&got.standard, &got.unknown);
         assert_eq!(s.len(), 1, "{s:#?}");
@@ -513,6 +672,123 @@ mod tests {
         assert!(
             left.contains(&"700 22 1F03") && left.contains(&"700 22 1F05"),
             "{left:?}"
+        );
+    }
+
+    /// ICA-89: a bit that flips near every mark of "door open" and "door closed", and at no other time, is suggested with
+    /// both; a byte that also changes once with no mark near is not; a byte that changes only with the marks but through
+    /// several bits is suggested whole.
+    #[test]
+    fn a_bit_that_flips_with_the_marks() {
+        let marks: Vec<(f64, String)> = [
+            (10.0, "door open"),
+            (20.0, "door closed"),
+            (30.0, "door open"),
+            (40.0, "door closed"),
+        ]
+        .map(|(t, l)| (t, l.to_string()))
+        .to_vec();
+        let reads = (0..100)
+            .map(|i| {
+                let t = i as f64 * 0.5;
+                let open = (11.0..21.0).contains(&t) || (31.5..41.0).contains(&t);
+                let gear = if t < 11.0 {
+                    1
+                } else if t < 21.0 {
+                    2
+                } else if t < 31.0 {
+                    3
+                } else {
+                    4
+                };
+                (
+                    t,
+                    vec![0x80 | open as u8, gear, if t > 25.0 { 9 } else { 8 }],
+                )
+            })
+            .collect();
+        let u = Unknown {
+            module: "750".into(),
+            request: "21 04".into(),
+            named: vec![],
+            reads,
+        };
+        let got = suggest_marks(&[u], &marks, &[]);
+        assert_eq!(got.len(), 2, "{got:#?}");
+        assert_eq!((got[0].byte, got[0].bit), (0, Some(0)));
+        assert_eq!(
+            got[0].marks,
+            [
+                ("door open".to_string(), 2, 0, 1),
+                ("door closed".to_string(), 2, 1, 0)
+            ]
+        );
+        assert_eq!(
+            got[0].text(),
+            "750 21 04, byte 0 bit 0: changed with \"door open\" (2 of 2, 0 to 1), \"door closed\" (2 of 2, 1 to 0) and at no other time"
+        );
+        // the gear byte changes at every mark through different bits: whole
+        assert_eq!((got[1].byte, got[1].bit), (1, None));
+        assert!(suggest_marks(&[], &marks, &[]).is_empty() && got.iter().all(|g| g.byte != 2));
+    }
+
+    /// ICA-89's check on the simulated vehicle: the brake pedal pressed twice and marked each time, while module 700 is read
+    /// with the standard values, is suggested as byte 1 bit 0 of its unnamed 22 1F07, and nothing else is.
+    #[test]
+    fn on_the_simulated_vehicle_the_brake_is_found_by_marks() {
+        let set = moddata::load_set("sim", None, &crate::vehicles::builtin()).unwrap();
+        let mut elm = crate::elm::Elm::connect(Box::new(crate::sim::SimCar::new())).unwrap();
+        let mut pacer = Pacer::new(fake_now, fake_sleep, never);
+        let scope = Scope {
+            year: Some(2025),
+            ..Default::default()
+        };
+        let engine = set.module(0x700).unwrap();
+        // the pedal goes down with the 30th and 90th answer of 22 1F07 and up with the 60th and 120th; one pass reads it once
+        let mut pass = 0;
+        let mut marks = || {
+            pass += 1;
+            match pass {
+                30 | 90 => vec![(fake_now(), "brake pressed".to_string())],
+                60 | 120 => vec![(fake_now(), "brake released".to_string())],
+                _ => vec![],
+            }
+        };
+        let mut looks = 0;
+        let got = sample(
+            &mut elm,
+            &mut pacer,
+            &set.gates,
+            std::slice::from_ref(engine),
+            &scope,
+            PIDS,
+            &fake_now,
+            &mut |t| {
+                looks += 1;
+                t > 40.0 || looks > 100_000
+            },
+            &mut marks,
+        );
+        assert!(got.passes > 130, "{}", got.passes);
+        assert_eq!(got.marks.len(), 4);
+        let found = suggest_marks(
+            &got.unknown,
+            &got.marks,
+            &suggest(&got.standard, &got.unknown),
+        );
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert_eq!(
+            (found[0].request.as_str(), found[0].byte, found[0].bit),
+            ("22 1F07", 1, Some(0)),
+            "{found:?}"
+        );
+        assert_eq!(
+            found[0]
+                .marks
+                .iter()
+                .map(|m| (m.0.as_str(), m.1, m.2, m.3))
+                .collect::<Vec<_>>(),
+            [("brake pressed", 2, 0, 1), ("brake released", 2, 1, 0)]
         );
     }
 

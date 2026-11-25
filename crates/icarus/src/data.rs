@@ -1325,10 +1325,35 @@ pub fn obd_suggest(args: &Args) -> Result<(), String> {
     actuator::catch_interrupt();
     println!(
         "Reading the standard values and {} module(s) of set {} in turn for {secs} s (Ctrl+C stops early). Keep the engine \
-         running; values that rise and fall (rev it, or drive) are what can be matched.",
+         running; values that rise and fall (rev it, or drive) are what can be matched. To name what changes with \
+         something done, type what you are doing as you do it (\"driver door open\") and press Enter: each line is a mark \
+         (Enter alone: \"mark 1\", \"mark 2\"...); do each thing twice or more.",
         modules.len(),
         o.set.set.name
     );
+    // each line typed is a mark, timed when Enter was pressed
+    let (tx, rx) = std::sync::mpsc::channel::<(Instant, String)>();
+    std::thread::spawn(move || {
+        let mut n = 0;
+        for line in std::io::stdin().lines() {
+            let Ok(line) = line else { break };
+            n += 1;
+            let said: String = line
+                .trim()
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(60)
+                .collect();
+            let name = if said.is_empty() {
+                format!("mark {n}")
+            } else {
+                said
+            };
+            if tx.send((Instant::now(), name)).is_err() {
+                break;
+            }
+        }
+    });
     let got = naming::sample(
         &mut o.elm,
         &mut Pacer::real(),
@@ -1338,6 +1363,7 @@ pub fn obd_suggest(args: &Args) -> Result<(), String> {
         naming::PIDS,
         &Instant::now,
         &mut |t| t >= secs || actuator::interrupted(),
+        &mut || rx.try_iter().collect(),
     );
     let found = naming::suggest(&got.standard, &got.unknown);
     let reads: usize = got.unknown.iter().map(|u| u.reads.len()).sum();
@@ -1358,6 +1384,23 @@ pub fn obd_suggest(args: &Args) -> Result<(), String> {
         println!("Suggestions (guesses to check, not written anywhere):");
         for f in &found {
             println!("  {}", f.text());
+        }
+    }
+    if !got.marks.is_empty() {
+        let by_marks = naming::suggest_marks(&got.unknown, &got.marks, &found);
+        println!("{} mark(s).", got.marks.len());
+        if by_marks.is_empty() {
+            println!(
+                "Nothing changed near every mark of a name and at no other time (a change counts from {} s before a mark \
+                 to {} s after).",
+                naming::MARK_BEFORE,
+                naming::MARK_AFTER
+            );
+        } else {
+            println!("Changed with the marks (guesses to check, not written anywhere):");
+            for f in &by_marks {
+                println!("  {}", f.text());
+            }
         }
     }
     for (what, why) in &got.left_out {

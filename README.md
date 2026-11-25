@@ -367,9 +367,16 @@ to name a value afterwards: [docs/CAPTURES.md](docs/CAPTURES.md).
 as `icarus obd data`, then compares every byte and pair of bytes no value names (a capture's placeholders) with each
 standard value: one that rises and falls with it (Pearson's r 0.98 or more over 20 reads or more) is suggested as it, with
 the scale, for example `700 22 1F06, bytes 1-2 (16 bits): follows engine speed (r 1.000 over 369 reads): engine speed = raw
-x 0.5004 - 0.4998 rpm` on the simulated vehicle. A suggestion is a guess to check (then `icarus data name` it); nothing is
-written. Values that change with something done (a door, the lights, the steering) are not found this way, and a value
-that only rose while compared is marked, since a counter fits that as well.
+x 0.5004 - 0.4998 rpm` on the simulated vehicle. A value that only rose while compared is marked, since a counter fits
+that as well.
+
+Values that change with something done (a door, the brake pedal, the lights) are named by **marks**: while it reads, type
+what you are doing as you do it ("brake pressed", Enter; Enter alone counts "mark 1", "mark 2"). A bit (or a byte, when
+several of its bits change) that changed within 2 s before to 5 s after every mark of a name, at most twice a mark, and at
+no other time, is suggested as that: `700 22 1F07, byte 1 bit 0: changed with "brake pressed" (2 of 2, 0 to 1), "brake
+released" (2 of 2, 1 to 0) and at no other time` on the simulated vehicle. Do each thing twice or more, with time between;
+bytes already matched to a standard value are left out. Every suggestion is a guess to check (then `icarus data name` it);
+nothing is written.
 
 ## Editing maps and checksums
 

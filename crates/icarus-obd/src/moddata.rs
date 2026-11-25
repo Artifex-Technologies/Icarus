@@ -1320,7 +1320,7 @@ mod tests {
         let labels: Vec<String> = got.iter().map(|g| g.0.label()).collect();
         assert_eq!(
             labels,
-            vec!["22 1F01", "22 1F02", "22 1F03", "22 1F04", "22 1F05", "22 1F06"]
+            vec!["22 1F01", "22 1F02", "22 1F03", "22 1F04", "22 1F05", "22 1F06", "22 1F07"]
         );
         // a 20-byte answer over several frames
         let v = values(&got[0].1);

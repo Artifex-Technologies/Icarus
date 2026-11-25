@@ -156,3 +156,17 @@ ident = 0x1F06
   bits = 32
   kind = "hex"
   note = "made up for the simulated vehicle: not named, not checked"
+
+# another, which changes with something done rather than with a standard value: `icarus obd suggest` with marks finds
+# that byte 1 bit 0 is the brake pedal
+[[request]]
+service = 0x22
+ident = 0x1F07
+
+  [[request.value]]
+  id = "RAW_22_1F07"
+  name = "22 1F07 (3 bytes)"
+  byte = 0
+  bits = 24
+  kind = "hex"
+  note = "made up for the simulated vehicle: not named, not checked"
