@@ -32,6 +32,46 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const ATTRIBUTION: &str =
     "learned from a capture of another tool: values unnamed and not verified";
 
+/// The attribution of a set learned from a capture as its values get named by hand (`icarus data name`, ICA-61): `named`
+/// of the `total` values a capture made (its placeholders and the values named from them). Naming is not checking: the set
+/// still says its values are not verified.
+pub fn attribution_named(named: usize, total: usize) -> String {
+    if named == 0 {
+        ATTRIBUTION.into()
+    } else if named >= total {
+        "learned from a capture of another tool: values named by hand, not verified".into()
+    } else {
+        format!(
+            "learned from a capture of another tool: {named} of {total} values named by hand, the rest unnamed; not verified"
+        )
+    }
+}
+
+/// Whether a set's attribution is one a capture wrote (and so may be brought up to date): a hand-written one is kept.
+pub fn is_capture_attribution(a: &str) -> bool {
+    a.starts_with("learned from a capture of another tool:")
+}
+
+/// A capture's values in these modules: (named by hand, all of them). A placeholder's note says "not named, not checked";
+/// a named one's "named by hand".
+pub fn naming_counts(modules: &[ModuleDef]) -> (usize, usize) {
+    let mut named = 0;
+    let mut total = 0;
+    for v in modules
+        .iter()
+        .flat_map(|m| &m.requests)
+        .flat_map(|r| &r.values)
+    {
+        if v.note.contains("named by hand") {
+            named += 1;
+            total += 1;
+        } else if v.note.contains("not named, not checked") {
+            total += 1;
+        }
+    }
+    (named, total)
+}
+
 /// Different answers kept per request as samples.
 pub const MAX_SAMPLES: usize = 8;
 

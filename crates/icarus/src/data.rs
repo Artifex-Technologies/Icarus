@@ -826,6 +826,7 @@ fn name_value(root: &std::path::Path, args: &Args, today: &str) -> Result<Named,
     let tmp = path.with_extension("toml.new");
     std::fs::write(&tmp, &text).map_err(|x| format!("{}: {x}", tmp.display()))?;
     std::fs::rename(&tmp, &path).map_err(|x| format!("{what}: {x}"))?;
+    named_attribution(&dir)?;
     Ok(Named {
         set: set.clone(),
         path,
@@ -833,6 +834,25 @@ fn name_value(root: &std::path::Path, args: &Args, today: &str) -> Result<Named,
         request: ri,
         id: new_id,
     })
+}
+
+/// Brings a capture set's attribution up to date with its naming (ICA-61): how many of its values are named by hand. A
+/// hand-written attribution is left alone.
+fn named_attribution(dir: &std::path::Path) -> Result<(), String> {
+    let (mut info, modules, _) = moddata::read_dir(dir)?;
+    if !capture::is_capture_attribution(&info.source.attribution) {
+        return Ok(());
+    }
+    let (named, total) = capture::naming_counts(&modules);
+    let now = capture::attribution_named(named, total);
+    if now == info.source.attribution {
+        return Ok(());
+    }
+    info.source.attribution = now;
+    let path = dir.join("set.toml");
+    let tmp = dir.join("set.toml.new");
+    std::fs::write(&tmp, md::set_to_toml(&info)).map_err(|x| format!("{}: {x}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).map_err(|x| format!("{}: {x}", path.display()))
 }
 
 /// `icarus data name SET MODULE VALUE_ID --name TEXT ...` (see `name_value`).
@@ -1862,6 +1882,72 @@ mod tests {
    0.600       7B0  02 21 05 00 00 00 00 00
    0.610       7B8  03 7F 21 12 00 00 00 00
 ";
+
+    /// ICA-61: a capture set's attribution follows its naming: unnamed at first, "N of M named" after one, "named by hand,
+    /// not verified" once every placeholder is named; a hand-written attribution is never changed.
+    #[test]
+    fn the_attribution_says_when_every_value_is_named() {
+        let root = std::env::temp_dir().join(format!("icarus-attr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let all = vehicles::builtin();
+        let l = learn(CAPTURE.as_bytes(), "truck.log", None, None, false, &all).unwrap();
+        moddata::write_set(&root, &l.imp, false).unwrap();
+        let attribution = || {
+            moddata::read_dir(&root.join("truck"))
+                .unwrap()
+                .0
+                .source
+                .attribution
+        };
+        assert_eq!(attribution(), capture::ATTRIBUTION);
+        let placeholders: Vec<(String, String)> = moddata::read_dir(&root.join("truck"))
+            .unwrap()
+            .1
+            .iter()
+            .flat_map(|m| {
+                let label = m.module.label();
+                m.requests
+                    .iter()
+                    .flat_map(|r| &r.values)
+                    .filter(|v| v.note.contains("not named, not checked"))
+                    .map(move |v| (label.clone(), v.id.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert!(placeholders.len() >= 2, "{placeholders:?}");
+        for (k, (module, id)) in placeholders.iter().enumerate() {
+            let a: Vec<String> = ["name", "truck", module, id, "--name", &format!("Value {k}")]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            name_value(&root, &parse_args(&a, &DATA_OPTIONS).unwrap(), "2026-11-24").unwrap();
+            if k == 0 {
+                assert_eq!(
+                    attribution(),
+                    format!(
+                        "learned from a capture of another tool: 1 of {} values named by hand, the rest unnamed; not verified",
+                        placeholders.len()
+                    )
+                );
+            }
+        }
+        assert_eq!(
+            attribution(),
+            "learned from a capture of another tool: values named by hand, not verified"
+        );
+        // the set still reads, and a hand-written attribution stays as written
+        moddata::load_set("truck", Some(&root), &all).unwrap();
+        let set = root.join("truck/set.toml");
+        let text = std::fs::read_to_string(&set).unwrap().replace(
+            "learned from a capture of another tool: values named by hand, not verified",
+            "my own notes",
+        );
+        std::fs::write(&set, text).unwrap();
+        named_attribution(&root.join("truck")).unwrap();
+        assert_eq!(attribution(), "my own notes");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn a_placeholder_of_a_capture_set_is_named_and_decodes_its_samples() {
