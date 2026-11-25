@@ -88,7 +88,7 @@ The captures, transcripts and sets of a real vehicle stay outside this repositor
 | An identity read (`1A`) | listed as "seen, not imported" (a module's identity is read in a later build) |
 | An answer longer than one value can cover (over 8191 bytes) | listed, the rest of the capture imported |
 | A write, test, routine, clearing, security access, session or reset (`2E`, `2F`, `31`, `3B`, `14`, `27`, `10`, `11`...) | listed as "seen, not imported" |
-| Standard OBD-II (`01`, `09`...) and anything sent to every module (`7DF`, K-line's functional addresses `33` and `6A`) | listed as "seen, not imported" |
+| Standard OBD-II (`01`, `09`...) and anything sent to every module (`7DF`, BMW's `6F1` to `DF` or the E-series' `EF`, K-line's functional addresses `33` and `6A`) | listed as "seen, not imported" |
 | An airbag or occupant module | identity only, as for every set (the vehicle gates of `icarus obd data` apply when the set is written and when it is used) |
 
 Everything the gates of `icarus obd data` refuse (an answer ID used as a request ID, a second module on one request ID, a
@@ -157,6 +157,7 @@ after the gates gets no file in the set (it is listed with the reasons).
 
 - Not yet tried on a real phone's log or a real bus log: the formats are read as their public descriptions give them, and
   tested on small files written for the tests.
-- Bus logs: BMW's and GM's modules (requests on 6F1 and 24x) are read into the transcript, but the gates of
-  `icarus obd data` take request IDs 700-7F7 only, so they are listed as refused, not kept in the set.
+- Bus logs: BMW's and GM's modules (requests on 6F1 with the module's address, and on 240-24F) are kept in the set with
+  their reads, but `icarus obd data` does not reach BMW's gateway yet, and since neither make's built-in profile names an
+  airbag module, a module of either gets its reads only once its file gives it a kind (`kind = "body"`).
 - Modules on K-line, J1850 and 29-bit CAN are imported, but `icarus obd data` does not reach them yet.

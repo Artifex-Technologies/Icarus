@@ -125,12 +125,17 @@ impl Exchange {
 }
 
 /// BMW's tester ID: requests go out on 6F1 with the module's address first, and come back on 600 + that address with the
-/// tester's address F1 first (DF first: every module).
+/// tester's address F1 first (DF or EF first: every module, `bmw_every_module`).
 pub const BMW_TESTER: u32 = 0x6F1;
 
 /// Whether a request is BMW-style: on 6F1 with a module's address first.
 pub fn is_bmw(ids: Ids, tx: u32, ext: Option<u8>) -> bool {
     ids == Ids::Can11 && tx == BMW_TESTER && ext.is_some()
+}
+
+/// BMW's addresses that every module hears: DF (UDS, the F-series on) and EF (KWP2000, the E-series).
+pub fn bmw_every_module(ext: u8) -> bool {
+    matches!(ext, 0xDF | 0xEF)
 }
 
 /// An ID as Icarus writes it: three hex digits for 11-bit, eight for 29-bit, ".EE" for an extended address.
@@ -145,7 +150,7 @@ pub fn id_label(ids: Ids, id: u32, ext: Option<u8>) -> String {
     }
 }
 
-/// Whether a request (its ID and extended address) is the one every module hears: 7DF, BMW's 6F1 to DF, a 29-bit ID with
+/// Whether a request (its ID and extended address) is the one every module hears: 7DF, BMW's 6F1 to DF or EF, a 29-bit ID with
 /// the functional format DB (18DB33F1), or K-line and J1850 header bytes to a functional address (33: ISO 14230; 6A:
 /// ISO 9141 and J1850) or with KWP2000's functional format (C0-FF; a J1850 header of priority 6 or 7 is taken for one
 /// too: more is left out rather than less).
@@ -163,7 +168,9 @@ pub fn is_functional_on(ids: Ids, tx: u32, ext: Option<u8>, kline: Option<KlineP
         (Ids::Kline, Some(KlineProtocol::Iso14230)) => first & 0xC0 == 0xC0 || target == 0x33,
         (Ids::Kline, Some(_)) => first & 0x04 == 0 || target == 0x6A,
         (Ids::Kline, None) => first >= 0xC0 || matches!(target, 0x33 | 0x6A),
-        (Ids::Can11, _) => tx == 0x7DF || (is_bmw(ids, tx, ext) && ext == Some(0xDF)),
+        (Ids::Can11, _) => {
+            tx == 0x7DF || (is_bmw(ids, tx, ext) && ext.is_some_and(bmw_every_module))
+        }
         (Ids::Can29, _) => (tx >> 16) & 0xFF == 0xDB,
     }
 }

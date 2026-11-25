@@ -15,7 +15,7 @@
 //! with that service, within five seconds (and among the last 64 requests still waiting). Every other frame on the bus is
 //! ignored.
 
-use super::{is_bmw, is_functional, usual_rx, Exchange, Read, Reply, BMW_TESTER};
+use super::{bmw_every_module, is_bmw, is_functional, usual_rx, Exchange, Read, Reply, BMW_TESTER};
 use crate::diag::{self, Fed, Reassembler};
 use crate::moddata::Ids;
 use std::collections::{BTreeMap, BTreeSet};
@@ -278,7 +278,8 @@ struct Msg {
 fn related(ids: Ids, (tx, ext): (u32, Option<u8>), (rx, rx_ext): (u32, Option<u8>)) -> bool {
     if is_bmw(ids, tx, ext) {
         let from_module = rx_ext == Some(0xF1) && (0x600..=0x6FF).contains(&rx);
-        return from_module && (ext == Some(0xDF) || usual_rx(ids, tx, ext) == Some(rx));
+        return from_module
+            && (ext.is_some_and(bmw_every_module) || usual_rx(ids, tx, ext) == Some(rx));
     }
     if ext != rx_ext {
         return false;

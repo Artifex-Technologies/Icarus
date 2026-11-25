@@ -35,7 +35,7 @@ use crate::link::Link;
 use crate::uds::{self, DataAnswer};
 use crate::vehicles::Profile;
 use icarus_core::moddata::{
-    self as md, units, Ids, ModuleDef, RequestDef, SetInfo, Shown, ValueDef,
+    self as md, capture, units, Ids, ModuleDef, RequestDef, SetInfo, Shown, ValueDef,
 };
 use serde::Deserialize;
 use std::collections::{BTreeSet, HashMap};
@@ -243,7 +243,7 @@ impl Gates {
                 "refused: {tx:03X} would answer on its own request ID"
             ));
         }
-        if let Some(why) = crate::vehicles::request_id_refused(tx.into(), &self.profiles) {
+        if let Some(why) = data_request_id_refused(tx.into(), h.ext, &self.profiles) {
             return Some(why);
         }
         if self.skips.contains(&tx.into()) {
@@ -273,6 +273,30 @@ impl Gates {
             .err()
             .map(|e| e.to_string())
     }
+}
+
+/// Why a module-data read may not go to `tx` (with the module's extended address), if it may not: as any request ID
+/// (`vehicles::request_id_refused`: 700-7F7, not 7DF, not an answer ID the profiles know), and besides those BMW's modules
+/// on the tester ID 6F1 with their own address first (not DF or EF, which every module hears) and GM's body modules on
+/// 240-24F (answered 400 higher), which bus logs bring in (ICA-60). Reads only: this gate lets nothing but 21 and 22 through,
+/// and the tests, settings, services and clearing keep 700-7F7 (`actuator::not_one_module`).
+fn data_request_id_refused(tx: u32, ext: Option<u8>, profiles: &[Profile]) -> Option<String> {
+    let bmw = tx == capture::BMW_TESTER && ext.is_some();
+    match ext {
+        Some(e) if bmw && capture::bmw_every_module(e) => {
+            return Some(format!(
+                "refused: 6F1.{e:02X} is the address every BMW module hears, not one module"
+            ))
+        }
+        _ if bmw || (0x240..=0x24F).contains(&tx) => {}
+        _ => return crate::vehicles::request_id_refused(tx, profiles),
+    }
+    if uds::sweep_skips(profiles).contains(&tx) {
+        return Some(format!(
+            "refused: {tx:03X} is a module's answer ID; a request sent there would look like that module's own answer"
+        ));
+    }
+    None
 }
 
 /// Why Icarus cannot reach this module yet, if it cannot.
@@ -2319,5 +2343,100 @@ mod tests {
             ),
             Outcome::Refused(0x31)
         );
+    }
+
+    #[test]
+    fn bmw_and_gm_module_ids_take_data_reads() {
+        let profiles = crate::vehicles::builtin();
+        let refused = |tx: u32, ext: Option<u8>| data_request_id_refused(tx, ext, &profiles);
+        // BMW's modules by their address on 6F1; DF and EF are every module, and 6F1 alone is no module
+        assert_eq!(refused(0x6F1, Some(0x12)), None);
+        for every in [0xDF, 0xEF] {
+            assert!(refused(0x6F1, Some(every))
+                .unwrap()
+                .contains("every BMW module"));
+        }
+        assert!(refused(0x6F1, None).unwrap().contains("700-7F7"));
+        // GM's body modules, 240-24F; 250 is none of them
+        assert_eq!(refused(0x241, None), None);
+        assert_eq!(refused(0x24F, None), None);
+        assert!(refused(0x250, None).unwrap().contains("700-7F7"));
+        // the rest as before: a module request ID, never an answer ID or the broadcast
+        assert_eq!(refused(0x7E0, None), None);
+        assert!(refused(0x7E8, None).unwrap().contains("answer ID"));
+        assert!(refused(0x7DF, None).unwrap().contains("broadcast"));
+        // the actions keep 700-7F7
+        assert!(crate::actuator::not_one_module(0x241).is_some());
+    }
+
+    #[test]
+    fn bmw_and_gm_modules_from_a_bus_log_are_kept() {
+        use icarus_core::moddata::capture::{build, buslog, Options};
+        let profiles = crate::vehicles::builtin();
+        // made-up identifiers. BMW: 12 and 18 read on 6F1, answered on 612 and 618; a read sent to EF (every module on
+        // the E-series) is answered by 612 too
+        let bmw = "\
+   1.000       6F1  12 03 22 40 01 00 00 00
+   1.010       612  F1 05 62 40 01 0A 0B 00
+   1.100       6F1  18 03 22 40 02 00 00 00
+   1.110       618  F1 04 62 40 02 01 00 00
+   1.200       6F1  EF 03 22 40 03 00 00 00
+   1.210       612  F1 04 62 40 03 07 00 00
+";
+        // GM: 241 and 242 read, answered on 641 and 642
+        let gm = "\
+   0.100       241  03 22 00 0C 00 00 00 00
+   0.110       641  05 62 00 0C 1A F8 00 00
+   0.200       242  03 22 19 40 00 00 00 00
+   0.210       642  04 62 19 40 05 00 00 00
+";
+        for (make, log, want) in [
+            ("bmw", bmw, ["6F1.12", "6F1.18"]),
+            ("gm", gm, ["241", "242"]),
+        ] {
+            let o = Options {
+                file_name: format!("{make}.log"),
+                make: make.into(),
+                from: "bus capture".into(),
+                ..Default::default()
+            };
+            let imp = build(&buslog::read(log).unwrap().exchanges, &o).unwrap();
+            let labels: Vec<String> = imp.modules.iter().map(|m| m.module.label()).collect();
+            assert_eq!(labels, want, "{:?}", imp.left_out);
+            if make == "bmw" {
+                assert!(
+                    imp.left_out
+                        .iter()
+                        .any(|(w, why)| w.starts_with("6F1.EF") && why.contains("every module")),
+                    "{:?}",
+                    imp.left_out
+                );
+            }
+            // neither profile names an airbag module, so a module of unknown kind gets no request: refused for that, and not
+            // for its ID
+            let mut gated = imp.clone();
+            gate_imported(&mut gated, &profiles);
+            assert!(gated.modules.iter().all(|m| m.requests.is_empty()));
+            assert!(
+                gated
+                    .left_out
+                    .iter()
+                    .all(|(_, why)| !why.contains("700-7F7")),
+                "{:?}",
+                gated.left_out
+            );
+            assert!(gated.left_out.iter().any(|(_, why)| why.contains("airbag")));
+            // given a kind (as the module's file would be once known), every module keeps its read
+            let mut known = imp.clone();
+            for m in &mut known.modules {
+                m.module.kind = "body".into();
+            }
+            gate_imported(&mut known, &profiles);
+            assert!(
+                known.modules.iter().all(|m| m.requests.len() == 1),
+                "{:?}",
+                known.left_out
+            );
+        }
     }
 }
