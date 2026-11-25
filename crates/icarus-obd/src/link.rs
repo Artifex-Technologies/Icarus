@@ -88,6 +88,8 @@ pub trait Link {
     fn take_outcomes(&mut self) -> Vec<crate::record::Outcome> {
         Vec::new()
     }
+    /// Learns from the vehicle's record (ICA-71): reads it refused for good are not asked again. Links that cannot ignore it.
+    fn remember(&mut self, _record: &crate::record::Record) {}
 }
 
 /// A boxed link is a link (the command line picks the kind of link when it connects: an adapter or a CAN interface).
@@ -121,6 +123,9 @@ impl<L: Link + ?Sized> Link for Box<L> {
     }
     fn take_outcomes(&mut self) -> Vec<crate::record::Outcome> {
         (**self).take_outcomes()
+    }
+    fn remember(&mut self, record: &crate::record::Record) {
+        (**self).remember(record)
     }
 }
 
@@ -168,5 +173,8 @@ impl Link for Elm {
     }
     fn take_outcomes(&mut self) -> Vec<crate::record::Outcome> {
         Elm::take_outcomes(self)
+    }
+    fn remember(&mut self, record: &crate::record::Record) {
+        Elm::remember(self, record)
     }
 }

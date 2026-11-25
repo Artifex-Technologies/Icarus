@@ -296,6 +296,11 @@ pub struct Elm {
     sent: std::collections::VecDeque<(Instant, u32, Vec<u8>)>,
     /// What each request to one module brought back, not yet taken (`take_outcomes`, ICA-70: the vehicle's record).
     outcomes: Vec<crate::record::Outcome>,
+    /// Reads this vehicle refused for good on an earlier connection (`remember`, ICA-71): (request ID, address byte,
+    /// request) -> the refusal's code. Not sent again: the refusal comes back as before.
+    refused: std::collections::HashMap<crate::record::Asked, u8>,
+    /// How many requests the record spared on this connection.
+    pub spared: usize,
 }
 
 /// How many sent requests an adapter keeps for `take_sent`.
@@ -374,6 +379,8 @@ impl Elm {
             seen: Default::default(),
             sent: Default::default(),
             outcomes: Vec::new(),
+            refused: Default::default(),
+            spared: 0,
         };
         let reset = elm.command("ATZ", Duration::from_secs(4))?;
         elm.id = reset
@@ -597,6 +604,21 @@ impl Elm {
     /// on one that uses 29-bit CAN (`header_commands`). Flow control for long answers goes to `tx` too, which modules
     /// outside OBD's own 7E0-7E7 need.
     pub fn request_to(&mut self, tx: u32, rx: u32, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
+        // a read this vehicle refused for good before (ICA-71): not asked again, the refusal comes back as it did
+        if let Some(&code) = self.refused.get(&(tx, self.want_ext, data.to_vec())) {
+            if let Some(&sid) = data.first() {
+                self.spared += 1;
+                let from = if rx > 0x7FF {
+                    format!("{rx:08X}")
+                } else {
+                    format!("{rx:03X}")
+                };
+                return Ok(vec![Answer {
+                    from,
+                    data: vec![0x7F, sid, code],
+                }]);
+            }
+        }
         let r = self.request_to_inner(tx, rx, data);
         // what the module did with it, for the vehicle's record (ICA-70): data, a refusal and its reason, or silence; an
         // adapter's own trouble says nothing about the module and is left out
@@ -627,6 +649,11 @@ impl Elm {
             }
         }
         r
+    }
+
+    /// Learns from the vehicle's record (ICA-71): the reads it refused for good are not sent again on this connection.
+    pub fn remember(&mut self, r: &crate::record::Record) {
+        self.refused = r.refused_for_good().into_iter().collect();
     }
 
     /// What the requests to single modules brought back since the last call (ICA-70).

@@ -314,9 +314,15 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
                 }
                 send(Event::Status(format!("Connecting to {spec}...")));
                 match connect(&spec, &profiles) {
-                    Ok((e, info)) => {
-                        elm = Some(e);
+                    Ok((mut e, info)) => {
                         vin = info.vin.clone();
+                        // what this vehicle refused for good before is not asked again (ICA-71)
+                        if let Some(v) = vin.as_deref() {
+                            if let Ok(p) = icarus_obd::record::path(v) {
+                                e.remember(&icarus_obd::record::load_in(&p));
+                            }
+                        }
+                        elm = Some(e);
                         send(Event::Connected(Box::new(info)));
                     }
                     Err(m) => send(Event::Failed(m)),
@@ -331,6 +337,10 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
             Some(Cmd::Scan { profile, sweep }) => {
                 let Some(e) = elm.as_mut() else { continue };
                 live.clear();
+                if sweep {
+                    // every request ID: everything is asked again, the record's refusals too
+                    e.remember(&icarus_obd::record::Record::default());
+                }
                 if let Err(m) = scan(e, &profiles, profile.as_deref(), sweep, &send) {
                     send(Event::Failed(m));
                 }

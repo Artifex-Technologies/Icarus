@@ -872,6 +872,10 @@ pub(crate) fn note_dropped(elm: &mut dyn Link) {
 }
 
 fn cmd_obd(a: &[String]) -> Result<(), String> {
+    // --fresh: ask everything, also what the vehicle's record says it refused for good (ICA-71)
+    let fresh = a.iter().any(|x| x == "--fresh");
+    let a: Vec<String> = a.iter().filter(|x| *x != "--fresh").cloned().collect();
+    let a = a.as_slice();
     let args = parse_args(
         a.get(1..).unwrap_or(&[]),
         &[
@@ -880,8 +884,20 @@ fn cmd_obd(a: &[String]) -> Result<(), String> {
         ],
     )?;
     // connected, run, and the senders any broadcast left out noted however it ended
+    let module_reads = matches!(
+        a.first().map(String::as_str),
+        Some("scan" | "module" | "asbuilt")
+    );
     let with = |f: &dyn Fn(&mut dyn Link) -> Result<(), String>| {
         let mut link = connect(&args)?;
+        // a command that asks single modules learns from the vehicle's record first (the VIN says which)
+        if module_reads && !fresh {
+            if let Ok(Some(vin)) = icarus_obd::j1979::vin(&mut *link) {
+                if let Ok(p) = icarus_obd::record::path(&vin) {
+                    link.remember(&icarus_obd::record::load_in(&p));
+                }
+            }
+        }
         let r = f(&mut *link);
         note_dropped(&mut *link);
         keep_record(&mut *link);

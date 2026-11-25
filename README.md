@@ -250,7 +250,10 @@ Every request Icarus sends to a single module, and what came back (data, a refus
 the vehicle's record: `record.json` in its garage folder (the simulated vehicle's in Icarus's state folder), one entry per
 module and request with how often it was asked, when, and through which adapter. The window keeps it as it reads; the
 command line after each command that asked single modules (it reads the VIN once to know the vehicle). What a vehicle
-refuses, and why, is data a later connection learns from. It stays on this computer: nothing of it goes into this
+refuses, and why, is data a later connection learns from: a read it refused for good (service not supported, sub-function
+not supported, an identifier that does not exist there) is not asked again, and the same refusal comes back without asking;
+a busy or conditional refusal is asked again, and nothing about security access, tests, clearing or writing is ever
+skipped. `--fresh` (or the Modules page's every-request-ID scan) asks everything again. It stays on this computer: nothing of it goes into this
 repository.
 
 ## Module settings

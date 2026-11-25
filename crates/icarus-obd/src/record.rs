@@ -116,6 +116,48 @@ impl Record {
     }
 }
 
+/// A read service: one whose lasting refusal may stand in for asking again (UDS 22 and 19, KWP2000 21, 1A and 18). Never a
+/// session change, security access, a test, clearing or anything that writes.
+pub fn is_read(request: &[u8]) -> bool {
+    matches!(request.first(), Some(0x22 | 0x19 | 0x21 | 0x1A | 0x18))
+}
+
+/// A refusal that lasts (ICA-71): the service is not supported (11), the sub-function is not (12), or the identifier does
+/// not exist here (31). Busy (21), conditions not correct (22) and response pending (78) are asked again; security (33, 35)
+/// is never worked around.
+pub fn lasting(code: u8) -> bool {
+    matches!(code, 0x11 | 0x12 | 0x31)
+}
+
+/// A request as the record keys it: (request ID, address byte, request).
+pub type Asked = (u32, Option<u8>, Vec<u8>);
+
+impl Record {
+    /// The reads this vehicle refused for good, with the refusal's code.
+    pub fn refused_for_good(&self) -> Vec<(Asked, u8)> {
+        let mut out = Vec::new();
+        for e in self.requests.values() {
+            let Some(code) = e.code.filter(|c| e.got == "refused" && lasting(*c)) else {
+                continue;
+            };
+            let (id, ext) = match e.module.split_once('/') {
+                Some((i, a)) => (i, u8::from_str_radix(a, 16).ok()),
+                None => (e.module.as_str(), None),
+            };
+            let Ok(tx) = u32::from_str_radix(id, 16) else {
+                continue;
+            };
+            let req: Vec<u8> = (0..e.request.len() / 2)
+                .filter_map(|i| u8::from_str_radix(&e.request[2 * i..2 * i + 2], 16).ok())
+                .collect();
+            if req.len() * 2 == e.request.len() && is_read(&req) {
+                out.push(((tx, ext, req), code));
+            }
+        }
+        out
+    }
+}
+
 /// Where `vin`'s record is kept: its garage folder (made when missing), or the state folder for the simulated vehicle.
 pub fn path(vin: &str) -> Result<PathBuf, String> {
     let dir = if vin == crate::sim::VIN {
@@ -171,6 +213,45 @@ mod tests {
     use super::*;
     use crate::elm::Elm;
     use crate::link::Link;
+
+    /// ICA-71: the simulated vehicle connected twice: the second identity read sends fewer requests (the identifiers it
+    /// refused for good are not asked again) and gives the same values and the same notes; a security refusal or a busy one
+    /// would be asked again.
+    #[test]
+    fn a_second_connection_asks_less_and_learns_the_same() {
+        let mut first = Elm::connect(Box::new(crate::sim::SimCar::new())).unwrap();
+        first.take_sent();
+        let one = crate::uds::module_identity_notes(&mut first, 0x7E0, 0x7E8).unwrap();
+        let asked_first = first.take_sent().len();
+        let mut r = Record::default();
+        r.add(&first.take_outcomes(), "sim", "CAN", 1);
+        let mut second = Elm::connect(Box::new(crate::sim::SimCar::new())).unwrap();
+        second.remember(&r);
+        second.take_sent();
+        let two = crate::uds::module_identity_notes(&mut second, 0x7E0, 0x7E8).unwrap();
+        let asked_second = second.take_sent().len();
+        assert_eq!(one, two, "the same values and notes");
+        assert!(
+            asked_second < asked_first && second.spared > 0,
+            "{asked_second} < {asked_first}, {} spared",
+            second.spared
+        );
+        // only lasting refusals of reads: busy, conditions and security are asked again, and nothing that is not a read
+        assert!(
+            lasting(0x31)
+                && lasting(0x11)
+                && !lasting(0x21)
+                && !lasting(0x22)
+                && !lasting(0x33)
+                && !lasting(0x78)
+        );
+        assert!(
+            is_read(&[0x22, 0xF1, 0x90])
+                && !is_read(&[0x2F, 0x01, 0x00])
+                && !is_read(&[0x10, 0x03])
+                && !is_read(&[0x27, 0x01])
+        );
+    }
 
     /// ICA-70: a scan of the simulated vehicle's engine module leaves each request with its outcome in the record: the
     /// values it gave, the ones it refused with the reason, and a module behind the gateway by its address byte; a second
