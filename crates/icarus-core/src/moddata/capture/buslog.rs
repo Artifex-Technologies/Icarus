@@ -384,6 +384,7 @@ pub fn read(text: &str) -> Result<Read, String> {
                 replies: vec![],
                 problem: None,
                 masked: false,
+                kline: None,
             });
             continue;
         }

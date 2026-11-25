@@ -22,8 +22,8 @@ pub mod elm;
 pub(crate) mod testkit;
 
 use super::{
-    sha256_hex, validate, Ids, Imported, ModuleDef, ModuleHead, RequestDef, SetInfo, Source,
-    ValueDef, ValueKind, FORMAT,
+    sha256_hex, validate, Ids, Imported, KlineProtocol, ModuleDef, ModuleHead, RequestDef, SetInfo,
+    Source, ValueDef, ValueKind, FORMAT,
 };
 use crate::diag;
 use std::collections::{BTreeMap, BTreeSet};
@@ -107,6 +107,8 @@ pub struct Exchange {
     pub problem: Option<String>,
     /// A VIN or VIN-like text in the request or the replies was masked.
     pub masked: bool,
+    /// K-line and J1850: the protocol, when the capture said it (ICA-62).
+    pub kline: Option<KlineProtocol>,
 }
 
 impl Exchange {
@@ -114,7 +116,7 @@ impl Exchange {
     pub fn module(&self) -> String {
         match self.tx {
             None => "adapter default (every module)".into(),
-            Some(t) if is_functional(self.ids, t, self.ext) => {
+            Some(t) if is_functional_on(self.ids, t, self.ext, self.kline) => {
                 format!("{} (every module)", id_label(self.ids, t, self.ext))
             }
             Some(t) => id_label(self.ids, t, self.ext),
@@ -148,10 +150,21 @@ pub fn id_label(ids: Ids, id: u32, ext: Option<u8>) -> String {
 /// ISO 9141 and J1850) or with KWP2000's functional format (C0-FF; a J1850 header of priority 6 or 7 is taken for one
 /// too: more is left out rather than less).
 pub fn is_functional(ids: Ids, tx: u32, ext: Option<u8>) -> bool {
-    match ids {
-        Ids::Can11 => tx == 0x7DF || (is_bmw(ids, tx, ext) && ext == Some(0xDF)),
-        Ids::Can29 => (tx >> 16) & 0xFF == 0xDB,
-        Ids::Kline => (tx >> 16) & 0xFF >= 0xC0 || matches!((tx >> 8) & 0xFF, 0x33 | 0x6A),
+    is_functional_on(ids, tx, ext, None)
+}
+
+/// `is_functional` knowing a K-line or J1850 request's protocol (ICA-62): KWP2000's format byte says functional with its
+/// top two bits set (C0-FF) or the target is 33; J1850's (and ISO 9141-2's, which follows its header layout) first byte is
+/// the priority and type, functional when its addressing bit (04) is clear, or the target is 6A. So Ford's `C4 10 F5`,
+/// priority 6 to one module, is that module's. Without the protocol, the rule above (more left out rather than less).
+pub fn is_functional_on(ids: Ids, tx: u32, ext: Option<u8>, kline: Option<KlineProtocol>) -> bool {
+    let (first, target) = ((tx >> 16) & 0xFF, (tx >> 8) & 0xFF);
+    match (ids, kline) {
+        (Ids::Kline, Some(KlineProtocol::Iso14230)) => first & 0xC0 == 0xC0 || target == 0x33,
+        (Ids::Kline, Some(_)) => first & 0x04 == 0 || target == 0x6A,
+        (Ids::Kline, None) => first >= 0xC0 || matches!(target, 0x33 | 0x6A),
+        (Ids::Can11, _) => tx == 0x7DF || (is_bmw(ids, tx, ext) && ext == Some(0xDF)),
+        (Ids::Can29, _) => (tx >> 16) & 0xFF == 0xDB,
     }
 }
 
@@ -675,6 +688,9 @@ struct Answered {
     rx_assumed: bool,
     /// The answers came from another ID than the usual one (and the adapter was given no answer ID).
     rx_odd: bool,
+    /// K-line and J1850: the protocol and the first header byte of the first request (ICA-62).
+    kline: Option<KlineProtocol>,
+    header_byte: Option<u8>,
 }
 
 /// The set a capture's exchanges give: every module that answered a data read (21, 22), one request per identifier it
@@ -732,7 +748,9 @@ pub fn build(ex: &[Exchange], o: &Options) -> Result<Imported, String> {
                 );
                 continue;
             }
-            let Some(tx) = e.tx.filter(|t| !is_functional(e.ids, *t, e.ext)) else {
+            let Some(tx) =
+                e.tx.filter(|t| !is_functional_on(e.ids, *t, e.ext, e.kline))
+            else {
                 leave(
                     what,
                     "sent to every module (7DF, a functional address or the adapter's default): seen, not imported (one module at a time only)"
@@ -740,7 +758,9 @@ pub fn build(ex: &[Exchange], o: &Options) -> Result<Imported, String> {
                 );
                 continue;
             };
-            // a K-line or J1850 module is known by its address: its header's target byte (`81 10 F1`: 10)
+            // a K-line or J1850 module is known by its address: its header's target byte (`81 10 F1`: 10); the first byte is
+            // kept for its module file (ICA-62)
+            let header_byte = (e.ids == Ids::Kline).then_some((tx >> 16) as u8);
             let tx = if e.ids == Ids::Kline {
                 (tx >> 8) & 0xFF
             } else {
@@ -825,6 +845,8 @@ pub fn build(ex: &[Exchange], o: &Options) -> Result<Imported, String> {
                     masked: e.masked,
                     rx_assumed,
                     rx_odd: e.rx.is_none() && usual.is_some_and(|u| u != rx),
+                    kline: e.kline,
+                    header_byte,
                 }),
             }
         }
@@ -937,6 +959,8 @@ pub fn build(ex: &[Exchange], o: &Options) -> Result<Imported, String> {
                         dialect: None,
                         kind: String::new(),
                         identity: vec![],
+                        protocol: a.kline,
+                        header_byte: a.header_byte,
                     },
                     requests: vec![],
                 });
@@ -1134,6 +1158,7 @@ mod tests {
                 .collect(),
             problem: None,
             masked: false,
+            kline: None,
         }
     }
 
@@ -1353,6 +1378,85 @@ mod tests {
         );
     }
 
+    /// ICA-62: on J1850 the first header byte is the priority and type, not KWP2000's format byte: Ford's `C4 10 F5`
+    /// (priority 6, physical) is one module's and its read is kept, `68 6A F1` and a `C0`-type functional header are every
+    /// module's. Without a protocol (automatic), a first byte of C0 or above is still taken for every module.
+    #[test]
+    fn j1850_headers_are_read_by_their_own_layout() {
+        use super::super::KlineProtocol;
+        use super::testkit::{pklg_file, Session};
+        let talk = |steps: &[(&str, &str)]| {
+            let cap = Session::talk(steps);
+            let r = read(&pklg_file(&cap.packets, true)).unwrap();
+            build(&r.exchanges, &opts()).unwrap()
+        };
+        let pwm = talk(&[
+            ("ATSP1", "OK"),
+            ("ATH1", "OK"),
+            ("ATSHC410F5", "OK"),
+            ("2101", "C4 F5 10 61 01 05 00"),
+            ("ATSH616AF1", "OK"),
+            ("2102", "C4 F5 10 61 02 06 00"),
+            ("ATSHC010F5", "OK"),
+            ("2103", "C4 F5 10 61 03 07 00"),
+        ]);
+        assert_eq!(pwm.modules.len(), 1, "{:?}", pwm.left_out);
+        let m = &pwm.modules[0].module;
+        assert_eq!(
+            (m.tx, m.protocol, m.header_byte),
+            (0x10, Some(KlineProtocol::J1850pwm), Some(0xC4))
+        );
+        let labels: Vec<String> = pwm.modules[0].requests.iter().map(|q| q.label()).collect();
+        assert_eq!(labels, vec!["21 01"], "the functional ones are left out");
+        assert!(pwm
+            .left_out
+            .iter()
+            .any(|(w, y)| w.contains("616AF1") && y.contains("every module")));
+        assert!(pwm
+            .left_out
+            .iter()
+            .any(|(w, y)| w.contains("C010F5") && y.contains("every module")));
+        // GM's VPW to one module: 6C
+        let vpw = talk(&[
+            ("ATSP2", "OK"),
+            ("ATH1", "OK"),
+            ("ATSH6C10F1", "OK"),
+            ("220101", "6C F1 10 62 01 01 09 00"),
+        ]);
+        assert_eq!(
+            vpw.modules
+                .iter()
+                .map(|m| (m.module.protocol, m.module.header_byte))
+                .collect::<Vec<_>>(),
+            [(Some(KlineProtocol::J1850vpw), Some(0x6C))]
+        );
+        // automatic protocol: the same Ford header is taken for every module, as before
+        let auto = talk(&[
+            ("ATH1", "OK"),
+            ("ATSHC410F5", "OK"),
+            ("2101", "C4 F5 10 61 01 05 00"),
+        ]);
+        assert!(auto.modules.is_empty(), "{:?}", auto.modules);
+        assert!(is_functional_on(
+            Ids::Kline,
+            0xC1_33F1,
+            None,
+            Some(KlineProtocol::Iso14230)
+        ));
+        assert!(!is_functional_on(
+            Ids::Kline,
+            0x81_10F1,
+            None,
+            Some(KlineProtocol::Iso14230)
+        ));
+        assert!(is_functional_on(
+            Ids::Kline,
+            0x68_6AF1,
+            None,
+            Some(KlineProtocol::Iso9141)
+        ));
+    }
+
     #[test]
     fn several_identifiers_at_once_and_k_line_modules_are_imported() {
         use super::testkit::{pklg_file, Session};
@@ -1403,6 +1507,27 @@ mod tests {
             (Ids::Kline, 0x10, Some(0x10))
         );
         assert_eq!(k.module.name, "module (K-line 10)");
+        // ICA-62: its protocol and the format byte it was sent with, in its file
+        assert_eq!(
+            (k.module.protocol, k.module.header_byte),
+            (Some(super::super::KlineProtocol::Iso14230), Some(0x81))
+        );
+        let text = super::super::module_to_toml(k);
+        assert!(
+            text.contains("protocol = \"iso14230\"") && text.contains("header_byte = 0x81"),
+            "{text}"
+        );
+        assert_eq!(
+            super::super::parse_module(&text, "k").unwrap().module,
+            k.module,
+            "reads back"
+        );
+        assert_eq!(ecm.module.protocol, None, "CAN modules have none");
+        let mut can_with_one = ecm.clone();
+        can_with_one.module.protocol = Some(super::super::KlineProtocol::Iso14230);
+        assert!(validate(&mut can_with_one)
+            .unwrap_err()
+            .contains("K-line and J1850"));
         let labels: Vec<String> = k.requests.iter().map(|q| q.label()).collect();
         assert_eq!(labels, vec!["21 01", "21 02"]);
         assert_eq!(k.requests[1].sample.as_deref(), Some("61 02 06 07"));

@@ -134,6 +134,42 @@ pub enum Dialect {
     Kwp,
 }
 
+/// A K-line or J1850 module's protocol (an ELM327's protocols 1-5), as a capture tells it (ICA-62).
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum KlineProtocol {
+    /// SAE J1850 PWM (Ford): ELM327 protocol 1.
+    J1850pwm,
+    /// SAE J1850 VPW (GM): 2.
+    J1850vpw,
+    /// ISO 9141-2: 3.
+    Iso9141,
+    /// ISO 14230-4, KWP2000 (5-baud or fast init): 4 and 5.
+    Iso14230,
+}
+
+impl KlineProtocol {
+    /// From an ELM327 protocol number (ATSP, ATDPN): None for anything that is not K-line or J1850.
+    pub fn from_elm(n: u8) -> Option<KlineProtocol> {
+        match n {
+            1 => Some(KlineProtocol::J1850pwm),
+            2 => Some(KlineProtocol::J1850vpw),
+            3 => Some(KlineProtocol::Iso9141),
+            4 | 5 => Some(KlineProtocol::Iso14230),
+            _ => None,
+        }
+    }
+
+    pub fn word(self) -> &'static str {
+        match self {
+            KlineProtocol::J1850pwm => "j1850pwm",
+            KlineProtocol::J1850vpw => "j1850vpw",
+            KlineProtocol::Iso9141 => "iso9141",
+            KlineProtocol::Iso14230 => "iso14230",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ModuleHead {
@@ -162,6 +198,12 @@ pub struct ModuleHead {
     /// Identity fingerprints (what the module's identification values read), to tell variants apart.
     #[serde(default)]
     pub identity: Vec<Identity>,
+    /// K-line and J1850 only (ICA-62): the protocol the module was spoken to in, when known ...
+    #[serde(default)]
+    pub protocol: Option<KlineProtocol>,
+    /// ... and the first header byte sent to it: KWP2000's format byte (`81`), J1850's priority and type (`6C`, `C4`).
+    #[serde(default)]
+    pub header_byte: Option<u8>,
 }
 
 impl ModuleHead {
@@ -554,6 +596,12 @@ pub fn validate(m: &mut ModuleDef) -> Result<(), String> {
             h.ids.word()
         ));
     }
+    if h.ids != Ids::Kline && (h.protocol.is_some() || h.header_byte.is_some()) {
+        return Err(format!(
+            "{}: protocol and header_byte are for K-line and J1850 modules (ids = \"kline\")",
+            h.name
+        ));
+    }
     let mut ids = BTreeSet::new();
     for r in m.requests.iter_mut() {
         let what = format!("request {}", r.label());
@@ -768,6 +816,12 @@ pub fn module_to_toml(m: &ModuleDef) -> String {
     }
     if h.ids != Ids::Can11 {
         o += &format!("ids = {}\n", q(h.ids.word()));
+    }
+    if let Some(p) = h.protocol {
+        o += &format!("protocol = {}\n", q(p.word()));
+    }
+    if let Some(b) = h.header_byte {
+        o += &format!("header_byte = 0x{b:02X}\n");
     }
     if let Some(b) = &h.bus {
         o += &format!("bus = {}\n", q(b));

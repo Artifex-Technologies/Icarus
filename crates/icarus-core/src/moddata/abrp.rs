@@ -654,6 +654,8 @@ pub fn parse(text: &str, opts: &Options) -> Result<Imported, String> {
                         dialect: None,
                         kind: obd_kind(tx),
                         identity: vec![],
+                        protocol: None,
+                        header_byte: None,
                     },
                     requests: vec![],
                 });

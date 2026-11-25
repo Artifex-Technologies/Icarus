@@ -19,7 +19,7 @@
 
 use super::{Exchange, Reply};
 use crate::diag::{self, Fed, Reassembler};
-use crate::moddata::Ids;
+use crate::moddata::{Ids, KlineProtocol};
 use std::collections::VecDeque;
 
 /// Bytes one side sent at one time.
@@ -629,6 +629,11 @@ pub fn conversation(chunks: &[Chunk]) -> Conversation {
             replies,
             problem,
             masked: false,
+            // ATSP's protocol, when the capture set one (under automatic protocol it is not known)
+            kline: st
+                .protocol
+                .filter(|_| ids == Ids::Kline)
+                .and_then(KlineProtocol::from_elm),
         });
     }
     out
