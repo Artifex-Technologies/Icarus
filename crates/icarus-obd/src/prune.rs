@@ -112,6 +112,62 @@ impl Pruner {
     }
 }
 
+/// How many times a value read in turn must have been asked, with no answer, before it goes.
+pub const MIN_ASKED: u32 = 3;
+
+/// The window's recording (ICA-87): values read in turn, a few each sweep, so each is asked only now and then and two are
+/// rarely asked together. After the first `after_s` seconds, one asked at least [`MIN_ASKED`] times and never answered goes;
+/// copies are not judged here. Nothing goes when nothing answered at all.
+#[derive(Clone, Debug, Default)]
+pub struct Unanswered {
+    after_s: f64,
+    /// PID: (times asked, answered once)
+    asked: std::collections::BTreeMap<u8, (u32, bool)>,
+    started: Option<f64>,
+    decided: bool,
+}
+
+impl Unanswered {
+    pub fn new(after_s: f64) -> Unanswered {
+        Unanswered {
+            after_s,
+            ..Default::default()
+        }
+    }
+
+    /// One sweep at `t` seconds: the PIDs asked, and those of them that answered.
+    pub fn see(&mut self, t: f64, asked: &[u8], answered: &[u8]) {
+        if self.decided {
+            return;
+        }
+        self.started.get_or_insert(t);
+        for p in asked {
+            let e = self.asked.entry(*p).or_default();
+            e.0 += 1;
+            e.1 |= answered.contains(p);
+        }
+    }
+
+    /// Once, after the first `after_s` seconds: the PIDs to stop asking (by number).
+    pub fn decide(&mut self, t: f64) -> Option<Vec<u8>> {
+        let start = self.started?;
+        if self.decided || t - start < self.after_s {
+            return None;
+        }
+        self.decided = true;
+        if !self.asked.values().any(|(_, a)| *a) {
+            return Some(Vec::new());
+        }
+        Some(
+            self.asked
+                .iter()
+                .filter(|(_, (n, a))| !*a && *n >= MIN_ASKED)
+                .map(|(p, _)| *p)
+                .collect(),
+        )
+    }
+}
+
 /// The words for what was dropped, one line each ("PID 46 (Ambient air temperature): no answer in the first minute").
 pub fn words(dropped: &[(u8, Why)]) -> Vec<String> {
     let name = |p: u8| {
@@ -199,6 +255,42 @@ mod tests {
             silent.see(k as f64 * 4.0, &[None, None]);
         }
         assert_eq!(silent.decide(80.0), Some(Vec::new()));
+    }
+
+    /// The window's rotation: a value asked three times without an answer goes after the minute; one asked twice, or answered
+    /// once, stays; nothing goes before the minute, nor when nothing answered.
+    #[test]
+    fn a_value_read_in_turn_goes_when_it_never_answered() {
+        let mut u = Unanswered::new(WATCH_S);
+        for k in 0..30u32 {
+            let t = f64::from(k) * 2.5;
+            let turn = [[0x46u8, 0x3D], [0x5C, 0x33], [0x0F, 0x0B]][(k % 3) as usize];
+            let answered: Vec<u8> = turn
+                .iter()
+                .copied()
+                .filter(|p| *p != 0x46 && (*p != 0x5C || k == 4) && *p != 0x3D)
+                .collect();
+            u.see(t, &turn, &answered);
+            if t < WATCH_S {
+                assert_eq!(u.decide(t), None);
+            }
+        }
+        u.see(76.0, &[0x2F], &[]);
+        assert_eq!(
+            u.decide(80.0),
+            Some(vec![0x3D, 0x46]),
+            "0x5C answered once, 0x2F was asked once"
+        );
+        assert_eq!(u.decide(90.0), None, "once");
+        let mut quiet = Unanswered::new(1.0);
+        for k in 0..5 {
+            quiet.see(f64::from(k), &[0x46], &[]);
+        }
+        assert_eq!(
+            quiet.decide(5.0),
+            Some(Vec::new()),
+            "nothing answered: the adapter, not the values"
+        );
     }
 
     /// With the simulated vehicle: PID 3D is not one it answers, so a minute of readings drops it and keeps 3C and 46.

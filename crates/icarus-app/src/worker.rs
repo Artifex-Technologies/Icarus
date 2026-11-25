@@ -198,6 +198,12 @@ pub enum Event {
     },
 }
 
+/// How long a recording's values read in turn are watched before one never answered stops being read (ICA-87).
+#[cfg(not(test))]
+const PRUNE_AFTER_S: f64 = icarus_obd::prune::WATCH_S;
+#[cfg(test)]
+const PRUNE_AFTER_S: f64 = 2.0;
+
 pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'static) {
     let send = |e: Event| {
         let _ = tx.send(e);
@@ -210,6 +216,8 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
     let mut live: Vec<u8> = Vec::new();
     let mut rotate: Vec<u8> = Vec::new();
     let mut rotate_at = 0usize;
+    // a recording's values read in turn that never answer stop being read after its first minute (ICA-87)
+    let mut unanswered = icarus_obd::prune::Unanswered::new(PRUNE_AFTER_S);
     let mut test: Option<actuator::Running> = None;
     let mut last_hold = Instant::now();
     let mut last_watch = Instant::now();
@@ -347,11 +355,13 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
             }
             Some(Cmd::Live(pids)) => {
                 rotate.clear();
+                unanswered = icarus_obd::prune::Unanswered::new(PRUNE_AFTER_S);
                 live = pids;
             }
             Some(Cmd::LiveRotate(pids)) => {
                 rotate = pids;
                 rotate_at = 0;
+                unanswered = icarus_obd::prune::Unanswered::new(PRUNE_AFTER_S);
             }
             Some(Cmd::Report(scan)) => {
                 let Some(e) = elm.as_mut() else { continue };
@@ -607,15 +617,20 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
             None => {
                 let Some(e) = elm.as_mut() else { continue };
                 let mut sweep = live.clone();
+                let mut turn = Vec::new();
                 for _ in 0..rotate.len().min(2) {
-                    sweep.push(rotate[rotate_at % rotate.len()]);
+                    let p = rotate[rotate_at % rotate.len()];
+                    sweep.push(p);
+                    turn.push(p);
                     rotate_at += 1;
                 }
                 // up to six values a request on CAN (j1979::read_many)
-                match j1979::read_many(e, &sweep) {
+                let answered = match j1979::read_many(e, &sweep) {
                     Ok(all) => {
+                        let mut got = Vec::new();
                         for (pid, r) in all {
                             if let Some(x) = r.iter().find(|x| x.from == "7E8").or(r.first()) {
+                                got.push(pid);
                                 send(Event::Reading {
                                     pid,
                                     value: x.value,
@@ -623,11 +638,31 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
                                 });
                             }
                         }
+                        Some(got)
                     }
-                    Err(ObdError::NoData) => {}
+                    Err(ObdError::NoData) => Some(Vec::new()),
                     Err(err) => {
                         live.clear();
                         send(Event::Failed(err.to_string()));
+                        None
+                    }
+                };
+                if let Some(answered) = answered.filter(|_| !turn.is_empty()) {
+                    let t = start.elapsed().as_secs_f64();
+                    unanswered.see(t, &turn, &answered);
+                    if let Some(gone) = unanswered.decide(t).filter(|g| !g.is_empty()) {
+                        rotate.retain(|p| !gone.contains(p));
+                        let names: Vec<String> = gone
+                            .iter()
+                            .map(|p| match j1979::pid(*p) {
+                                Some(d) => format!("PID {p:02X} ({})", d.name),
+                                None => format!("PID {p:02X}"),
+                            })
+                            .collect();
+                        send(Event::Status(format!(
+                            "Recording: {} never answered in the first minute and is no longer read (its column stays empty)",
+                            names.join(", ")
+                        )));
                     }
                 }
             }
@@ -838,4 +873,72 @@ fn scan(
     }
     send(Event::ScanDone { found, unreachable });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    /// ICA-87: a recording on the simulated vehicle with PID 3D (which it never answers) among the values read in turn: after
+    /// the first watch (2 s in tests, a minute in use) the worker says 3D is no longer read and asks for it no more; 46,
+    /// which it answers, stays.
+    #[test]
+    fn a_recording_stops_reading_a_value_that_never_answers() {
+        // the simulated vehicle's record goes to a state folder of the test's own, not the real home's
+        let state = std::env::temp_dir().join(format!("icarus-worker-test-{}", std::process::id()));
+        std::env::set_var("XDG_STATE_HOME", &state);
+        let (ctx, crx) = mpsc::channel();
+        let (etx, erx) = mpsc::channel();
+        std::thread::spawn(move || run(crx, etx, || {}));
+        ctx.send(Cmd::Connect("sim".into())).unwrap();
+        let until = |what: &str, ok: &mut dyn FnMut(&Event) -> bool| {
+            let end = Instant::now() + Duration::from_secs(30);
+            while Instant::now() < end {
+                if let Ok(e) = erx.recv_timeout(Duration::from_millis(200)) {
+                    if ok(&e) {
+                        return e;
+                    }
+                }
+            }
+            panic!("no {what}");
+        };
+        until("connection", &mut |e| matches!(e, Event::Connected(_)));
+        ctx.send(Cmd::Live(vec![0x0C])).unwrap();
+        ctx.send(Cmd::LiveRotate(vec![0x3D, 0x46, 0x05])).unwrap();
+        let Event::Status(s) = until(
+            "note",
+            &mut |e| matches!(e, Event::Status(s) if s.starts_with("Recording:")),
+        ) else {
+            unreachable!()
+        };
+        assert!(
+            s.contains("PID 3D") && !s.contains("PID 46") && !s.contains("PID 05"),
+            "{s}"
+        );
+        // what goes onto the bus from now on: never 3D again, 46 still (the first batch is the sweep that decided)
+        until("the deciding sweep's requests", &mut |e| {
+            matches!(e, Event::Sent(_))
+        });
+        let mut asked_3d = false;
+        let mut asked_46 = false;
+        let end = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < end {
+            if let Ok(Event::Sent(v)) = erx.recv_timeout(Duration::from_millis(100)) {
+                for (_, _, b) in v {
+                    if b.first() == Some(&0x01) {
+                        asked_3d |= b[1..].contains(&0x3D);
+                        asked_46 |= b[1..].contains(&0x46);
+                    }
+                }
+            }
+        }
+        assert!(
+            !asked_3d && asked_46,
+            "3D asked: {asked_3d}, 46 asked: {asked_46}"
+        );
+        ctx.send(Cmd::Live(Vec::new())).unwrap();
+        let _ = std::fs::remove_dir_all(&state);
+    }
 }

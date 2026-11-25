@@ -478,7 +478,9 @@ After its first minute, `obd live` stops asking for a value the vehicle never an
 value at every reading while both changed (a vehicle may list PID 46 ambient and never fill it, or answer PID 3D catalyst
 bank 2 with a copy of 3C), and says which it dropped; the column stays in the log, empty, and the other values are read more often. Two values
 that only sat at the same number (fuel trims at 0 while the engine warms) are not copies and stay. `--all` asks every value
-the whole time.
+the whole time. The window's Record drive does the same for the values it reads in turn: one asked at least three times in
+the first minute without an answer is no longer read, and the status line says so (copies are not judged there: those
+values are read at different moments).
 
 `scan` and `module` work like a dealer tool (Techstream, FORScan): they talk to each module directly in UDS (ISO 14229) or
 the older KWP2000 that many Toyota modules still use, not only to the engine's standard OBD-II side. A guard in the code lets
