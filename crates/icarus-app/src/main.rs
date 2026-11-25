@@ -183,6 +183,12 @@ enum MapEdit {
     UndoAll,
 }
 
+/// The Bus page's signals cell for one ID (ICA-88): the message's name and what the DBC names in its last bytes; "" for
+/// an ID the DBC does not name.
+fn dbc_cell(d: &icarus_core::dbc::Dbc, id: u32, data: &[u8]) -> String {
+    d.line(id, id > 0x7FF, data).unwrap_or_default()
+}
+
 /// Something asked for in the Maps page's versions row, done after drawing.
 enum VersionAct {
     /// Compare with the original only ("stock").
@@ -360,6 +366,10 @@ struct App {
     /// The bus monitor: the source (adapter or a Linux CAN interface), its last view.
     bus_can: bool,
     bus_ifname: String,
+    /// A CAN database for the Bus page (ICA-88): its path as typed, what was read, and what opening it said.
+    bus_dbc_path: String,
+    bus_dbc: Option<icarus_core::dbc::Dbc>,
+    bus_dbc_note: String,
     bus: Option<worker::BusView>,
     /// Settings: each one's value now (from the worker), the value picked per setting, a change waiting for the person's
     /// yes (the setting and the value's name; None = undo), and whether the values were asked for since connecting.
@@ -511,6 +521,9 @@ impl App {
             charging: None,
             bus_can: false,
             bus_ifname: "can0".into(),
+            bus_dbc_path: String::new(),
+            bus_dbc: None,
+            bus_dbc_note: String::new(),
             bus: None,
             setting_views: Vec::new(),
             setting_pick: HashMap::new(),
@@ -2214,6 +2227,44 @@ impl App {
             }
         });
         ui.label(RichText::new("Watching only: nothing is sent onto the bus. Press a pedal or a switch and see which byte follows (changed bytes light up). Diagnostic messages are put in words; actuator tests another tool runs, and settings it changes, are learned.").weak());
+        // a CAN database names the bytes (ICA-88)
+        ui.horizontal(|ui| {
+            ui.label("CAN database (.dbc)");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.bus_dbc_path)
+                    .hint_text("optional: a vehicle's .dbc, to name the signals")
+                    .desired_width(320.0),
+            );
+            if ui.button("Open").clicked() {
+                let p = self.bus_dbc_path.trim().to_string();
+                match std::fs::read_to_string(&p) {
+                    Ok(t) => {
+                        let d = icarus_core::dbc::parse(&t);
+                        self.bus_dbc_note = format!(
+                            "{} message(s){}",
+                            d.messages.len(),
+                            if d.skipped.is_empty() {
+                                String::new()
+                            } else {
+                                format!("; left out: {}", d.skipped.join("; "))
+                            }
+                        );
+                        self.bus_dbc = Some(d);
+                    }
+                    Err(e) => {
+                        self.bus_dbc_note = format!("{p}: {e}");
+                        self.bus_dbc = None;
+                    }
+                }
+            }
+            if self.bus_dbc.is_some() && ui.button("Close it").clicked() {
+                self.bus_dbc = None;
+                self.bus_dbc_note.clear();
+            }
+        });
+        if !self.bus_dbc_note.is_empty() {
+            ui.label(RichText::new(&self.bus_dbc_note).small().weak());
+        }
         ui.add_space(8.0);
         card(ui, pal, "Listen with another device", |ui| {
             self.listen_body(ui, pal)
@@ -2243,6 +2294,9 @@ impl App {
                             for h in ["ID", "Hz", "count", "bytes"] {
                                 ui.label(RichText::new(h).small().weak());
                             }
+                            if self.bus_dbc.is_some() {
+                                ui.label(RichText::new("signals").small().weak());
+                            }
                             ui.end_row();
                             for (id, count, hz, data, ages) in &b.rows {
                                 ui.label(
@@ -2267,6 +2321,9 @@ impl App {
                                         );
                                     }
                                 });
+                                if let Some(d) = &self.bus_dbc {
+                                    ui.label(RichText::new(dbc_cell(d, *id, data)).small());
+                                }
                                 ui.end_row();
                             }
                         });
@@ -5321,5 +5378,61 @@ mod versions_row {
         );
         assert_eq!(std::fs::read(&image).unwrap(), stock, "stock untouched");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod bus_dbc {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// ICA-88: the Bus page's signals column on the simulated bus: the worker watches it as the page does, and the DBC
+    /// names engine speed in 2C4's last bytes; an ID the DBC does not name has an empty cell.
+    #[test]
+    fn the_bus_page_names_the_signals() {
+        let state = std::env::temp_dir().join(format!("icarus-busdbc-{}", std::process::id()));
+        std::env::set_var("XDG_STATE_HOME", &state);
+        let dbc = icarus_core::dbc::parse(
+            "BO_ 708 Engine: 8 ECM\n SG_ EngineSpeed : 7|16@0+ (1,0) [0|8000] \"rpm\" Vector__XXX\n",
+        );
+        let (ctx, crx) = std::sync::mpsc::channel();
+        let (etx, erx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || worker::run(crx, etx, || {}));
+        ctx.send(Cmd::Connect("sim".into())).unwrap();
+        let end = Instant::now() + Duration::from_secs(30);
+        let mut connected = false;
+        let mut cell = None;
+        let mut other = None;
+        while Instant::now() < end && cell.is_none() {
+            let Ok(e) = erx.recv_timeout(Duration::from_millis(200)) else {
+                continue;
+            };
+            match e {
+                Event::Connected(_) if !connected => {
+                    connected = true;
+                    ctx.send(Cmd::BusStart(None, false)).unwrap();
+                }
+                Event::Bus(v) => {
+                    for (id, _, _, data, _) in &v.rows {
+                        if *id == 0x2C4 {
+                            cell = Some(dbc_cell(&dbc, *id, data));
+                        } else {
+                            other = Some(dbc_cell(&dbc, *id, data));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let _ = ctx.send(Cmd::BusStop);
+        let cell = cell.expect("2C4 seen on the bus page");
+        let rpm: f64 = cell
+            .strip_prefix("Engine: EngineSpeed ")
+            .and_then(|r| r.strip_suffix(" rpm"))
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("{cell}"));
+        assert!((750.0..=830.0).contains(&rpm), "{cell}");
+        assert_eq!(other.as_deref(), Some(""), "an ID the DBC does not name");
+        let _ = std::fs::remove_dir_all(&state);
     }
 }

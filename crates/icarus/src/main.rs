@@ -1962,16 +1962,6 @@ fn cmd_bus(a: &[String]) -> Result<(), String> {
     bus_watch(a, &serial_port).map(|_| ())
 }
 
-/// A decoded value as `bus watch --dbc` shows it: whole numbers without decimals, others to three places at most.
-fn dbc_number(v: f64) -> String {
-    if v.fract() == 0.0 && v.abs() < 1e15 {
-        format!("{v:.0}")
-    } else {
-        let s = format!("{v:.3}");
-        s.trim_end_matches('0').trim_end_matches('.').to_string()
-    }
-}
-
 /// A serial port, raw (an SLCAN adapter's).
 fn serial_port(path: &str, baud: u32) -> std::io::Result<Box<dyn icarus_obd::port::Port>> {
     Ok(Box::new(icarus_obd::port::open_serial(path, baud)?))
@@ -2164,32 +2154,16 @@ fn bus_watch(a: &[String], serial: &OpenSerial<'_>) -> Result<bus::Analyzer, Str
         println!("\nWhat the DBC names in the last frame of each ID:");
         let mut named = 0;
         for (id, s) in &an.ids {
-            let Some((m, values)) = d.decode(*id, *id > 0x7FF, &s.data) else {
+            let Some(line) = d.line(*id, *id > 0x7FF, &s.data) else {
                 continue;
             };
             named += 1;
-            let shown: Vec<String> = values
-                .iter()
-                .map(|v| match &v.label {
-                    Some(l) => format!("{} {l}", v.signal),
-                    None => format!(
-                        "{} {}{}",
-                        v.signal,
-                        dbc_number(v.value),
-                        if v.unit.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" {}", v.unit)
-                        }
-                    ),
-                })
-                .collect();
             let idt = if *id > 0x7FF {
                 format!("{id:08X}")
             } else {
                 format!("{id:03X}")
             };
-            println!("  {idt:>8}  {}: {}", m.name, shown.join(", "));
+            println!("  {idt:>8}  {line}");
         }
         if named == 0 {
             println!("  (none of the IDs seen is in it)");

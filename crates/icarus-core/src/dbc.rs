@@ -298,7 +298,43 @@ impl Signal {
     }
 }
 
+impl Decoded {
+    /// "EngineSpeed 800 rpm", or with a named value "DriverDoor open": whole numbers without decimals, others to three
+    /// places at most.
+    pub fn text(&self) -> String {
+        if let Some(l) = &self.label {
+            return format!("{} {l}", self.signal);
+        }
+        let v = self.value;
+        let n = if v.fract() == 0.0 && v.abs() < 1e15 {
+            format!("{v:.0}")
+        } else {
+            let s = format!("{v:.3}");
+            s.trim_end_matches('0').trim_end_matches('.').to_string()
+        };
+        if self.unit.is_empty() {
+            format!("{} {n}", self.signal)
+        } else {
+            format!("{} {n} {}", self.signal, self.unit)
+        }
+    }
+}
+
 impl Dbc {
+    /// "Engine: EngineSpeed 800 rpm, Coolant 90 degC" for a frame, None for an ID the DBC does not name.
+    pub fn line(&self, id: u32, ext: bool, data: &[u8]) -> Option<String> {
+        let (m, values) = self.decode(id, ext, data)?;
+        Some(format!(
+            "{}: {}",
+            m.name,
+            values
+                .iter()
+                .map(Decoded::text)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+    }
+
     /// The message with this ID.
     pub fn message(&self, id: u32, ext: bool) -> Option<&Message> {
         self.messages.iter().find(|m| m.id == id && m.ext == ext)
