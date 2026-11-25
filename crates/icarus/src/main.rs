@@ -43,7 +43,7 @@ Vehicle, through an OBD adapter (read-only: nothing is cleared or written):
   icarus obd info  --adapter A               adapter, protocol, VIN, modules, calibration IDs, check-engine light, monitors
   icarus obd codes --adapter A               stored, pending and permanent trouble codes, per module
   icarus obd pids  --adapter A               the live values each module offers, and what they mean
-  icarus obd live  --adapter A [PID...] [--every MS] [--count N] [--csv FILE] [--gps SOURCE]
+  icarus obd live  --adapter A [PID...] [--every MS] [--count N] [--csv FILE] [--gps SOURCE] [--all]
                                              watch live values (PIDs in hex, e.g. 0C 05 06 07); Ctrl+C stops
   icarus obd scan  --adapter A [--make NAME] [--sweep]
                                              find every module (ABS, airbags, cluster...): identity and trouble codes,
@@ -2550,10 +2550,14 @@ fn obd_live(elm: &mut dyn Link, args: &Args) -> Result<(), String> {
     }
     let start = Instant::now();
     let mut n = 0u64;
+    // ICA-86: after the first minute, a value never answered or copying another is no longer asked (its column stays,
+    // empty), so the rest are read more often; --all asks every value the whole time
+    let mut pruner = (args.opt("all").is_none()).then(|| icarus_obd::prune::Pruner::new(&pids));
+    let mut asked = pids.clone();
     loop {
         let t0 = Instant::now();
         // up to six values a request on CAN; the engine's answer when it gives one, else the first module's
-        let all = j1979::read_many(elm, &pids).map_err(|x| x.to_string())?;
+        let all = j1979::read_many(elm, &asked).map_err(|x| x.to_string())?;
         let value = |p: u8| {
             all.iter()
                 .find(|(q, _)| *q == p)
@@ -2578,7 +2582,18 @@ fn obd_live(elm: &mut dyn Link, args: &Args) -> Result<(), String> {
                     .map(|c| c.map(|v| format!("{v:.6}")).unwrap_or_default()),
             );
         }
-        let t = format!("{:.2}", start.elapsed().as_secs_f64());
+        let secs = start.elapsed().as_secs_f64();
+        if let Some(p) = pruner.as_mut() {
+            p.see(secs, &pids.iter().map(|q| value(*q)).collect::<Vec<_>>());
+            if let Some(dropped) = p.decide(secs) {
+                for w in icarus_obd::prune::words(&dropped) {
+                    eprintln!("note: {w} (--all keeps asking)");
+                }
+                asked.retain(|q| !dropped.iter().any(|(d, _)| d == q));
+                pruner = None;
+            }
+        }
+        let t = format!("{secs:.2}");
         println!("{t}, {}", row.join(", "));
         // a module left out of a value's answer is said as it happens (once), not only when the watch ends
         note_dropped(elm);

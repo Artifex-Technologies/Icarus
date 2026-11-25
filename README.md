@@ -474,6 +474,12 @@ allows: one wait for the modules' answers instead of six, each answer split by t
 not split exactly is not read, and a module that refuses several at once is asked one value at a time). Older protocols
 allow one value a request.
 
+After its first minute, `obd live` stops asking for a value the vehicle never answered, and for one that equalled an earlier
+value at every reading while both changed (a vehicle may list PID 46 ambient and never fill it, or answer PID 3D catalyst
+bank 2 with a copy of 3C), and says which it dropped; the column stays in the log, empty, and the other values are read more often. Two values
+that only sat at the same number (fuel trims at 0 while the engine warms) are not copies and stay. `--all` asks every value
+the whole time.
+
 `scan` and `module` work like a dealer tool (Techstream, FORScan): they talk to each module directly in UDS (ISO 14229) or
 the older KWP2000 that many Toyota modules still use, not only to the engine's standard OBD-II side. A guard in the code lets
 only reading services out: clearing codes, writing, actuator tests and programming are refused until the safety steps exist.
