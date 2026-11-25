@@ -378,6 +378,8 @@ struct App {
     bus_dbc_path: String,
     bus_dbc: Option<icarus_core::dbc::Dbc>,
     bus_dbc_note: String,
+    /// What the vehicle profile calls the bus's IDs (ICA-17), and for which profile ("" for none): read again when it changes.
+    bus_names: (String, std::collections::BTreeMap<u32, String>),
     bus: Option<worker::BusView>,
     /// Settings: each one's value now (from the worker), the value picked per setting, a change waiting for the person's
     /// yes (the setting and the value's name; None = undo), and whether the values were asked for since connecting.
@@ -534,6 +536,7 @@ impl App {
             bus_dbc_path: String::new(),
             bus_dbc: None,
             bus_dbc_note: String::new(),
+            bus_names: (String::from("?"), Default::default()),
             bus: None,
             setting_views: Vec::new(),
             setting_pick: HashMap::new(),
@@ -2348,6 +2351,26 @@ impl App {
         }
     }
 
+    /// The profile the Bus page names IDs from: the one chosen on the Modules page, else the connected vehicle's (VIN).
+    fn refresh_bus_names(&mut self) {
+        let from_vin = self.info.as_ref().and_then(|i| i.profile.as_ref());
+        let key = if self.profile_choice.is_empty() {
+            from_vin.map(|p| p.id.clone()).unwrap_or_default()
+        } else {
+            self.profile_choice.clone()
+        };
+        if self.bus_names.0 == key {
+            return;
+        }
+        let names = if self.profile_choice.is_empty() {
+            icarus_obd::vehicles::bus_names(from_vin)
+        } else {
+            let all = icarus_obd::vehicles::load(icarus_obd::vehicles::user_dir().as_deref()).0;
+            icarus_obd::vehicles::bus_names(icarus_obd::vehicles::find(&all, &key).ok())
+        };
+        self.bus_names = (key, names);
+    }
+
     fn page_bus(&mut self, ui: &mut egui::Ui, pal: &theme::Palette) {
         let running = self.bus.as_ref().is_some_and(|b| b.running);
         ui.horizontal(|ui| {
@@ -2415,6 +2438,7 @@ impl App {
         card(ui, pal, "Listen with another device", |ui| {
             self.listen_body(ui, pal)
         });
+        self.refresh_bus_names();
         let Some(b) = &self.bus else { return };
         ui.label(
             RichText::new(format!(
@@ -2428,16 +2452,16 @@ impl App {
             ))
             .weak(),
         );
-        ui.columns(2, |cols| {
+        ui.horizontal_top(|ui| {
             egui::ScrollArea::vertical()
                 .id_salt("bus-ids")
                 .max_height(420.0)
-                .show(&mut cols[0], |ui| {
+                .show(ui, |ui| {
                     egui::Grid::new("bus-table")
                         .striped(true)
                         .spacing(vec2(12.0, 2.0))
                         .show(ui, |ui| {
-                            for h in ["ID", "Hz", "count", "bytes"] {
+                            for h in ["ID", "what", "Hz", "count", "bytes"] {
                                 ui.label(RichText::new(h).small().weak());
                             }
                             if self.bus_dbc.is_some() {
@@ -2452,6 +2476,19 @@ impl App {
                                         format!("{id:03X}")
                                     })
                                     .monospace(),
+                                );
+                                // what the profile calls it, cut to fit (a cut label shows the whole name on hover)
+                                let what =
+                                    self.bus_names.1.get(id).map(String::as_str).unwrap_or("");
+                                ui.allocate_ui_with_layout(
+                                    vec2(200.0, 14.0),
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
+                                        ui.add(
+                                            egui::Label::new(RichText::new(what).small())
+                                                .truncate(),
+                                        )
+                                    },
                                 );
                                 ui.label(RichText::new(format!("{hz:.1}")).monospace());
                                 ui.label(RichText::new(count.to_string()).monospace());
@@ -2478,13 +2515,15 @@ impl App {
                 .id_salt("bus-log")
                 .max_height(420.0)
                 .stick_to_bottom(true)
-                .show(&mut cols[1], |ui| {
-                    if b.log.is_empty() {
-                        ui.label(RichText::new("No diagnostic messages yet.").weak());
-                    }
-                    for l in &b.log {
-                        ui.label(RichText::new(l).monospace().small());
-                    }
+                .show(ui, |ui| {
+                    ui.vertical(|ui| {
+                        if b.log.is_empty() {
+                            ui.label(RichText::new("No diagnostic messages yet.").weak());
+                        }
+                        for l in &b.log {
+                            ui.label(RichText::new(l).monospace().small());
+                        }
+                    });
                 });
         });
         if !b.learned.is_empty() || !b.settings.is_empty() {

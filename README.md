@@ -149,8 +149,9 @@ data page, add latitude, longitude and GPS speed columns (empty while there is n
 6 by default: CAN 11-bit at 500 kbit/s, without the protocol search's first request), `--can can0` / `--adapter can0` (a
 Linux CAN interface such as a CANable) or `--adapter slcan:/dev/ttyACM0` (an SLCAN adapter: see below),
 or the Bus page: every ID with its rate and last bytes, the bytes that just changed lit up (press a pedal or a switch and
-watch which byte follows), and diagnostic messages between a tool and the modules put in words. Watching only: nothing
-is sent onto the bus. What another tool does while Icarus watches is learned (next section).
+watch which byte follows), what each ID is where the vehicle profile knows it (the modules' request and answer IDs,
+OBD-II's own, and the IDs a profile's `[bus]` table names; the profile chosen on the Modules page, else the VIN's), and
+diagnostic messages between a tool and the modules put in words. Watching only: nothing is sent onto the bus. What another tool does while Icarus watches is learned (next section).
 
 **A CAN database names the bytes.** `--dbc FILE` reads a `.dbc` (a vehicle's from opendbc or a maker's; the file is yours,
 never part of Icarus) and, after the ID table, shows each named ID's signals in its last frame, in their units and with

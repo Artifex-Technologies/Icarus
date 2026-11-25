@@ -27,6 +27,10 @@ pub struct Profile {
     /// The maker's own trouble codes: code = meaning (`[codes]` table).
     #[serde(default)]
     pub codes: BTreeMap<String, String>,
+    /// CAN IDs the maker's modules send on the bus without being asked (wheel speeds, the gear, the doors), by their hex
+    /// ID: `[bus]` with `"0B4" = "wheel speeds"`; the Bus page shows the name beside the ID (`bus_names`).
+    #[serde(default)]
+    pub bus: BTreeMap<String, String>,
     /// Actuator tests (`[[test]]` entries; see `actuator`).
     #[serde(default, rename = "test")]
     pub tests: Vec<crate::actuator::TestDef>,
@@ -211,6 +215,13 @@ pub fn parse(id: &str, source: &str, text: &str) -> Result<Profile, String> {
             ));
         }
     }
+    for (id, name) in &p.bus {
+        if bus_id(id).is_none() || name.trim().is_empty() {
+            return Err(format!(
+                "{source}: [bus] {id:?} = {name:?} should be a CAN ID in hex (3 digits, or 8 for 29-bit) and a name"
+            ));
+        }
+    }
     for t in &p.tests {
         if let Some(why) = t.refused() {
             return Err(format!("{source}: test \"{}\" refused: {why}", t.name));
@@ -332,6 +343,7 @@ fn merge(base: &mut Profile, user: Profile) {
         }
     }
     base.codes.extend(user.codes);
+    base.bus.extend(user.bus);
     for t in user.tests {
         match base.tests.iter_mut().find(|b| b.name == t.name) {
             Some(b) => *b = t,
@@ -473,6 +485,70 @@ pub fn request_id_refused(tx: u32, profiles: &[Profile]) -> Option<String> {
         ));
     }
     None
+}
+
+/// A `[bus]` key's CAN ID: three hex digits (11-bit, up to 7FF) or eight (29-bit).
+fn bus_id(key: &str) -> Option<u32> {
+    let id = u32::from_str_radix(key, 16).ok()?;
+    match key.len() {
+        3 if id <= 0x7FF => Some(id),
+        8 if (0x0100_0000..=0x1FFF_FFFF).contains(&id) => Some(id),
+        _ => None,
+    }
+}
+
+/// What the CAN IDs a bus watch sees are, as far as Icarus knows (ICA-17): OBD-II's broadcast and answer IDs, then those of
+/// the make's profile (each module's request and answer ID, its ranges, and its `[bus]` table), the profile's names last
+/// so they win. A module behind a gateway shares the gateway's IDs, so those name the gateway's modules together.
+pub fn bus_names(p: Option<&Profile>) -> BTreeMap<u32, String> {
+    let mut n = BTreeMap::new();
+    n.insert(0x7DF, "OBD-II request to every module".to_string());
+    n.insert(0x18DB_33F1, "OBD-II request to every module".to_string());
+    for i in 0..8u32 {
+        n.insert(0x7E0 + i, format!("OBD-II request to module {}", i + 1));
+        n.insert(0x7E8 + i, format!("OBD-II answer from module {}", i + 1));
+    }
+    let Some(p) = p else { return n };
+    let mut behind: BTreeMap<(u32, u32), Vec<&str>> = BTreeMap::new();
+    for m in &p.modules {
+        let bus = if m.on_ms_can() {
+            " (medium-speed CAN)"
+        } else {
+            ""
+        };
+        if m.ext.is_some() {
+            behind.entry((m.tx, m.rx())).or_default().push(&m.name);
+        } else {
+            n.insert(m.tx, format!("request to {}{bus}", m.name));
+            n.insert(m.rx(), format!("answer from {}{bus}", m.name));
+        }
+    }
+    for ((tx, rx), names) in behind {
+        let names = names.join(", ");
+        n.insert(
+            tx,
+            format!("requests to the modules behind {tx:03X} ({names})"),
+        );
+        n.insert(
+            rx,
+            format!("answers from the modules behind {tx:03X} ({names})"),
+        );
+    }
+    for r in &p.ranges {
+        for tx in r.from..=r.to {
+            n.insert(tx, format!("request to {} {tx:03X}", r.name));
+            n.insert(
+                tx + r.answer_offset,
+                format!("answer from {} {tx:03X}", r.name),
+            );
+        }
+    }
+    for (key, name) in &p.bus {
+        if let Some(id) = bus_id(key) {
+            n.insert(id, name.trim().to_string());
+        }
+    }
+    n
 }
 
 /// Every module address a profile names: its modules and the ones its ranges cover.
@@ -729,5 +805,60 @@ mod tests {
         );
         assert!(problems.iter().any(|p| p.contains("not 11-bit")));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bus_ids_are_named_from_the_profile() {
+        let all = builtin();
+        let make = |id: &str| all.iter().find(|p| p.id == id).unwrap();
+        let n = bus_names(Some(make("toyota")));
+        assert_eq!(n[&0x7DF], "OBD-II request to every module");
+        assert_eq!(n[&0x7B0], "request to ABS / VSC / TRC (skid control)");
+        assert_eq!(n[&0x7B8], "answer from ABS / VSC / TRC (skid control)");
+        // the profile's names win over OBD-II's own
+        assert_eq!(n[&0x7E0], "request to engine (ECM)");
+        assert_eq!(n[&0x7EF], "OBD-II answer from module 8");
+        // a gateway's ID carries several modules
+        assert!(
+            n[&0x750].starts_with("requests to the modules behind 750 ("),
+            "{}",
+            n[&0x750]
+        );
+        assert!(
+            n[&0x758].starts_with("answers from the modules behind 750 ("),
+            "{}",
+            n[&0x758]
+        );
+        // GM's body range, answered 400 higher
+        let n = bus_names(Some(make("gm")));
+        assert_eq!(n[&0x241], "request to body module 241");
+        assert_eq!(n[&0x641], "answer from body module 241");
+        // no profile: OBD-II's IDs only
+        assert_eq!(bus_names(None).len(), 18);
+        // the [bus] table names what modules send unasked, 11-bit or 29-bit; a user file adds to it
+        let p = parse(
+            "x",
+            "test",
+            "name = \"X\"\n[bus]\n\"0B4\" = \"wheel speeds\"\n\"18FEF100\" = \"cruise\"\n",
+        )
+        .unwrap();
+        let n = bus_names(Some(&p));
+        assert_eq!(
+            (n[&0x0B4].as_str(), n[&0x18FE_F100].as_str()),
+            ("wheel speeds", "cruise")
+        );
+        let mut base = make("toyota").clone();
+        merge(&mut base, p);
+        assert_eq!(bus_names(Some(&base))[&0x0B4], "wheel speeds");
+        for bad in [
+            "\"B4\" = \"x\"",
+            "\"800\" = \"x\"",
+            "\"0B4\" = \" \"",
+            "\"zz4\" = \"x\"",
+            "\"7DF0\" = \"x\"",
+        ] {
+            let e = parse("x", "test", &format!("name = \"X\"\n[bus]\n{bad}\n")).unwrap_err();
+            assert!(e.contains("[bus]"), "{bad}: {e}");
+        }
     }
 }

@@ -26,7 +26,9 @@ One TOML file per make (module addresses, quirks, `[codes]`, `[[test]]`, `[[sett
 same name replaces a built-in one. Addresses from public sources carry `checked = false` until seen on a vehicle. A
 `[[module]]`'s `tx`/`rx` are 11-bit CAN IDs (up to `0x7FF`) or 29-bit ones written with all eight digits (`0x18DA30F1`,
 answered from `0x18DAF130` unless `rx` is given); `[[range]]` (`from`, `to`, `answer_offset`, `name`) names up to 64
-11-bit request IDs a scan asks, each answered `answer_offset` higher.
+11-bit request IDs a scan asks, each answered `answer_offset` higher. `[bus]` names IDs the modules send unasked, by
+their hex ID (three digits, or eight for 29-bit): `"0B4" = "wheel speeds"`; the Bus page shows them, with each module's
+request and answer IDs, in its "what" column (a user file adds to the built-in table).
 Used by: Icarus itself, and anyone writing down a module found on a vehicle.
 
 ## Used by Icarus (provided elsewhere)
