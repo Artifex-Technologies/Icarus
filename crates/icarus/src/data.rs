@@ -35,13 +35,7 @@ pub fn cmd_import(a: &[String]) -> Result<(), String> {
         Some("obdb") => import_obdb(&args),
         Some("abrp") => import_abrp(&args),
         Some("btlog" | "buslog") => import_capture(&args),
-        Some("ddt") => {
-            let [path] = args.pos.as_slice() else {
-                return Err("usage: icarus import ddt ECU.xml".into());
-            };
-            let text = std::fs::read_to_string(path).map_err(|x| format!("{path}: {x}"))?;
-            md::ddt::parse(&text).map(|_| ())
-        }
+        Some("ddt") => import_ddt(&args),
         _ => Err(format!(
             "usage: icarus import obdb FILE.json [--name SET] [--make NAME] [--dry-run] [--replace]\n{ABRP_USAGE}\n{CAPTURE_USAGE}"
         )),
@@ -87,6 +81,28 @@ fn import_obdb(args: &Args) -> Result<(), String> {
         },
     )?;
     finish_import("OBDb signal set", path, imp, args)
+}
+
+/// `icarus import ddt ECU.xml [--name SET] [--make NAME] [--dry-run] [--replace]`: a DDT2000 ECU file (ICA-5), the user's
+/// own copy (Renault's material, never shipped with Icarus).
+fn import_ddt(args: &Args) -> Result<(), String> {
+    let [path] = args.pos.as_slice() else {
+        return Err(
+            "usage: icarus import ddt ECU.xml [--name SET] [--make NAME] [--dry-run] [--replace]"
+                .into(),
+        );
+    };
+    let text = std::fs::read_to_string(path).map_err(|x| format!("{path}: {x}"))?;
+    let imp = md::ddt::parse(
+        &text,
+        &md::ddt::Options {
+            path: path.clone(),
+            name: args.opt("name").map(str::to_string),
+            make: args.opt("make").map(str::to_string),
+            today: today(),
+        },
+    )?;
+    finish_import("DDT2000 ECU file", path, imp, args)
 }
 
 /// `icarus import abrp FILE.json [--name SET] [--make NAME] [--model WORDS] [--dry-run] [--replace]`: an EV PID list from

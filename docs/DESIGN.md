@@ -101,7 +101,7 @@ A module is bricked when a write stops halfway or puts the wrong thing in. Icaru
 - Not supported yet: BMW's gateway (its answers carry the tester's address, not the module's), clearing codes of modules
   behind a gateway (Toyota's give their identity, codes and module data, read only), 29-bit module IDs (Honda) and
   GM's body range, Ford's medium-speed CAN, Mode 06 on older protocols,
-  DDT2000 and DBC files, diagnostics through SocketCAN adapters (they watch the bus only), A2L definitions, service functions (relearns, resets, TPMS, injector coding).
+  DDT2000 modules on K-line, diagnostics through SocketCAN adapters (they watch the bus only), service functions (relearns, resets, TPMS, injector coding).
 
 ## Interfaces
 

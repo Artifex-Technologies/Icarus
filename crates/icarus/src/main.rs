@@ -96,7 +96,10 @@ Module data (definition files; nothing is sent to a vehicle):
   icarus import buslog FILE [the same options]
                                              the same from a bus log: icarus bus watch --raw (through a Y-splitter, while
                                              another tool works) or candump; either name reads either kind of file
-  icarus import ddt ECU.xml                  DDT2000 files: not built yet (build 3); it says so and imports nothing
+  icarus import ddt ECU.xml [--name SET] [--make NAME] [--dry-run] [--replace]
+                                             a DDT2000 ECU file you have (Renault, Dacia, Nissan; Renault's material,
+                                             never shipped): its reading requests (22, 21, 1A) and their values, all
+                                             marked unverified; K-line modules and anything that writes are left out
   icarus data [SET] [--module ID] [--find TEXT] [--sample] [--refused]
                                              the sets, or one set's modules, requests and values (--sample decodes the
                                              sample answers a file carries)

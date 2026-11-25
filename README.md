@@ -321,8 +321,10 @@ Torque Pro's style; Icarus works out what each one is by evaluating it (a scaled
 not, or one bit, or a yes/no test over one byte such as `(A==1)||(A==2)`, kept as yes or no for every raw value) and
 keeps only those, so nothing is guessed. Yes/no tests over several bytes, raw CAN frames and 29-bit modules (VW, Renault,
 Honda, so far) are listed as left out with the reason. Modules at 7E0-7E7 (OBD-II's powertrain
-addresses) are read; any other address follows the airbag rule in the gates below. DDT2000 files (Renault, Dacia, Nissan) and DBC bus
-files come in later builds (`icarus import ddt` is there, and says it is not built yet).
+addresses) are read; any other address follows the airbag rule in the gates below. `icarus import ddt ECU.xml` reads a DDT2000 ECU file
+you have (Renault, Dacia, Nissan; Renault's material, never shipped with Icarus): only its reading requests (`22`, `21`,
+`1A`, with no data sent and no access rules) and their values come in, each marked unverified; K-line modules and anything
+that writes are listed as left out. DBC bus files are read by `icarus bus watch --dbc` and the Bus page.
 
 The fence is in code (`crates/icarus-obd/src/moddata.rs`), checked when a set is loaded and again before every request:
 services 21 and 22 only, built by Icarus from the identifier (files carry no raw bytes; a file may also name `1A`,
