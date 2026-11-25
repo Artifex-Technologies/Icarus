@@ -110,12 +110,13 @@ Module data (definition files; nothing is sent to a vehicle):
                                              is checked and written back; the samples show what it decodes to
 
 Bus (watching only: nothing is sent onto the bus):
-  icarus bus watch (--adapter A | --can can0) [--seconds N] [--raw] [--diagnostic]
+  icarus bus watch (--adapter A | --can can0) [--seconds N] [--raw] [--diagnostic] [--dbc FILE]
                                              every ID with its rate and changing bytes, diagnostic messages in words, and
                                              actuator tests another tool runs, as entries for the vehicle's file. A is also
                                              slcan:/dev/ttyACM0[@baud][#bitrate] (an SLCAN adapter, opened listen-only);
                                              --diagnostic keeps only IDs 700-7FF (another tool's requests and the answers),
-                                             for a bus busier than an ELM/STN adapter's serial link carries
+                                             for a bus busier than an ELM/STN adapter's serial link carries; --dbc names the
+                                             signals of a CAN database (.dbc) in each ID's last frame
   icarus learn (--adapter A | --can can0) [--seconds N] [--ask-sarina]
                                              learn from another tool working on the vehicle (a Y-cable on the OBD port):
                                              type what you are about to do in it and press Enter (a mark), then do it;
@@ -1961,6 +1962,16 @@ fn cmd_bus(a: &[String]) -> Result<(), String> {
     bus_watch(a, &serial_port).map(|_| ())
 }
 
+/// A decoded value as `bus watch --dbc` shows it: whole numbers without decimals, others to three places at most.
+fn dbc_number(v: f64) -> String {
+    if v.fract() == 0.0 && v.abs() < 1e15 {
+        format!("{v:.0}")
+    } else {
+        let s = format!("{v:.3}");
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+}
+
 /// A serial port, raw (an SLCAN adapter's).
 fn serial_port(path: &str, baud: u32) -> std::io::Result<Box<dyn icarus_obd::port::Port>> {
     Ok(Box::new(icarus_obd::port::open_serial(path, baud)?))
@@ -2013,7 +2024,7 @@ fn watch_slcan(
 fn bus_watch(a: &[String], serial: &OpenSerial<'_>) -> Result<bus::Analyzer, String> {
     if a.first().map(String::as_str) != Some("watch") {
         return Err(
-            "usage: icarus bus watch (--adapter A [--protocol N] | --can can0 | --adapter slcan:/dev/ttyACM0) [--seconds N] [--raw] [--diagnostic]"
+            "usage: icarus bus watch (--adapter A [--protocol N] | --can can0 | --adapter slcan:/dev/ttyACM0) [--seconds N] [--raw] [--diagnostic] [--dbc FILE]"
                 .into(),
         );
     }
@@ -2027,7 +2038,21 @@ fn bus_watch(a: &[String], serial: &OpenSerial<'_>) -> Result<bus::Analyzer, Str
         .filter(|x| *x != "--raw" && *x != "--diagnostic")
         .cloned()
         .collect();
-    let args = parse_args(&rest, &["adapter", "can", "seconds", "protocol"])?;
+    let args = parse_args(&rest, &["adapter", "can", "seconds", "protocol", "dbc"])?;
+    // a CAN database (ICA-6): what each ID's bytes mean, shown after the table
+    let dbc = args
+        .opt("dbc")
+        .map(|p| {
+            std::fs::read_to_string(p)
+                .map(|t| icarus_core::dbc::parse(&t))
+                .map_err(|x| format!("{p}: {x}"))
+        })
+        .transpose()?;
+    if let Some(d) = &dbc {
+        for s in &d.skipped {
+            eprintln!("note: the DBC: {s}");
+        }
+    }
     let secs: f64 = args
         .opt("seconds")
         .map(|v| v.parse().map_err(|_| "--seconds needs a number"))
@@ -2134,6 +2159,41 @@ fn bus_watch(a: &[String], serial: &OpenSerial<'_>) -> Result<bus::Analyzer, Str
             s.count,
             bytes.join(" ")
         );
+    }
+    if let Some(d) = &dbc {
+        println!("\nWhat the DBC names in the last frame of each ID:");
+        let mut named = 0;
+        for (id, s) in &an.ids {
+            let Some((m, values)) = d.decode(*id, *id > 0x7FF, &s.data) else {
+                continue;
+            };
+            named += 1;
+            let shown: Vec<String> = values
+                .iter()
+                .map(|v| match &v.label {
+                    Some(l) => format!("{} {l}", v.signal),
+                    None => format!(
+                        "{} {}{}",
+                        v.signal,
+                        dbc_number(v.value),
+                        if v.unit.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" {}", v.unit)
+                        }
+                    ),
+                })
+                .collect();
+            let idt = if *id > 0x7FF {
+                format!("{id:08X}")
+            } else {
+                format!("{id:03X}")
+            };
+            println!("  {idt:>8}  {}: {}", m.name, shown.join(", "));
+        }
+        if named == 0 {
+            println!("  (none of the IDs seen is in it)");
+        }
     }
     if !an.settings.is_empty() {
         println!("\nSettings another tool changed (add them to the vehicle's profile, then find out what each one is):\n");

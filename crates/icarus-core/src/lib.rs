@@ -3,6 +3,7 @@
 
 pub mod a2l;
 pub mod checksum;
+pub mod dbc;
 pub mod def;
 pub mod diag;
 pub mod edit;

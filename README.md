@@ -152,6 +152,11 @@ or the Bus page: every ID with its rate and last bytes, the bytes that just chan
 watch which byte follows), and diagnostic messages between a tool and the modules put in words. Watching only: nothing
 is sent onto the bus. What another tool does while Icarus watches is learned (next section).
 
+**A CAN database names the bytes.** `--dbc FILE` reads a `.dbc` (a vehicle's from opendbc or a maker's; the file is yours,
+never part of Icarus) and, after the ID table, shows each named ID's signals in its last frame, in their units and with
+their named values ("DriverDoor open"): Intel and Motorola byte order, signed values, multiplexed signals, 29-bit IDs and
+value tables are read; floating-point signals and lines that do not read are listed as left out.
+
 **One device listens while another talks.** In Settings (the gear) each device gets a role: Talk, or Listen only (it is
 never sent a request: Icarus refuses to talk through it, and sets it up without even the protocol search). On the Bus page,
 "Listen with another device" watches through a listening device (the USB cable on a Y-splitter, say) while the connected

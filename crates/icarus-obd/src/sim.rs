@@ -2021,4 +2021,60 @@ mod monitor_tests {
     fn elm_bus() -> crate::elm::Protocol {
         crate::elm::Protocol::Can11At500
     }
+
+    /// ICA-6: a small DBC written for this test decodes the simulated bus: engine speed from 2C4 (Motorola), the wheel
+    /// message's counter from 0B4 (Intel), and the driver's door from 610 with its value table, both ways round.
+    #[test]
+    fn a_dbc_decodes_the_simulated_bus() {
+        let dbc = icarus_core::dbc::parse(
+            "BO_ 708 Engine: 8 ECM\n SG_ EngineSpeed : 7|16@0+ (1,0) [0|8000] \"rpm\" Vector__XXX\n\
+             BO_ 180 Wheels: 8 ABS\n SG_ Counter : 56|8@1+ (1,0) [0|255] \"\" Vector__XXX\n\
+             BO_ 1552 Body: 4 BCM\n SG_ DriverDoor : 19|1@1+ (1,0) [0|1] \"\" Vector__XXX\n\
+             VAL_ 1552 DriverDoor 0 \"closed\" 1 \"open\" ;\n",
+        );
+        assert!(dbc.skipped.is_empty(), "{:?}", dbc.skipped);
+        let mut elm = Elm::connect(Box::new(SimCar::new())).unwrap();
+        let start = std::time::Instant::now();
+        let (mut rpm, mut counters, mut doors) = (
+            Vec::new(),
+            std::collections::BTreeSet::new(),
+            std::collections::BTreeSet::new(),
+        );
+        let mut frames = 0;
+        elm.monitor(|line| {
+            if let Some(f) = parse_line(line, elm_bus(), start.elapsed().as_secs_f64()) {
+                frames += 1;
+                if let Some((m, values)) = dbc.decode(f.id, f.ext, &f.data) {
+                    for v in values {
+                        match (m.name.as_str(), v.signal.as_str()) {
+                            ("Engine", "EngineSpeed") => rpm.push(v.value),
+                            ("Wheels", "Counter") => {
+                                counters.insert(v.raw);
+                            }
+                            ("Body", "DriverDoor") => {
+                                doors.insert(v.label.unwrap_or_default());
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            frames < 3000
+        })
+        .unwrap();
+        assert!(
+            !rpm.is_empty() && rpm.iter().all(|r| (750.0..=830.0).contains(r)),
+            "idle around 790 rpm: {rpm:?}"
+        );
+        assert!(
+            counters.len() > 100,
+            "the counter counts: {}",
+            counters.len()
+        );
+        assert_eq!(
+            doors,
+            ["closed".to_string(), "open".to_string()].into(),
+            "the door switch, both ways"
+        );
+    }
 }
