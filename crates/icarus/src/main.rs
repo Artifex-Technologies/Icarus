@@ -24,10 +24,11 @@ const HELP: &str = "icarus: vehicle tuning, learning and diagnostics
 Files (nothing is sent to a vehicle; DEF is a TunerPro .xdf or an ASAM .a2l definition):
   icarus def DEF [--find TEXT]               what a definition describes (with --find: the matching maps)
   icarus show IMAGE.bin DEF NAME             one map or value from an image, in real units
-  icarus set IMAGE.bin DEF NAME VALUE [--row R --col C] [--out NEW.bin] [--checksums FILE]
+  icarus set IMAGE.bin DEF NAME VALUE [--row R --col C] [--out NEW.bin | --version NAME [--note TEXT]] [--checksums FILE]
                                              change one value, table cell (from 0) or switch (on/off) and save a NEW file
                                              (never over one), its checksums corrected where they are known
-                                             (<definition>.checksums.toml beside the definition, or --checksums)
+                                             (<definition>.checksums.toml beside the definition, or --checksums); with
+                                             --version the change is kept as a named version of the image instead
   icarus checksums IMAGE.bin CHECKSUMS.toml  whether an image's checksums are right
   icarus diff ORIGINAL.bin TUNED.bin|VERSION.version.toml [--def DEF]
                                              what a tune (or a version) changed: byte ranges, and with a definition each
@@ -38,6 +39,9 @@ Files (nothing is sent to a vehicle; DEF is a TunerPro .xdf or an ASAM .a2l defi
   icarus version list ORIGINAL.bin           \"stock\" (the original) and the versions kept for it
   icarus version image ORIGINAL.bin VERSION.version.toml [--out NEW.bin] [--def DEF | --checksums FILE]
                                              a version's full image as a NEW file, its checksums corrected where known
+  icarus version rename ORIGINAL.bin VERSION.version.toml NEW_NAME
+                                             give a version another name (never over another version)
+  icarus version delete VERSION.version.toml remove a version's file (stock, the original, is never one)
 
 Vehicle, through an OBD adapter (read-only: nothing is cleared or written):
   icarus obd info  --adapter A               adapter, protocol, VIN, modules, calibration IDs, check-engine light, monitors
@@ -472,10 +476,13 @@ fn load_checksums(
 }
 
 fn cmd_set(a: &[String]) -> Result<(), String> {
-    let args = parse_args(a, &["row", "col", "out", "checksums"])?;
+    let args = parse_args(a, &["row", "col", "out", "checksums", "version", "note"])?;
     let [image, defp, name, value] = args.pos.as_slice() else {
-        return Err("usage: icarus set IMAGE.bin DEF.xdf|.a2l NAME VALUE [--row R --col C] [--out NEW.bin] [--checksums FILE]".into());
+        return Err("usage: icarus set IMAGE.bin DEF.xdf|.a2l NAME VALUE [--row R --col C] [--out NEW.bin | --version NAME [--note TEXT]] [--checksums FILE]".into());
     };
+    if args.opt("version").is_some() && args.opt("out").is_some() {
+        return Err("--version keeps the change as a version (stock stays as it is); --out writes an image: one or the other".into());
+    }
     let def = load_def(defp)?;
     let mut rom = Rom::new(load_image(image, Some(&def))?);
     let specs = load_checksums(defp, args.opt("checksums"), rom.len())?;
@@ -527,6 +534,23 @@ fn cmd_set(a: &[String]) -> Result<(), String> {
                 );
             }
         }
+    }
+    // ICA-58: the change kept as a version of the image (a small file of what changed against stock), not as an image
+    if let Some(vname) = args.opt("version") {
+        let (p, v) = icarus_core::version::save_edits(
+            &rom,
+            Some(&def),
+            std::path::Path::new(image),
+            vname,
+            args.opt("note").unwrap_or(""),
+        )?;
+        println!(
+            "Kept version \"{}\": {} byte(s) changed against stock, in {}",
+            v.name,
+            v.changed_bytes(),
+            p.display()
+        );
+        return Ok(());
     }
     let out = args
         .opt("out")
@@ -773,7 +797,17 @@ fn cmd_version(a: &[String]) -> Result<(), String> {
             println!("{}", saved.summary());
             Ok(())
         }
-        _ => Err("usage: icarus version new ORIGINAL.bin TUNED.bin NAME [--def DEF] [--note TEXT]\n       icarus version list ORIGINAL.bin\n       icarus version image ORIGINAL.bin VERSION.version.toml [--out NEW.bin] [--def DEF | --checksums FILE]".into()),
+        (Some("rename"), [orig, vpath, name]) => {
+            let p = version::rename(Path::new(vpath), Path::new(orig), name)?;
+            println!("Renamed to \"{}\": {}", name.trim(), p.display());
+            Ok(())
+        }
+        (Some("delete"), [vpath]) => {
+            let v = version::delete(Path::new(vpath))?;
+            println!("Deleted version \"{}\" ({vpath}); stock and the other versions stay", v.name);
+            Ok(())
+        }
+        _ => Err("usage: icarus version new ORIGINAL.bin TUNED.bin NAME [--def DEF] [--note TEXT]\n       icarus version list ORIGINAL.bin\n       icarus version image ORIGINAL.bin VERSION.version.toml [--out NEW.bin] [--def DEF | --checksums FILE]\n       icarus version rename ORIGINAL.bin VERSION.version.toml NEW_NAME\n       icarus version delete VERSION.version.toml".into()),
     }
 }
 
@@ -2693,6 +2727,84 @@ mod tests {
     </XDFAXIS>
   </XDFTABLE>
 </XDFFORMAT>"#;
+
+    /// ICA-58: `icarus set ... --version NAME` keeps the change as a version (no image written), refused with --out; `icarus
+    /// version rename` and `delete` then act on that file only.
+    #[test]
+    fn set_keeps_a_version_and_version_renames_and_deletes_it() {
+        let dir =
+            std::env::temp_dir().join(format!("icarus-cli-setversion-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let image = dir.join("stock.bin");
+        let mut stock = vec![0u8; 0x20];
+        stock[0x10..0x14].copy_from_slice(&[20, 30, 40, 50]);
+        std::fs::write(&image, &stock).unwrap();
+        let defp = dir.join("test.xdf");
+        std::fs::write(&defp, DEF).unwrap();
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let (img, d) = (image.to_str().unwrap(), defp.to_str().unwrap());
+        assert!(cmd_set(&s(&[
+            img,
+            d,
+            "Spark",
+            "21",
+            "--row",
+            "0",
+            "--col",
+            "1",
+            "--version",
+            "Tow",
+            "--out",
+            "x.bin"
+        ]))
+        .unwrap_err()
+        .contains("one or the other"));
+        cmd_set(&s(&[
+            img,
+            d,
+            "Spark",
+            "21",
+            "--row",
+            "0",
+            "--col",
+            "1",
+            "--version",
+            "Tow",
+            "--note",
+            "towing",
+        ]))
+        .unwrap();
+        let vs = icarus_core::version::list(&image, &stock);
+        assert_eq!(vs.len(), 1);
+        let (p, v) = &vs[0];
+        assert_eq!(
+            (v.name.as_str(), v.note.as_str(), v.changes.len()),
+            ("Tow", "towing", 1)
+        );
+        assert_eq!(
+            (v.changes[0].offset, v.changes[0].now.clone()),
+            (0x11, vec![42])
+        );
+        assert_eq!(std::fs::read(&image).unwrap(), stock, "stock untouched");
+        let files: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".bin"))
+            .collect();
+        assert_eq!(files, ["stock.bin"], "no image written");
+        cmd_version(&s(&["rename", img, p.to_str().unwrap(), "Towing"])).unwrap();
+        let vs = icarus_core::version::list(&image, &stock);
+        assert_eq!(vs[0].1.name, "Towing");
+        assert!(!p.exists());
+        cmd_version(&s(&["delete", vs[0].0.to_str().unwrap()])).unwrap();
+        assert!(icarus_core::version::list(&image, &stock).is_empty() && image.exists());
+        assert!(cmd_version(&s(&["delete", img]))
+            .unwrap_err()
+            .contains("not a version file"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn diff_shows_what_a_saved_version_changes() {

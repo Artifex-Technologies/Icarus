@@ -317,6 +317,37 @@ pub fn save(v: &Version, image: &Path) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+/// Gives the version kept at `path` (a version of `image`) the name `name` (ICA-58): it is written under the new name, never
+/// over another file, and only then is the old file removed (if that fails, the new one is taken away again). The new path.
+pub fn rename(path: &Path, image: &Path, name: &str) -> Result<PathBuf, String> {
+    if !is_version_file(path) {
+        return Err(format!("{} is not a version file", path.display()));
+    }
+    let mut v = load(path)?;
+    let name = checked_name(name)?;
+    if v.name == name {
+        return Err(format!("it is called \"{name}\" already"));
+    }
+    v.name = name;
+    let new = save(&v, image)?;
+    if let Err(e) = std::fs::remove_file(path) {
+        let _ = std::fs::remove_file(&new);
+        return Err(format!("{}: {e}", path.display()));
+    }
+    Ok(new)
+}
+
+/// Removes the version kept at `path` (ICA-58), and gives back what it was. Only a version file: the original image ("stock")
+/// is never one, so it can never go this way.
+pub fn delete(path: &Path) -> Result<Version, String> {
+    if !is_version_file(path) {
+        return Err(format!("{} is not a version file", path.display()));
+    }
+    let v = load(path)?;
+    std::fs::remove_file(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(v)
+}
+
 /// The Maps page's "Save as version": the edits in `rom` (read from `image`) kept as version `name`, named by `def`.
 pub fn save_edits(
     rom: &Rom,
@@ -400,6 +431,61 @@ mod tests {
         assert!(v.apply(&original[..32]).unwrap_err().contains("0x40 bytes"));
         assert!(Version::between("a/b", "", "", &original, &edited, None).is_err());
         assert!(Version::parse(&text.replace("was = \"0304\"", "was = \"03\"")).is_err());
+    }
+
+    /// ICA-58: a version renamed keeps its changes under the new name, and the old file is gone; a name in use, the same
+    /// name, an empty one, and a file that is not a version are refused. Deleting removes only a version file.
+    #[test]
+    fn a_version_is_renamed_and_deleted_and_stock_never() {
+        let d = tmp("rename");
+        let image = d.join("stock.bin");
+        let original = vec![1u8; 32];
+        std::fs::write(&image, &original).unwrap();
+        let mut edited = original.clone();
+        edited[2] = 5;
+        let a = save(
+            &Version::between("Cold", "n", "stock.bin", &original, &edited, None).unwrap(),
+            &image,
+        )
+        .unwrap();
+        edited[9] = 6;
+        let b = save(
+            &Version::between("Tow", "", "stock.bin", &original, &edited, None).unwrap(),
+            &image,
+        )
+        .unwrap();
+        let renamed = rename(&a, &image, "Cold start").unwrap();
+        assert!(!a.exists() && renamed.exists());
+        let v = load(&renamed).unwrap();
+        assert_eq!(
+            (v.name.as_str(), v.note.as_str(), v.changed_bytes()),
+            ("Cold start", "n", 1)
+        );
+        assert!(
+            rename(&renamed, &image, "Tow")
+                .unwrap_err()
+                .contains("exists already"),
+            "a name in use"
+        );
+        assert!(renamed.exists(), "nothing lost when refused");
+        assert!(rename(&renamed, &image, "Cold start")
+            .unwrap_err()
+            .contains("already"));
+        assert!(rename(&renamed, &image, "  ").is_err());
+        assert!(rename(&image, &image, "x")
+            .unwrap_err()
+            .contains("not a version file"));
+        let names: Vec<String> = list(&image, &original)
+            .into_iter()
+            .map(|(_, v)| v.name)
+            .collect();
+        assert_eq!(names, ["Cold start", "Tow"]);
+        // deleting: the version goes, stock and the other stay
+        assert_eq!(delete(&b).unwrap().name, "Tow");
+        assert!(!b.exists() && image.exists() && renamed.exists());
+        assert!(delete(&image).unwrap_err().contains("not a version file"));
+        assert!(delete(&b).is_err(), "gone already");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

@@ -373,7 +373,9 @@ change.
 small file (`<image> - <name>.version.toml`, the changed bytes with the original's bytes beside them, the original named
 by its size and CRC-32) in the same folder as edits, never over another file. On the Maps page, "Keep the edits as a
 version" saves one, the Versions row shows what each changes against stock (the changed maps listed, their cells
-outlined), and "Edit from it" goes on editing from a version. A version only applies to the image it was made from, and
+outlined), "Edit from it" goes on editing from a version, "Rename" gives the version shown the name typed in the name box
+(never over another version), and "Delete" removes its file after asking (stock and the other versions stay). `icarus set
+... --version NAME` keeps a single change as a version instead of writing an image. A version only applies to the image it was made from, and
 makes the full image again whenever asked; its checksums are corrected then, as for any edit.
 
 ```sh
@@ -381,6 +383,9 @@ icarus version new STOCK.bin TUNED.bin "Cold start" --def DEF   # keep what a tu
 icarus version list STOCK.bin                                     # stock and its versions
 icarus diff STOCK.bin "STOCK - Cold start.version.toml" --def DEF # what the version changes, map by map
 icarus version image STOCK.bin "STOCK - Cold start.version.toml" --def DEF   # its full image, as a new file
+icarus set STOCK.bin DEF "Spark" 21 --row 0 --col 1 --version "Tow"           # one change, kept as a version
+icarus version rename STOCK.bin "STOCK - Tow.version.toml" "Towing"            # another name for it
+icarus version delete "STOCK - Towing.version.toml"                            # its file removed; stock stays
 ```
 
 Formulas that use other values (a TunerPro `VAR` linked to another element, or to a raw number at an address) are worked

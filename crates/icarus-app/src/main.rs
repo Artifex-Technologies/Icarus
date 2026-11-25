@@ -120,6 +120,44 @@ struct Maps {
     version_name: String,
     version_note: String,
     version_msg: String,
+    /// The version whose deletion is asked and not yet confirmed (ICA-58).
+    version_delete: Option<usize>,
+}
+
+impl Maps {
+    /// Nothing open yet.
+    fn empty() -> Maps {
+        Maps {
+            def_path: String::new(),
+            bin_path: String::new(),
+            cmp_path: String::new(),
+            def: None,
+            rom: None,
+            cmp: None,
+            changed: Vec::new(),
+            note: String::new(),
+            search: String::new(),
+            only_changed: false,
+            selected: None,
+            cell: None,
+            value_text: String::new(),
+            specs: Vec::new(),
+            specs_note: String::new(),
+            save_path: String::new(),
+            save_note: String::new(),
+            look: Look {
+                view: View::Cells,
+                yaw: 0.6,
+                pitch: 0.9,
+            },
+            versions: Vec::new(),
+            version_shown: None,
+            version_name: String::new(),
+            version_note: String::new(),
+            version_msg: String::new(),
+            version_delete: None,
+        }
+    }
 }
 
 /// How a table is shown: its cells, a 2D graph or a 3D surface (surface.rs), and the 3D view's turn and tilt (radians).
@@ -155,6 +193,10 @@ enum VersionAct {
     Edit(usize),
     /// Keep the edits as a new version.
     Save,
+    /// Give version i the name typed in the name box (ICA-58).
+    Rename(usize),
+    /// Remove version i's file, once confirmed (ICA-58).
+    Delete(usize),
 }
 
 /// Per element: whether its values differ between images `a` and `b` (the same size).
@@ -552,35 +594,7 @@ impl App {
             history: HashMap::new(),
             recorder: None,
             logs: logs::Logs::default(),
-            maps: Maps {
-                def_path: String::new(),
-                bin_path: String::new(),
-                cmp_path: String::new(),
-                def: None,
-                rom: None,
-                cmp: None,
-                changed: Vec::new(),
-                note: String::new(),
-                search: String::new(),
-                only_changed: false,
-                selected: None,
-                cell: None,
-                value_text: String::new(),
-                specs: Vec::new(),
-                specs_note: String::new(),
-                save_path: String::new(),
-                save_note: String::new(),
-                look: Look {
-                    view: View::Cells,
-                    yaw: 0.6,
-                    pitch: 0.9,
-                },
-                versions: Vec::new(),
-                version_shown: None,
-                version_name: String::new(),
-                version_note: String::new(),
-                version_msg: String::new(),
-            },
+            maps: Maps::empty(),
             start,
         };
         if let Some(v) = app.start.view {
@@ -3621,6 +3635,7 @@ impl App {
             version_name,
             version_note,
             version_msg,
+            version_delete,
             ..
         } = &mut self.maps;
         let (Some(def), Some(rom_mut)) = (def.as_ref(), rom.as_mut()) else {
@@ -3706,8 +3721,46 @@ impl App {
                 {
                     vact = Some(VersionAct::Edit(k));
                 }
+                let new_name = version_name.trim();
+                let label = if new_name.is_empty() {
+                    "Rename".to_string()
+                } else {
+                    format!("Rename to \"{new_name}\"")
+                };
+                if ui
+                    .add_enabled(!new_name.is_empty(), egui::Button::new(label))
+                    .on_hover_text("Type the new name in the name box below, then rename; never over another version")
+                    .clicked()
+                {
+                    vact = Some(VersionAct::Rename(k));
+                }
+                if ui
+                    .button("Delete")
+                    .on_hover_text("Remove this version's file (asks first); stock and the other versions stay")
+                    .clicked()
+                {
+                    *version_delete = Some(k);
+                }
             }
         });
+        // deleting a version, once confirmed
+        if let Some(k) = *version_delete {
+            match versions.get(k).filter(|_| *version_shown == Some(k)) {
+                Some((_, v)) => {
+                    let name = v.name.clone();
+                    ui.horizontal(|ui| {
+                        ui.label(format!("Delete version \"{name}\"? Its file goes; stock and the other versions stay."));
+                        if ui.button("Delete it").clicked() {
+                            vact = Some(VersionAct::Delete(k));
+                        }
+                        if ui.button("Keep it").clicked() {
+                            *version_delete = None;
+                        }
+                    });
+                }
+                None => *version_delete = None,
+            }
+        }
         ui.horizontal(|ui| {
             ui.label("Keep the edits as a version");
             ui.add(egui::TextEdit::singleline(version_name).hint_text("name").desired_width(160.0));
@@ -3902,6 +3955,7 @@ fn version_act(m: &mut Maps, a: VersionAct) -> Result<String, String> {
         version_shown,
         version_name,
         version_note,
+        version_delete,
         ..
     } = m;
     let (Some(def), Some(rom)) = (def.as_ref(), rom.as_mut()) else {
@@ -3951,6 +4005,34 @@ fn version_act(m: &mut Maps, a: VersionAct) -> Result<String, String> {
             to_stock(cmp, cmp_path);
             Ok(format!(
                 "Editing from version \"{name}\": its changes are the edits now (stock stays as it is); keep them as a new version or save an image"
+            ))
+        }
+        VersionAct::Rename(k) => {
+            let (p, v) = versions.get(k).ok_or("that version is no longer there")?;
+            let old = v.name.clone();
+            let new = icarus_core::version::rename(p, &image, version_name)?;
+            *versions = icarus_core::version::list(&image, rom.original());
+            // still shown: the same changes under the new name
+            *version_shown = versions.iter().position(|(q, _)| *q == new);
+            *cmp_path = new.display().to_string();
+            version_name.clear();
+            Ok(format!(
+                "Renamed \"{old}\" to \"{}\"",
+                version_shown
+                    .and_then(|i| versions.get(i))
+                    .map(|(_, v)| v.name.as_str())
+                    .unwrap_or("")
+            ))
+        }
+        VersionAct::Delete(k) => {
+            *version_delete = None;
+            let (p, _) = versions.get(k).ok_or("that version is no longer there")?;
+            let v = icarus_core::version::delete(p)?;
+            *versions = icarus_core::version::list(&image, rom.original());
+            to_stock(cmp, cmp_path);
+            Ok(format!(
+                "Deleted version \"{}\"; stock and the other versions stay",
+                v.name
             ))
         }
         VersionAct::Save => {
@@ -5158,5 +5240,86 @@ mod level_pages {
         assert!(shown(all).contains(&"Maps") && !shown(adv).contains(&"Maps"));
         // the gear's page is there at every level
         assert!(basic.allows(need(Page::App)));
+    }
+}
+
+#[cfg(test)]
+mod versions_row {
+    use super::*;
+
+    const DEF: &str = r#"<XDFFORMAT version="1.70">
+  <XDFHEADER><deftitle>Test</deftitle></XDFHEADER>
+  <XDFTABLE uniqueid="0x1">
+    <title>Spark</title>
+    <XDFAXIS id="x" uniqueid="0x0"><indexcount>2</indexcount></XDFAXIS>
+    <XDFAXIS id="y" uniqueid="0x0"><indexcount>2</indexcount></XDFAXIS>
+    <XDFAXIS id="z">
+      <EMBEDDEDDATA mmedaddress="0x10" mmedelementsizebits="8" mmedrowcount="2" mmedcolcount="2" />
+      <units>deg</units>
+      <decimalpl>1</decimalpl>
+      <MATH equation="X/2"><VAR id="X" /></MATH>
+    </XDFAXIS>
+  </XDFTABLE>
+</XDFFORMAT>"#;
+
+    /// ICA-58: on the Maps page a version is kept, shown, renamed (still shown, under the new name) and deleted (back to
+    /// stock); a rename with no name typed is refused and changes nothing; stock is never touched.
+    #[test]
+    fn a_version_is_renamed_and_deleted_from_the_maps_page() {
+        let dir = std::env::temp_dir().join(format!("icarus-app-versions-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let image = dir.join("stock.bin");
+        let mut stock = vec![0u8; 0x20];
+        stock[0x10..0x14].copy_from_slice(&[20, 30, 40, 50]);
+        std::fs::write(&image, &stock).unwrap();
+        let def = icarus_core::def::parse_any(DEF.as_bytes())
+            .unwrap()
+            .definition;
+        let mut rom = Rom::new(stock.clone());
+        let icarus_core::def::Kind::Table(t) = &def.element("Spark").unwrap().kind else {
+            panic!("a table")
+        };
+        def.set(&mut rom, &t.z, 0, 1, 21.0).unwrap();
+        let mut m = Maps::empty();
+        m.bin_path = image.display().to_string();
+        m.changed = vec![false; def.elements.len()];
+        m.def = Some(def);
+        m.rom = Some(rom);
+        m.version_name = "Tow".into();
+        assert!(version_act(&mut m, VersionAct::Save)
+            .unwrap()
+            .contains("Kept version \"Tow\""));
+        version_act(&mut m, VersionAct::Show(0)).unwrap();
+        assert_eq!(m.version_shown, Some(0));
+        m.version_name = "Towing".into();
+        let said = version_act(&mut m, VersionAct::Rename(0)).unwrap();
+        assert_eq!(said, "Renamed \"Tow\" to \"Towing\"");
+        assert_eq!(
+            (m.version_shown, m.versions[0].1.name.as_str()),
+            (Some(0), "Towing")
+        );
+        assert_eq!(
+            m.cmp_path,
+            m.versions[0].0.display().to_string(),
+            "the renamed file is the one shown"
+        );
+        assert!(m.version_name.is_empty());
+        assert!(
+            version_act(&mut m, VersionAct::Rename(0)).is_err(),
+            "no name typed"
+        );
+        assert_eq!(m.versions[0].1.name, "Towing");
+        m.version_delete = Some(0);
+        let said = version_act(&mut m, VersionAct::Delete(0)).unwrap();
+        assert!(said.starts_with("Deleted version \"Towing\""), "{said}");
+        assert!(
+            m.versions.is_empty()
+                && m.version_shown.is_none()
+                && m.version_delete.is_none()
+                && m.cmp.is_none()
+        );
+        assert_eq!(std::fs::read(&image).unwrap(), stock, "stock untouched");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
