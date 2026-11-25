@@ -197,6 +197,93 @@ fn hint(c: &str) -> Option<&'static str> {
     })
 }
 
+/// How soon a code needs attention, said for someone who is not a mechanic (ICA-75, Basic's guided scan): a starting point
+/// in plain words, never a diagnosis. Ordered most urgent first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Urgency {
+    Serious,
+    Soon,
+    CanWait,
+}
+
+impl Urgency {
+    pub fn label(self) -> &'static str {
+        match self {
+            Urgency::Serious => "Serious: have it seen to now",
+            Urgency::Soon => "Check soon",
+            Urgency::CanWait => "Can wait",
+        }
+    }
+}
+
+/// How soon `i` needs attention, and why, in a sentence.
+pub fn urgency(i: &CodeInfo) -> (Urgency, &'static str) {
+    let c = i.code.as_str();
+    let within = |a: &str, b: &str| c >= a && c <= b;
+    if within("P0300", "P0312") {
+        return (Urgency::Serious, "Misfires overheat and can ruin the catalytic converter. If the check-engine lamp flashes, stop driving.");
+    }
+    if matches!(c, "P0217" | "P0218") {
+        return (Urgency::Serious, "Overheating: stop and let it cool, then check the coolant (or the transmission fluid).");
+    }
+    if within("P0520", "P0524") {
+        return (Urgency::Serious, "Oil pressure: check the oil level before driving on. Low oil pressure can wreck an engine.");
+    }
+    if c.starts_with("B00") {
+        return (
+            Urgency::Serious,
+            "The airbags or seat-belt tensioners may not work in a crash. Have them checked soon.",
+        );
+    }
+    if c.starts_with('C') {
+        return (Urgency::Soon, "Brakes, stability control or steering assistance may be switched off. Normal braking and steering still work.");
+    }
+    if c.starts_with('U') {
+        return (Urgency::Soon, "A module is not talking to the others: often a fuse, a loose connector or a weak battery.");
+    }
+    if i.detail.as_ref().is_some_and(|d| d.limp) {
+        return (
+            Urgency::Serious,
+            "The engine or transmission may limit its power to protect itself (limp mode).",
+        );
+    }
+    if within("P0420", "P0439") || within("P0440", "P0457") {
+        return (
+            Urgency::CanWait,
+            "Mostly an emissions matter: safe to drive. Fix it before an emissions inspection.",
+        );
+    }
+    if c == "P0128" {
+        return (
+            Urgency::CanWait,
+            "The engine warms up slowly: worse fuel economy and heating, not urgent.",
+        );
+    }
+    match &i.detail {
+        Some(d) if d.mil => (
+            Urgency::Soon,
+            "It lights the check-engine lamp: have it checked soon.",
+        ),
+        _ => (
+            Urgency::CanWait,
+            "Not urgent on its own: check it when you can.",
+        ),
+    }
+}
+
+/// What to check first for `i`: Icarus's own hint, else OBDex's most likely cause (None when neither knows).
+pub fn first_check(i: &CodeInfo) -> Option<String> {
+    if let Some(h) = i.hint {
+        return Some(h.to_string());
+    }
+    let d = i.detail.as_ref()?;
+    d.causes
+        .iter()
+        .find(|(l, _)| l == "high")
+        .or_else(|| d.causes.first())
+        .map(|(_, cause)| format!("Most often: {cause}"))
+}
+
 /// Parts most often involved, most likely first: what to look up when shopping (a starting point, not a diagnosis; test
 /// before buying).
 pub fn parts(code: &str) -> &'static [&'static str] {
@@ -664,6 +751,30 @@ const GENERIC: &[(&str, &str)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn how_serious_a_code_is_in_plain_words() {
+        let u = |c: &str| urgency(&explain(c, None).unwrap()).0;
+        assert_eq!(u("P0301"), Urgency::Serious, "a misfire");
+        assert_eq!(u("P0217"), Urgency::Serious, "overheating");
+        assert_eq!(u("P0522"), Urgency::Serious, "oil pressure");
+        assert_eq!(u("B0001"), Urgency::Serious, "an airbag");
+        assert_eq!(u("C0035"), Urgency::Soon, "a wheel speed sensor: ABS off");
+        assert_eq!(u("U0100"), Urgency::Soon, "lost communication");
+        assert_eq!(u("P0420"), Urgency::CanWait, "the catalyst");
+        assert_eq!(u("P0456"), Urgency::CanWait, "a small evaporative leak");
+        assert!(
+            Urgency::Serious < Urgency::Soon && Urgency::Soon < Urgency::CanWait,
+            "most urgent first"
+        );
+        // what to check first: Icarus's own hint where it has one
+        assert!(first_check(&explain("P0171", None).unwrap())
+            .unwrap()
+            .contains("vacuum leak"));
+        assert!(first_check(&explain("P0301", None).unwrap())
+            .unwrap()
+            .contains("coil"));
+    }
 
     #[test]
     fn standard_codes_and_families() {

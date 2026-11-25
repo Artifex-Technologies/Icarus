@@ -406,6 +406,8 @@ struct App {
     profile_choice: String,
     sweep: bool,
     scanning: bool,
+    /// Basic's guided scan (ICA-75): where it is.
+    guided: Guided,
     modules: Vec<ModuleView>,
     scan_note: String,
     unreachable: Vec<String>,
@@ -537,6 +539,7 @@ impl App {
             profile_choice: String::new(),
             sweep: false,
             scanning: false,
+            guided: Guided::Off,
             modules: Vec::new(),
             scan_note: String::new(),
             unreachable: Vec::new(),
@@ -821,6 +824,15 @@ impl App {
                     self.auto = self.adapter.trim() != "sim";
                     self.error = None;
                     self.status = "Connected.".into();
+                    if self.guided == Guided::Connecting {
+                        // the guided scan goes on: every module's codes
+                        self.guided = Guided::Scanning;
+                        self.scanning = true;
+                        let _ = self.tx.send(Cmd::Scan {
+                            profile: None,
+                            sweep: false,
+                        });
+                    }
                     self.chosen.retain(|p| info.live.contains(p));
                     // a name to start from: the saved one, else the model year and the make from the VIN
                     self.name_edit = info.vehicle.as_ref().map(|v| v.name()).unwrap_or_else(|| {
@@ -891,6 +903,9 @@ impl App {
                     if self.link == Link::Busy {
                         self.link = Link::Off;
                     }
+                    if matches!(self.guided, Guided::Connecting | Guided::Scanning) {
+                        self.guided = Guided::Off;
+                    }
                     self.scanning = false;
                     self.live_on = false;
                     if self.auto && !self.user_off {
@@ -919,6 +934,9 @@ impl App {
                 Event::Module(m) => self.modules.push(m),
                 Event::ScanDone { found, unreachable } => {
                     self.scanning = false;
+                    if self.guided == Guided::Scanning {
+                        self.guided = Guided::Done;
+                    }
                     self.unreachable = unreachable;
                     self.status = format!("Scan done: {found} module(s) answered.");
                 }
@@ -1010,6 +1028,125 @@ impl App {
         }
     }
 
+    /// Basic's guided scan (ICA-75): one button from connecting to every module's codes, each in plain words with how soon
+    /// it needs attention and what to check first, most urgent first.
+    fn guided_scan(&mut self, ui: &mut egui::Ui, pal: &theme::Palette) {
+        let busy = matches!(self.guided, Guided::Connecting | Guided::Scanning) || self.scanning;
+        ui.horizontal(|ui| {
+            let label = if self.guided == Guided::Done {
+                "Scan again"
+            } else {
+                "Scan my vehicle"
+            };
+            if ui
+                .add_enabled(
+                    !busy,
+                    egui::Button::new(RichText::new(label).size(16.0).strong()),
+                )
+                .clicked()
+            {
+                self.error = None;
+                if self.link == Link::On {
+                    self.guided = Guided::Scanning;
+                    self.scanning = true;
+                    self.live_on = false;
+                    let _ = self.tx.send(Cmd::Scan {
+                        profile: None,
+                        sweep: false,
+                    });
+                } else {
+                    self.guided = Guided::Connecting;
+                    self.link = Link::Busy;
+                    self.user_off = false;
+                    self.auto = self.adapter.trim() != "sim";
+                    self.last_try = std::time::Instant::now();
+                    let _ = self.tx.send(Cmd::Connect(self.adapter.trim().to_string()));
+                }
+            }
+            if busy {
+                ui.spinner();
+                ui.label(match self.guided {
+                    Guided::Connecting => "Connecting to the adapter...".to_string(),
+                    _ => format!(
+                        "Asking every module for its trouble codes... ({} answered so far)",
+                        self.modules.len()
+                    ),
+                });
+            }
+        });
+        if self.guided == Guided::Off {
+            ui.add(egui::Label::new(RichText::new("Plug the adapter into the OBD port (under the dashboard, driver's side), switch the ignition on (the engine can stay off), then press Scan my vehicle. Nothing is changed in the vehicle.").weak()).wrap());
+            return;
+        }
+        if self.guided != Guided::Done {
+            return;
+        }
+        // every code: the engine's OBD-II codes from connecting, and each module's own
+        let profile = self.info.as_ref().and_then(|i| i.profile.clone());
+        let mut found: Vec<(String, String)> = Vec::new();
+        for (_, module, codes) in self
+            .info
+            .as_ref()
+            .map(|i| i.codes.clone())
+            .unwrap_or_default()
+        {
+            for c in codes {
+                found.push((c, module.clone()));
+            }
+        }
+        for m in &self.modules {
+            if let Ok((_, dtcs)) = &m.dtcs {
+                for d in dtcs {
+                    found.push((d.code.clone(), m.addr.name.clone()));
+                }
+            }
+        }
+        let rows = guided_rows(&found, profile.as_ref());
+        ui.add_space(6.0);
+        if rows.is_empty() {
+            ui.label(
+                RichText::new(format!(
+                    "No trouble codes: none of the {} modules that answered has one stored.",
+                    self.modules.len()
+                ))
+                .color(pal.green)
+                .strong(),
+            );
+            return;
+        }
+        ui.label(
+            RichText::new(format!(
+                "{} trouble code{} in {} module{}, most urgent first:",
+                rows.len(),
+                if rows.len() == 1 { "" } else { "s" },
+                self.modules.len(),
+                if self.modules.len() == 1 { "" } else { "s" }
+            ))
+            .strong(),
+        );
+        let mut last: Option<dtc::Urgency> = None;
+        for (u, code, text, why, first, modules) in rows {
+            if last != Some(u) {
+                ui.add_space(8.0);
+                let color = match u {
+                    dtc::Urgency::Serious => pal.red,
+                    dtc::Urgency::Soon => pal.amber,
+                    dtc::Urgency::CanWait => pal.dim,
+                };
+                ui.label(RichText::new(u.label()).color(color).strong());
+                last = Some(u);
+            }
+            ui.label(RichText::new(format!("{code}  {text}")).strong());
+            ui.add(egui::Label::new(RichText::new(format!("{why} ({modules})")).weak()).wrap());
+            if let Some(f) = first {
+                ui.add(egui::Label::new(RichText::new(format!("First check: {f}"))).wrap());
+            }
+            ui.add_space(4.0);
+        }
+        ui.add_space(6.0);
+        ui.add(egui::Label::new(RichText::new("This is where to start, not a diagnosis. Each code has more on the Modules page (causes, parts, a web search); clearing codes is there too.").small().weak()).wrap());
+    }
+
     fn connect_row(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label("Adapter");
@@ -1049,8 +1186,9 @@ impl App {
     fn page_vehicle(&mut self, ui: &mut egui::Ui, pal: &theme::Palette) {
         self.connect_row(ui);
         ui.add_space(12.0);
+        card(ui, pal, "Trouble codes", |ui| self.guided_scan(ui, pal));
+        // not connected: the card above says how to start
         let Some(info) = &self.info else {
-            ui.label("Plug the adapter into the vehicle's OBD port (under the dashboard, driver's side), switch the ignition on (the engine can stay off), then connect.");
             return;
         };
         card(ui, pal, "Vehicle", |ui| {
@@ -4336,6 +4474,59 @@ fn card(ui: &mut egui::Ui, pal: &theme::Palette, title: &str, body: impl FnOnce(
     ui.add_space(8.0);
 }
 
+/// One line of the guided scan: how urgent, the code, what it means, why that urgency, what to check first, the modules.
+type GuidedRow = (
+    dtc::Urgency,
+    String,
+    String,
+    &'static str,
+    Option<String>,
+    String,
+);
+
+/// The guided scan's lines from (code, module) pairs: each code once with every module that has it, in plain words, most
+/// urgent first (then by code).
+fn guided_rows(found: &[(String, String)], profile: Option<&Profile>) -> Vec<GuidedRow> {
+    let mut codes: Vec<(String, Vec<String>)> = Vec::new();
+    for (c, m) in found {
+        match codes.iter_mut().find(|(x, _)| x == c) {
+            Some((_, ms)) if !ms.contains(m) => ms.push(m.clone()),
+            Some(_) => {}
+            None => codes.push((c.clone(), vec![m.clone()])),
+        }
+    }
+    let mut rows: Vec<GuidedRow> = codes
+        .iter()
+        .map(|(c, ms)| {
+            let info = dtc::explain(c, profile);
+            let (u, why) = info
+                .as_ref()
+                .map(dtc::urgency)
+                .unwrap_or((dtc::Urgency::Soon, "Check it soon."));
+            let text = info
+                .as_ref()
+                .ok()
+                .and_then(|i| i.text.clone())
+                .unwrap_or_else(|| {
+                    "a maker's own code (its meaning is in the maker's service information)".into()
+                });
+            let first = info.as_ref().ok().and_then(dtc::first_check);
+            (u, c.clone(), text, why, first, ms.join(", "))
+        })
+        .collect();
+    rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    rows
+}
+
+/// Basic's guided scan (ICA-75).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Guided {
+    Off,
+    Connecting,
+    Scanning,
+    Done,
+}
+
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         theme::apply_accessibility(ui.ctx());
@@ -4743,6 +4934,39 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| Ok(Box::new(App::new(&cc.egui_ctx, start)))),
     )
+}
+
+#[cfg(test)]
+mod guided {
+    #[test]
+    fn the_guided_scan_lists_each_code_once_most_urgent_first() {
+        let found: Vec<(String, String)> = [
+            ("P0456", "engine"),
+            ("U0100", "body"),
+            ("P0301", "engine"),
+            ("U0100", "meter"),
+            ("U0100", "body"),
+        ]
+        .iter()
+        .map(|(c, m)| (c.to_string(), m.to_string()))
+        .collect();
+        let rows = super::guided_rows(&found, None);
+        let order: Vec<(&str, &str)> = rows.iter().map(|r| (r.1.as_str(), r.5.as_str())).collect();
+        assert_eq!(
+            order,
+            vec![
+                ("P0301", "engine"),
+                ("U0100", "body, meter"),
+                ("P0456", "engine")
+            ],
+            "serious, soon, can wait; once each"
+        );
+        assert!(
+            rows[0].4.as_deref().unwrap_or("").contains("coil"),
+            "what to check first"
+        );
+        assert!(super::guided_rows(&[], None).is_empty());
+    }
 }
 
 #[cfg(test)]
