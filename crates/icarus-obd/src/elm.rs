@@ -291,7 +291,13 @@ pub struct Elm {
     /// why) once, so a loop of broadcasts does not repeat it.
     unseen: Vec<String>,
     seen: std::collections::BTreeSet<(String, String)>,
+    /// The requests this adapter sent onto the bus lately (ICA-80: shown beside what a listening adapter saw): (when, the
+    /// request ID, the request's bytes), the last `SENT_KEEP`.
+    sent: std::collections::VecDeque<(Instant, u32, Vec<u8>)>,
 }
+
+/// How many sent requests an adapter keeps for `take_sent`.
+const SENT_KEEP: usize = 256;
 
 const LINE_ERRORS: [&str; 12] = [
     "CAN ERROR",
@@ -340,6 +346,11 @@ impl Elm {
         Ok(elm)
     }
 
+    /// The requests sent onto the bus since the last call (ICA-80): (when, request ID, bytes), oldest first.
+    pub fn take_sent(&mut self) -> Vec<(Instant, u32, Vec<u8>)> {
+        self.sent.drain(..).collect()
+    }
+
     /// Reset and setup: echo, line feeds and spaces as Icarus reads them, headers on, the protocol command `sp`; then the
     /// adapter's chip (STI) and the battery's voltage. Only the adapter is spoken to.
     fn setup(port: Box<dyn Port>, sp: &str) -> Result<Elm, ObdError> {
@@ -359,6 +370,7 @@ impl Elm {
             dropped: Vec::new(),
             unseen: Vec::new(),
             seen: Default::default(),
+            sent: Default::default(),
         };
         let reset = elm.command("ATZ", Duration::from_secs(4))?;
         elm.id = reset
@@ -396,6 +408,27 @@ impl Elm {
 
     pub fn command(&mut self, cmd: &str, timeout: Duration) -> Result<Vec<String>, ObdError> {
         self.drain_left_over()?;
+        // a request (hex bytes, not an AT or ST command) goes onto the bus: kept for take_sent
+        if !cmd.is_empty()
+            && cmd.len().is_multiple_of(2)
+            && cmd.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            let bytes: Vec<u8> = (0..cmd.len())
+                .step_by(2)
+                .filter_map(|i| u8::from_str_radix(&cmd[i..i + 2], 16).ok())
+                .collect();
+            let id = match self.target {
+                Some((tx, _)) => tx,
+                None if matches!(self.protocol, Protocol::Can29At500 | Protocol::Can29At250) => {
+                    0x18DB33F1
+                }
+                None => 0x7DF,
+            };
+            self.sent.push_back((Instant::now(), id, bytes));
+            if self.sent.len() > SENT_KEEP {
+                self.sent.pop_front();
+            }
+        }
         self.port.send(format!("{cmd}\r").as_bytes())?;
         let deadline = Instant::now() + timeout;
         let mut text = Vec::new();

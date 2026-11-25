@@ -158,14 +158,18 @@ impl Drop for Recorder {
 
 /// `drive-YYYY-MM-DD_HHMMSS.csv` from the local time.
 fn file_name() -> String {
-    let stamp = std::process::Command::new("date")
+    format!("drive-{}.csv", stamp())
+}
+
+/// Now, for a file's name: 2026-11-24_221500.
+pub fn stamp() -> String {
+    std::process::Command::new("date")
         .arg("+%Y-%m-%d_%H%M%S")
         .output()
         .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "now".into());
-    format!("drive-{stamp}.csv")
+        .unwrap_or_else(|| "now".into())
 }
 
 impl Recorder {

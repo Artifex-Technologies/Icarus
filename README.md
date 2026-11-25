@@ -152,6 +152,13 @@ or the Bus page: every ID with its rate and last bytes, the bytes that just chan
 watch which byte follows), and diagnostic messages between a tool and the modules put in words. Watching only: nothing
 is sent onto the bus. What another tool does while Icarus watches is learned (next section).
 
+**One device listens while another talks.** In Settings (the gear) each device gets a role: Talk, or Listen only (it is
+never sent a request: Icarus refuses to talk through it, and sets it up without even the protocol search). On the Bus page,
+"Listen with another device" watches through a listening device (the USB cable on a Y-splitter, say) while the connected
+one talks: what Icarus sent stands beside the requests the listener saw, and a request Icarus did not send is another device
+or program asking (the OBDLink app, VF Tuner). The capture is kept in the bus-watch format, for `icarus import buslog`. On
+the simulator, `sim:listen` is a second adapter on the same simulated bus as `sim`.
+
 SLCAN adapters (Lawicel CANUSB, a CANable with the slcan firmware, many cheap USB-CAN sticks) are watched without
 `slcand` or root: `--adapter slcan:/dev/ttyACM0[@baud][#bitrate]` (115200 baud and 500 kbit/s unless given; `#125k`
 for a medium-speed bus). Icarus speaks SLCAN on the serial port itself and opens the channel listen-only (`L`), so the

@@ -3,7 +3,9 @@
 //! bus, and maps from an image and a definition (with what a tune changed). Yggdrasil's look (yggdrasil-ui).
 
 mod autoconn;
+mod devices;
 mod levels;
+mod listen;
 mod logs;
 mod single;
 mod surface;
@@ -369,6 +371,20 @@ struct App {
     page: Page,
     /// The window's levels (levels.rs).
     levels: levels::Levels,
+    /// Which devices only listen (devices.rs, ICA-80), and a device listening now while another talks: what it heard
+    /// (the requests it saw) beside what the talking device sent.
+    roles: devices::Roles,
+    listener: Option<listen::Listener>,
+    listen_status: String,
+    listen_file: Option<std::path::PathBuf>,
+    listen_pick: usize,
+    listen_protocol: u8,
+    heard: VecDeque<icarus_obd::bus::Frame>,
+    heard_frames: u64,
+    sent_log: VecDeque<(f64, u32, Vec<u8>)>,
+    new_device: String,
+    /// Asks the window to draw again (for a listener's thread).
+    repaint: std::sync::Arc<dyn Fn() + Send + Sync>,
     /// Turning Tuning on waits for this question's yes.
     tuning_ask: bool,
     tx: Sender<Cmd>,
@@ -409,6 +425,9 @@ impl App {
         let (wtx, rx) = channel();
         let c = ctx.clone();
         std::thread::spawn(move || worker::run(wrx, wtx, move || c.request_repaint()));
+        let c2 = ctx.clone();
+        let repaint: std::sync::Arc<dyn Fn() + Send + Sync> =
+            std::sync::Arc::new(move || c2.request_repaint());
         // the adapter: the one named, the one that last worked, or a paired Bluetooth OBD adapter (autoconn.rs)
         let chosen = autoconn::choose_here(
             start
@@ -491,6 +510,17 @@ impl App {
                 .filter(|p| levels.allows(need(*p)))
                 .unwrap_or(Page::Vehicle),
             levels,
+            roles: devices::Roles::load(),
+            listener: None,
+            listen_status: String::new(),
+            listen_file: None,
+            listen_pick: 0,
+            listen_protocol: 6,
+            heard: VecDeque::new(),
+            heard_frames: 0,
+            sent_log: VecDeque::new(),
+            new_device: String::new(),
+            repaint,
             tuning_ask: false,
             tx,
             rx,
@@ -748,8 +778,39 @@ impl App {
     }
 
     fn events(&mut self) {
+        // the listening device's frames: the requests it saw are kept for the comparison
+        let mut ended = None;
+        if let Some(l) = &self.listener {
+            while let Ok(ev) = l.rx.try_recv() {
+                match ev {
+                    listen::Event::Status(s) => self.listen_status = s,
+                    listen::Event::Frames(fs) => {
+                        self.heard_frames += fs.len() as u64;
+                        for f in fs.into_iter().filter(listen::is_request) {
+                            self.heard.push_back(f);
+                            if self.heard.len() > 200 {
+                                self.heard.pop_front();
+                            }
+                        }
+                    }
+                    listen::Event::Ended(why) => ended = Some(why),
+                }
+            }
+        }
+        if let Some(why) = ended {
+            self.listen_status = format!("Listening ended: {why}.");
+            self.listener = None;
+        }
         while let Ok(ev) = self.rx.try_recv() {
             match ev {
+                Event::Sent(v) => {
+                    for x in v {
+                        self.sent_log.push_back(x);
+                        if self.sent_log.len() > 200 {
+                            self.sent_log.pop_front();
+                        }
+                    }
+                }
                 Event::Status(s) => self.status = s,
                 Event::Dropped(n) => self.dropped.push(n),
                 Event::Connected(info) => {
@@ -1970,6 +2031,10 @@ impl App {
             }
         });
         ui.label(RichText::new("Watching only: nothing is sent onto the bus. Press a pedal or a switch and see which byte follows (changed bytes light up). Diagnostic messages are put in words; actuator tests another tool runs, and settings it changes, are learned.").weak());
+        ui.add_space(8.0);
+        card(ui, pal, "Listen with another device", |ui| {
+            self.listen_body(ui, pal)
+        });
         let Some(b) = &self.bus else { return };
         ui.label(
             RichText::new(format!(
@@ -2140,6 +2205,75 @@ impl App {
         }
         ui.add_space(18.0);
 
+        // the devices and their roles (ICA-80): talk, or listen only (never sent a request)
+        ui.label(RichText::new("Devices").strong());
+        ui.add(egui::Label::new(RichText::new("Talk: Icarus asks the vehicle through it. Listen only: it watches silently on the Bus page and is never sent a request (the USB cable on a Y-splitter while the Bluetooth adapter or another program talks).").weak()).wrap());
+        let mut known: Vec<String> = Vec::new();
+        for d in [
+            Some(self.adapter.trim().to_string()),
+            autoconn::remembered(),
+        ]
+        .into_iter()
+        .flatten()
+        .chain(self.roles.listen.clone())
+        {
+            if !d.is_empty() && !known.contains(&d) {
+                known.push(d);
+            }
+        }
+        let connected_to = (self.link == Link::On).then(|| self.adapter.trim().to_string());
+        let mut change: Option<(String, bool)> = None;
+        egui::Grid::new("device-roles")
+            .num_columns(2)
+            .show(ui, |ui| {
+                for d in &known {
+                    ui.label(RichText::new(d).monospace());
+                    let mut listen = self.roles.is_listen(d);
+                    ui.horizontal(|ui| {
+                        let busy = connected_to.as_deref() == Some(d.as_str());
+                        ui.add_enabled_ui(!busy, |ui| {
+                            ui.radio_value(&mut listen, false, "Talk");
+                            ui.radio_value(&mut listen, true, "Listen only");
+                        });
+                        if busy {
+                            ui.label(
+                                RichText::new("(connected: disconnect to change)")
+                                    .small()
+                                    .weak(),
+                            );
+                        }
+                    });
+                    if listen != self.roles.is_listen(d) {
+                        change = Some((d.clone(), listen));
+                    }
+                    ui.end_row();
+                }
+            });
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.new_device)
+                    .hint_text("another device: /dev/ttyUSB0, bt:…")
+                    .desired_width(220.0),
+            );
+            if ui
+                .add_enabled(
+                    !self.new_device.trim().is_empty(),
+                    egui::Button::new("Add as listen only"),
+                )
+                .clicked()
+            {
+                change = Some((self.new_device.trim().to_string(), true));
+                self.new_device.clear();
+            }
+        });
+        if let Some((d, listen)) = change {
+            self.roles.set_listen(&d, listen);
+            if let Err(e) = self.roles.save() {
+                self.error = Some(format!("The devices' roles were not saved: {e}"));
+            }
+        }
+        ui.add_space(18.0);
+
         // what Icarus works with: the vehicle adapters and protocols, and the tuners and interfaces it recognises by their USB
         // IDs (icarus_obd::devices::KNOWN, the table in docs/INTERFACES.md)
         ui.label(RichText::new("Adapters and protocols").strong());
@@ -2164,6 +2298,125 @@ impl App {
                     ui.end_row();
                 }
             });
+    }
+
+    /// A second device listening while the connected one talks (ICA-80): which one, start and stop, and what it saw beside
+    /// what Icarus sent.
+    fn listen_body(&mut self, ui: &mut egui::Ui, pal: &theme::Palette) {
+        let devices = self.roles.listen.clone();
+        if devices.is_empty() {
+            ui.add(egui::Label::new(RichText::new("Set a device to listen only in Settings (the gear): the USB cable on a Y-splitter, for example, while the Bluetooth adapter talks. It is never sent a request: it watches what another device or program asks and what the modules answer.").weak()).wrap());
+            return;
+        }
+        self.listen_pick = self.listen_pick.min(devices.len() - 1);
+        let running = self.listener.is_some();
+        ui.horizontal(|ui| {
+            ui.add_enabled_ui(!running, |ui| {
+                egui::ComboBox::from_id_salt("listen-device")
+                    .selected_text(&devices[self.listen_pick])
+                    .show_ui(ui, |ui| {
+                        for (i, d) in devices.iter().enumerate() {
+                            ui.selectable_value(&mut self.listen_pick, i, d);
+                        }
+                    });
+                let protos = [
+                    (6u8, "CAN 11-bit, 500 kbit/s"),
+                    (7, "CAN 29-bit, 500 kbit/s"),
+                    (8, "CAN 11-bit, 250 kbit/s"),
+                    (9, "CAN 29-bit, 250 kbit/s"),
+                ];
+                let shown = protos
+                    .iter()
+                    .find(|p| p.0 == self.listen_protocol)
+                    .map_or("CAN", |p| p.1);
+                egui::ComboBox::from_id_salt("listen-protocol")
+                    .selected_text(shown)
+                    .show_ui(ui, |ui| {
+                        for (n, name) in protos {
+                            ui.selectable_value(&mut self.listen_protocol, n, name);
+                        }
+                    });
+            });
+            if running {
+                if ui.button("Stop listening").clicked() {
+                    if let Some(l) = &self.listener {
+                        l.stop();
+                    }
+                }
+                ui.spinner();
+            } else if ui.button("Listen").clicked() {
+                let spec = devices[self.listen_pick].clone();
+                let dir = icarus_obd::drivelog::folders().into_iter().next();
+                let r = self.repaint.clone();
+                let l = listen::start(&spec, self.listen_protocol, dir, move || r());
+                self.listen_file = l.file.clone();
+                self.listen_status = format!("Starting {spec}...");
+                self.heard.clear();
+                self.heard_frames = 0;
+                self.listener = Some(l);
+            }
+        });
+        if !self.listen_status.is_empty() {
+            ui.label(RichText::new(&self.listen_status).weak());
+        }
+        if let Some(f) = &self.listen_file {
+            ui.label(
+                RichText::new(format!(
+                    "Kept in {} (icarus import buslog learns from it).",
+                    f.display()
+                ))
+                .small()
+                .weak(),
+            );
+        }
+        let hex = |b: &[u8]| {
+            b.iter()
+                .map(|x| format!("{x:02X}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let sent: Vec<(u32, Vec<u8>)> = self
+            .sent_log
+            .iter()
+            .map(|(_, id, b)| (*id, b.clone()))
+            .collect();
+        let seen: Vec<(u32, Vec<u8>)> = self
+            .heard
+            .iter()
+            .map(|f| (f.id, listen::request_bytes(f)))
+            .collect();
+        let matched = sent.iter().filter(|s| seen.contains(s)).count();
+        ui.label(format!(
+            "The listener saw {} frames; {} of the {} requests Icarus sent here were seen by it.",
+            self.heard_frames,
+            matched,
+            sent.len()
+        ));
+        ui.columns(2, |cols| {
+            cols[0].label(RichText::new("Sent by Icarus (the talking device)").strong());
+            for (id, b) in sent.iter().rev().take(14) {
+                let mark = if seen.contains(&(*id, b.clone())) {
+                    "  seen by it"
+                } else {
+                    ""
+                };
+                cols[0].label(RichText::new(format!("{id:03X}  {}{mark}", hex(b))).monospace());
+            }
+            cols[1].label(RichText::new("Requests the listener saw").strong());
+            for (id, b) in seen.iter().rev().take(14) {
+                let mark = if sent.contains(&(*id, b.clone())) {
+                    "  (Icarus)"
+                } else {
+                    ""
+                };
+                cols[1].label(
+                    RichText::new(format!("{id:03X}  {}{mark}", hex(b)))
+                        .monospace()
+                        .color(if mark.is_empty() { pal.accent } else { pal.dim }),
+                );
+            }
+        });
+        ui.add(egui::Label::new(RichText::new("A request the listener saw that Icarus did not send is another device or program asking (the OBDLink app, VF Tuner): what Icarus learns from.").small().weak()).wrap());
     }
 
     fn save_levels(&mut self) {

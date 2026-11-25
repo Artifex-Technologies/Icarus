@@ -184,6 +184,9 @@ pub enum Event {
         name: String,
         why: String,
     },
+    /// The requests the talking adapter sent onto the bus since the last of these (ICA-80): (seconds since the connection,
+    /// request ID, bytes).
+    Sent(Vec<(f64, u32, Vec<u8>)>),
     /// The watched value while a test runs.
     TestReading(f64),
     Reading {
@@ -216,6 +219,15 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
         // a module left out of a broadcast's answers is shown, never lost silently (each once a connection)
         for n in elm.as_mut().map(Elm::take_dropped).unwrap_or_default() {
             send(Event::Dropped(n));
+        }
+        // what went onto the bus, for the comparison with a listening device (ICA-80)
+        let sent = elm.as_mut().map(Elm::take_sent).unwrap_or_default();
+        if !sent.is_empty() {
+            send(Event::Sent(
+                sent.into_iter()
+                    .map(|(at, id, b)| (at.duration_since(start).as_secs_f64(), id, b))
+                    .collect(),
+            ));
         }
         let busy = test.is_some() || (!live.is_empty() && elm.is_some());
         let cmd = if let Some(c) = queued.take() {
@@ -270,6 +282,11 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
                 let spec = s;
                 elm = None;
                 live.clear();
+                // a device set to listen only is never talked through, whoever asks (ICA-80)
+                if let Err(why) = crate::devices::Roles::load().may_talk(&spec) {
+                    send(Event::Failed(why));
+                    continue;
+                }
                 send(Event::Status(format!("Connecting to {spec}...")));
                 match connect(&spec, &profiles) {
                     Ok((e, info)) => {
