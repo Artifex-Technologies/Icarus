@@ -20,6 +20,11 @@
 //!    Stellantis, BMW... today), or is not known, a module whose kind is not known (no `kind`, not in the profile) gets
 //!    none either: it could be the airbag module;
 //!    one request ID is one module: a second module file on the same ID gets no data requests;
+//!    a sweep (reads of identifiers no file lists: the as-built block, discovery later) passes `Gates::sweep` besides
+//!    (ICA-100): chassis and driver-assist modules (ABS and stability control, brakes, steering, radar, cameras, cruise,
+//!    lane and parking assistance; by their kind, their name, or the vehicle profile's name for their address) get
+//!    identity only, unless their own module file lists identifiers of the sweep, which are then the only ones read. A
+//!    module file's own requests are listed by definition, so module data reads them as before;
 //! 4. reachable: 11-bit CAN, no extended address, the main bus;
 //! 5. no request that needs a diagnostic session is sent (Icarus opens none);
 //! 6. the request's model years include the vehicle's;
@@ -38,7 +43,7 @@ use icarus_core::moddata::{
     self as md, capture, units, Ids, ModuleDef, RequestDef, SetInfo, Shown, ValueDef,
 };
 use serde::Deserialize;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -100,6 +105,102 @@ pub struct Gates {
     /// address), and the answer IDs of those without one. A module there is the airbag module whatever its own file says.
     airbag_tx: BTreeSet<(u16, Option<u8>)>,
     airbag_rx: BTreeSet<u16>,
+    /// Addresses (request ID, extended address) the vehicle's profile names as a chassis or driver-assist module (with
+    /// the make unknown, every profile's): (the profile's id, the name it gives, what kind of module that is).
+    chassis_at: BTreeMap<(u16, Option<u8>), (String, String, &'static str)>,
+}
+
+/// What makes a module a chassis or driver-assist one (ICA-100): a whole word of its kind or name, in upper or lower case.
+/// Brakes and stability control (ABS, the makers' names for stability and traction control such as the Toyota profile's
+/// VSC and TRC and the Subaru profile's VDC, electric parking brakes, suspension), steering (EPS, the Ford profile's
+/// PSCM), and driver assistance (radar, cameras, cruise, lane, collision, parking, blind-spot). A word too many only
+/// keeps a sweep off a module; it never lets anything be sent.
+const CHASSIS: &[(&str, &[&str])] = &[
+    (
+        "brake or stability control",
+        &[
+            "abs",
+            "brake",
+            "brakes",
+            "braking",
+            "chassis",
+            "dsc",
+            "ebcm",
+            "epb",
+            "esc",
+            "esp",
+            "skid",
+            "stability",
+            "suspension",
+            "tcs",
+            "trc",
+            "vdc",
+            "vsa",
+            "vsc",
+        ],
+    ),
+    ("steering", &["eps", "epas", "pscm", "steering"]),
+    (
+        "driver-assist",
+        &[
+            "adas",
+            "assist",
+            "blind",
+            "bsm",
+            "camera",
+            "collision",
+            "cruise",
+            "lane",
+            "lidar",
+            "lka",
+            "lkas",
+            "parking",
+            "radar",
+            "sonar",
+        ],
+    ),
+];
+
+/// What kind of chassis or driver-assist module `words` (a module's kind or name) names, if any (`CHASSIS`).
+pub fn chassis_kind(words: &str) -> Option<&'static str> {
+    let w: Vec<String> = words
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    CHASSIS
+        .iter()
+        .find(|(_, list)| w.iter().any(|x| list.contains(&x.as_str())))
+        .map(|(what, _)| *what)
+}
+
+/// The chassis and driver-assist addresses `profiles` name (`Gates::chassis_at`).
+fn chassis_named<'p>(
+    profiles: impl IntoIterator<Item = &'p Profile>,
+) -> BTreeMap<(u16, Option<u8>), (String, String, &'static str)> {
+    let mut out = BTreeMap::new();
+    for p in profiles {
+        for a in &p.modules {
+            let (Some(what), Ok(tx)) = (chassis_kind(&a.name), u16::try_from(a.tx)) else {
+                continue;
+            };
+            if tx <= 0x7FF {
+                out.entry((tx, a.ext))
+                    .or_insert((p.id.clone(), a.name.clone(), what));
+            }
+        }
+    }
+    out
+}
+
+/// What a sweep may read on one module (ICA-100): a sweep reads identifiers no module-data file lists (the as-built
+/// block's DE00-DEFF, and discovery's, ICA-126), so it passes `Gates::sweep` first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Sweep {
+    /// Every identifier the sweep asks.
+    Whole,
+    /// These only, the ones the module's own file lists: a chassis or driver-assist module.
+    Listed(Vec<u16>),
 }
 
 /// Airbag and occupant modules: identity only.
@@ -145,8 +246,14 @@ impl Gates {
             .flat_map(|p| &p.modules)
             .filter(|a| airbag(a))
             .collect();
+        // the chassis names of the make's profile, or with no profile for it every profile's: which one applies is not known
+        let chassis_at = match profile {
+            Some(p) => chassis_named([p]),
+            None => chassis_named(profiles),
+        };
         Gates {
             skips,
+            chassis_at,
             profiles: profiles.to_vec(),
             airbag_tx: airbags
                 .iter()
@@ -174,6 +281,8 @@ impl Gates {
     /// The airbag caution follows the vehicle, not only the set: where the two makes differ, the stricter of their gates
     /// holds (a module of unknown kind gets no request where either make's profile names no airbag module, and counts as
     /// known only where both profiles name it); with the vehicle's make not known, a module of unknown kind gets none.
+    /// The chassis and driver-assist addresses (`chassis`) are both makes' too, and every profile's with the vehicle's make
+    /// not known.
     pub fn for_vehicle(
         profiles: &[Profile],
         modules: &[ModuleDef],
@@ -191,6 +300,9 @@ impl Gates {
                     });
                 }
                 g.named = g.named.intersection(&other.named).copied().collect();
+                for (k, v) in other.chassis_at {
+                    g.chassis_at.entry(k).or_insert(v);
+                }
             }
             None => {
                 if g.caution.is_none() {
@@ -199,9 +311,69 @@ impl Gates {
                     ));
                 }
                 g.named.clear();
+                for (k, v) in chassis_named(profiles) {
+                    g.chassis_at.entry(k).or_insert(v);
+                }
             }
         }
         g
+    }
+
+    /// Why `h` counts as a chassis or driver-assist module (ICA-100), if it does: its kind or its name in its own file
+    /// (`chassis_kind`), or the name the vehicle's profile gives its address.
+    pub fn chassis(&self, h: &ModuleHead) -> Option<String> {
+        if let Some(what) = chassis_kind(&h.kind) {
+            return Some(format!("a {what} module (its kind is {:?})", h.kind));
+        }
+        if let Some(what) = chassis_kind(&h.name) {
+            return Some(format!("a {what} module (its file names it {:?})", h.name));
+        }
+        if h.ids != Ids::Can11 {
+            return None;
+        }
+        let tx = u16::try_from(h.tx).ok()?;
+        self.chassis_at
+            .get(&(tx, h.ext))
+            .map(|(p, name, what)| format!("a {what} module (the {p} profile names it {name:?})"))
+    }
+
+    /// What a sweep of `service` identifiers in `range` may read on `m` (ICA-100; the module as its module-data file
+    /// gives it, or a bare head when it has none), or why it may read nothing:
+    /// - the module-data gates first (`module_refused`): never an airbag or occupant module, nor one of unknown kind where
+    ///   the make names no airbag module, nor an ID that is not one module's;
+    /// - then a chassis or driver-assist module (`chassis`: ABS and stability control, brakes, steering, radar, cameras,
+    ///   cruise, lane and parking assistance) gets identity only, unless its own file lists identifiers in the range, which
+    ///   are then the only ones read;
+    /// - any other module, the whole sweep.
+    pub fn sweep(
+        &self,
+        m: &ModuleDef,
+        service: u8,
+        range: std::ops::RangeInclusive<u16>,
+    ) -> Result<Sweep, String> {
+        if let Some(why) = self.module_refused(m) {
+            return Err(why);
+        }
+        let Some(what) = self.chassis(&m.module) else {
+            return Ok(Sweep::Whole);
+        };
+        let mut listed: Vec<u16> = m
+            .requests
+            .iter()
+            .filter(|r| r.service == service && range.contains(&r.ident))
+            .map(|r| r.ident)
+            .collect();
+        listed.sort_unstable();
+        listed.dedup();
+        if listed.is_empty() {
+            return Err(format!(
+                "{what}: chassis and driver-assist modules get identity only unless their own module-data file lists the \
+                 identifiers to read, and none of {service:02X} {:04X}-{:04X} is listed for this one",
+                range.start(),
+                range.end()
+            ));
+        }
+        Ok(Sweep::Listed(listed))
     }
 
     /// Whether `h` is an airbag or occupant module: by its own file (`is_airbag`), or at an address a vehicle profile
@@ -419,6 +591,15 @@ pub fn read_dir(dir: &Path) -> Result<SetFiles, String> {
         files.push((name, text));
     }
     read_files(&files, &dir.display().to_string())
+}
+
+/// A set from its files (`read_files`), gates applied, as `load_set` loads one: for files that are not in a folder (tests).
+pub fn load_files(
+    files: &[(String, String)],
+    place: &str,
+    profiles: &[Profile],
+) -> Result<Loaded, String> {
+    Ok(loaded(read_files(files, place)?, place.into(), profiles))
 }
 
 fn loaded(
@@ -1505,6 +1686,78 @@ mod tests {
         );
         assert_eq!(o, Outcome::Skipped("airbag module: identity only".into()));
         assert!(sent(&log.lock().unwrap()).is_empty(), "nothing was sent");
+    }
+
+    /// ICA-100: a chassis or driver-assist module, by its kind, its name, or the vehicle profile's name for its address
+    /// (the stricter of the file and the profile), gets nothing from a sweep unless its own file lists the sweep's
+    /// identifiers, which are then the only ones; its own requests stay module data's to read, and any other module gets
+    /// the whole sweep. With the make not known every profile's names count.
+    #[test]
+    fn chassis_and_driver_assist_modules_are_swept_only_by_what_their_file_lists() {
+        let profiles = crate::vehicles::builtin();
+        let range = || 0xDE00..=0xDEFF;
+        for (tx, extra, name, words) in [
+            ("0x7D4", "kind = \"radar\"", None, "\"radar\""),
+            ("0x7D4", "kind = \"ADAS\"", None, "\"ADAS\""),
+            ("0x7D4", "", Some("front camera"), "\"front camera\""),
+            ("0x7D4", "", Some("EPS (steering)"), "steering"),
+            ("0x7B0", "", None, "\"ABS / VSC / TRC (skid control)\""),
+            ("0x7A1", "", None, "\"electric power steering\""),
+        ] {
+            let mut ms = vec![module(tx, extra)];
+            if let Some(n) = name {
+                ms[0].module.name = n.into();
+            }
+            let gates = Gates::new(&profiles, &ms, "toyota");
+            let e = gates.sweep(&ms[0], 0x22, range()).unwrap_err();
+            assert!(
+                e.contains("chassis and driver-assist")
+                    && e.contains(words)
+                    && e.contains("22 DE00-DEFF"),
+                "{tx} {extra}: {e}"
+            );
+            assert!(gates.chassis(&ms[0].module).is_some());
+            // its own file's requests are listed, so module data reads them as before
+            assert!(gate(&mut ms, &gates).is_empty(), "{tx} {extra}");
+        }
+        // the identifiers its file lists, and only those, in order, each once (a file may list one for several years)
+        let mut abs = module("0x7B0", "");
+        for ident in [0xDE05, 0xDE01, 0xDE05] {
+            let mut r = abs.requests[0].clone();
+            r.ident = ident;
+            abs.requests.push(r);
+        }
+        let gates = Gates::new(&profiles, std::slice::from_ref(&abs), "toyota");
+        assert_eq!(
+            gates.sweep(&abs, 0x22, range()),
+            Ok(Sweep::Listed(vec![0xDE01, 0xDE05]))
+        );
+        // not a chassis module: the whole sweep; an airbag module: still nothing
+        let cluster = module("0x7C0", "");
+        assert_eq!(gates.sweep(&cluster, 0x22, range()), Ok(Sweep::Whole));
+        assert!(gates
+            .sweep(&module("0x780", ""), 0x22, range())
+            .unwrap_err()
+            .contains("airbag"));
+        // the vehicle's profile decides: on a Ford, 7B0 named nothing there is a body module by its file, and Ford's ABS
+        // (760) and parking aid (736) are chassis and driver-assist modules
+        let ford = |tx: &str| {
+            let m = module(tx, "");
+            let g = Gates::for_vehicle(&profiles, std::slice::from_ref(&m), "ford", Some("ford"));
+            g.sweep(&m, 0x22, range())
+        };
+        assert_eq!(ford("0x7B0"), Ok(Sweep::Whole));
+        assert!(ford("0x760").unwrap_err().contains("\"ABS\""));
+        assert!(ford("0x736")
+            .unwrap_err()
+            .contains("driver-assist module (the ford profile"));
+        // with the make not known, any profile naming the address a chassis module's counts
+        let m = module("0x7B0", "");
+        let g = Gates::for_vehicle(&profiles, std::slice::from_ref(&m), "ford", None);
+        assert!(g.sweep(&m, 0x22, range()).is_err());
+        assert_eq!(chassis_kind("instrument cluster (combination meter)"), None);
+        assert_eq!(chassis_kind("air conditioning"), None);
+        assert_eq!(chassis_kind("tire pressure"), None);
     }
 
     #[test]

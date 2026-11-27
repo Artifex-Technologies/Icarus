@@ -529,7 +529,18 @@ reached with the adapter's extended addressing (`ATCEA`): their identity and cod
 adapter that shows the address byte in answers and one that strips it are both read.
 `asbuilt` reads a module's whole as-built configuration block (FORScan's name for Ford's identifiers DE00 on: `22` reads
 only, until the first one the module does not have) and saves it in the vehicle's `Definitions` folder, never over an
-earlier one: the way back before any configuration change.
+earlier one: the way back before any configuration change. It never sweeps an airbag or occupant module, and a chassis or
+driver-assist module (ABS and stability control, brakes, steering, radar, cameras, cruise, lane and parking assistance:
+by its kind or name in its module-data file, or by the name the vehicle's profile gives its address, such as Toyota's 7B0
+and 7A1) gets identity only, unless its file in the vehicle's module-data set (`icarus data`, chosen as `obd data` chooses
+it, or `--set`) lists identifiers DE00-DEFF: then exactly those are read. Each refusal says why, and nothing is sent.
+`scan --sweep` (and a profile's module with no answer ID written down) does not take a module's answer ID to be its
+request ID + 8: the probe (tester present, `3E`) listens to every diagnostic ID, 700-7FF (`18DAF1xx` on 29-bit CAN), on
+a CAN interface, the Mongoose, and an ELM327 or OBDLink (its receive filter opened for the probe only: `ATCF700` and
+`ATCM700`, or `STFAP` on the STN chip). Only an answer to the probe counts, not from another module's answer ID, and one
+heard from elsewhere than the guess is asked once more there before it is believed; the module is then read at that
+answer ID, and no answer ID heard is ever sent on in that scan. Through the OpenPort (a J2534 channel takes in only the
+IDs it has a filter for) the probe still listens at the request ID + 8 only.
 On a vehicle whose OBD-II runs on 29-bit CAN (most Hondas), modules are asked at their 29-bit IDs (`18DAxxF1`, answered
 from `18DAF1xx`; `ATCP` and `ATSH` set the header): a scan asks the engine and transmission at `18DA10F1` and `18DA18F1`,
 `--sweep` every `18DAxxF1`, and `icarus obd module 18DA30F1` one of them. A profile can name a range of request IDs

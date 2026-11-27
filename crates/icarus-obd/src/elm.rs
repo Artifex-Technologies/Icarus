@@ -702,8 +702,105 @@ impl Elm {
         std::mem::take(&mut self.outcomes)
     }
 
-    fn request_to_inner(&mut self, tx: u32, rx: u32, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
+    /// A sweep's probe (`Link::probe`, ICA-103): tester present to `tx`, with the answers shown from every ID a module could
+    /// answer from, not only `rx`. The adapter's receive filter is opened to 700-7FF (`ATCF700`, `ATCM700`), or on 29-bit
+    /// CAN to 18DAF1xx (`ATCF18DAF100`, `ATCM1FFFFF00`), in place of `ATCRA`; an STN chip gets its own pass filter
+    /// instead (`STFCP`, then `STFAP`), as for watching (`monitor_ids`). Only the probe goes out under it. Afterwards the
+    /// filter goes back to automatic (`ATCRA`, or `STFCP` on an STN), and the next request says its own header and answer ID
+    /// again whatever happened. Behind a gateway, on the medium-speed CAN, or where the wide filter would not pass `rx`
+    /// (an 11-bit ID below 700), it listens to `rx` alone, as `request_to` does.
+    ///
+    /// UNVERIFIED ON HARDWARE: the filter commands are the ELM327 and STN references' as I understand them, tested only
+    /// against the simulated adapter, like `STN_UNVERIFIED`.
+    pub fn probe(&mut self, tx: u32, rx: u32, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
+        crate::uds::check_probe(data)?;
+        let wide = tx > 0x7FF;
+        let (f, m) = if wide { WIDE29 } else { WIDE11 };
+        if self.want_ext.is_some()
+            || self.want_bus != Bus::Main
+            || rx & m != f
+            || (wide && !crate::vehicles::is_fixed29_request(tx))
+        {
+            return self.request_to(tx, rx, data);
+        }
+        let r = self.probe_inner(tx, rx, data);
+        // what the module did with it, for the vehicle's record (ICA-70), as `request_to` keeps it: the first answer to the
+        // probe, or silence
+        let got = match &r {
+            Ok(answers) => Some(
+                match answers.iter().find(|a| crate::uds::answers_probe(data, a)) {
+                    Some(a) => match a.refusal() {
+                        Some((_, code)) => crate::record::Got::Refused(code),
+                        None => crate::record::Got::Data(a.data.len()),
+                    },
+                    None => crate::record::Got::Silent,
+                },
+            ),
+            Err(_) => None,
+        };
+        if let Some(got) = got {
+            if self.outcomes.len() < 10_000 {
+                self.outcomes.push(crate::record::Outcome {
+                    tx,
+                    ext: None,
+                    request: data.to_vec(),
+                    got,
+                });
+            }
+        }
+        r
+    }
+
+    fn probe_inner(&mut self, tx: u32, rx: u32, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
         self.read_only_check(data)?;
+        let wide = self.sendable(tx, rx, data)?.0;
+        self.bus_to(Bus::Main)?;
+        self.format_frames()?;
+        self.ext_to(None)?;
+        // the header and flow control as for one module, the wide filter in place of ATCRA's one answer ID
+        let (f, m) = if wide { WIDE29 } else { WIDE11 };
+        let mut cmds: Vec<String> = header_commands(Some((tx, rx)), wide)
+            .into_iter()
+            .filter(|c| !c.starts_with("ATCRA"))
+            .collect();
+        let hex = |id: u32| {
+            if wide {
+                format!("{id:08X}")
+            } else {
+                format!("{id:03X}")
+            }
+        };
+        if self.stn.is_some() {
+            cmds.extend(["STFCP".into(), format!("STFAP {},{}", hex(f), hex(m))]);
+        } else {
+            cmds.extend([format!("ATCF{}", hex(f)), format!("ATCM{}", hex(m))]);
+        }
+        // whatever happens from here, the next request says its header and answer ID again
+        self.target = Some(UNKNOWN_TARGET);
+        let refs: Vec<&str> = cmds.iter().map(String::as_str).collect();
+        let heard = self
+            .ok_commands(&refs)
+            .and_then(|()| self.request_lines(data))
+            .and_then(|lines| parse_each(&lines, self.protocol));
+        // back to automatic receive filtering; a failure here is put right by the next request, which sets its own filter
+        // (ATCRA with its answer ID, or ATCRA alone before a broadcast)
+        let back: &[&str] = if self.stn.is_some() {
+            &["STFCP"]
+        } else {
+            &["ATCRA"]
+        };
+        let _ = self.ok_commands(back);
+        match heard {
+            // a sender whose message does not add up is not an answer to the probe (a probe's answer is one frame)
+            Ok((answers, _)) => Ok(answers),
+            Err(ObdError::NoData) => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Whether a request of `data` can go to `tx`, answered from `rx`, on this vehicle and adapter: (29-bit, more than one
+    /// frame), or why not.
+    fn sendable(&self, tx: u32, rx: u32, data: &[u8]) -> Result<(bool, bool), ObdError> {
         if tx > 0x1FFF_FFFF || rx > 0x1FFF_FFFF || (tx > 0x7FF) != (rx > 0x7FF) {
             return Err(ObdError::Adapter(format!(
                 "{tx:X}/{rx:X} are not both 11-bit or both 29-bit CAN IDs"
@@ -736,6 +833,12 @@ impl Elm {
                 }
             )));
         }
+        Ok((wide, long))
+    }
+
+    fn request_to_inner(&mut self, tx: u32, rx: u32, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
+        self.read_only_check(data)?;
+        let (wide, long) = self.sendable(tx, rx, data)?;
         self.bus_to(self.want_bus)?;
         self.format_frames()?;
         self.ext_to(self.want_ext)?;
@@ -957,6 +1060,12 @@ impl Elm {
 
 /// The adapter's header and filters are not known (after a switch of bus): any request says them again.
 const UNKNOWN_TARGET: (u32, u32) = (u32::MAX, u32::MAX);
+
+/// A sweep's probe listens through these receive filters (filter, mask: an ID passes when its bits under the mask equal
+/// the filter's): 11-bit IDs 700-7FF, where diagnostic answers are, and on 29-bit CAN 18DAF1xx, every module's answer
+/// to the tester at F1 (ISO 15765-4's normal fixed addressing).
+pub const WIDE11: (u32, u32) = (0x700, 0x700);
+pub const WIDE29: (u32, u32) = (0x18DA_F100, 0x1FFF_FF00);
 
 /// The STN-only commands Icarus sends (an OBDLink's STN chip; a plain ELM327 is never sent them), and the ELM327 command
 /// that goes back from them.

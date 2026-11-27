@@ -255,6 +255,12 @@ pub struct SimCar {
     bus_seen: u64,
     /// A second adapter on the same bus (`sim:listen`): its watch also shows the shared bus.
     listener: bool,
+    /// Modules a test adds (`with_module`): (request ID, answer ID), answering anywhere, not only at the request ID + 8.
+    odd: Vec<(u32, u32)>,
+    /// Messages other nodes send while a tester present is answered (`with_chatter`): (sender, message).
+    chatter: Vec<(u32, Vec<u8>)>,
+    /// As-built blocks a test gives modules (`with_block`): (request ID, the last identifier's low byte), DE00 on.
+    blocks: Vec<(u32, u8)>,
 }
 
 impl Default for SimCar {
@@ -311,6 +317,9 @@ impl SimCar {
             cea: None,
             bus_seen: 0,
             listener: false,
+            odd: Vec::new(),
+            chatter: Vec::new(),
+            blocks: Vec::new(),
         }
     }
 
@@ -374,8 +383,12 @@ impl SimCar {
         }
     }
 
-    /// Where a module asked at `tx` answers from: 29-bit 18DAxxF1 from 18DAF1xx, GM's body range 400 higher, else tx + 8.
+    /// Where a module asked at `tx` answers from: a module a test added from its own answer ID, 29-bit 18DAxxF1 from
+    /// 18DAF1xx, GM's body range 400 higher, else tx + 8.
     fn answer_id(&self, tx: u32) -> u32 {
+        if let Some(&(_, rx)) = self.odd.iter().find(|o| o.0 == tx) {
+            return rx;
+        }
         match tx {
             t if t > 0x7FF => (t & 0xFFFF_0000) | ((t & 0xFF) << 8) | ((t >> 8) & 0xFF),
             t @ 0x240..=0x24F if self.make == Make::Gm => t + 0x400,
@@ -416,6 +429,54 @@ impl SimCar {
         SimCar {
             vin: vin.to_string(),
             ..self
+        }
+    }
+
+    /// The same vehicle behind an adapter with an STN chip (an OBDLink).
+    #[cfg(test)]
+    pub(crate) fn with_stn(self) -> SimCar {
+        SimCar { stn: true, ..self }
+    }
+
+    /// The same vehicle with one more module, at request ID `tx` answering from `rx` (not the request ID + 8, for the
+    /// sweep: ICA-103): UDS, a part number, no codes.
+    #[cfg(test)]
+    pub(crate) fn with_module(mut self, tx: u32, rx: u32) -> SimCar {
+        self.odd.push((tx, rx));
+        self
+    }
+
+    /// The same vehicle with another node sending `msg` from `from` while each tester present is answered (another tester's
+    /// request, an answer to someone else): what a sweep's probe hears besides its module. An ELM327 shows it only through
+    /// a wide receive filter (ATCF/ATCM or STFAP), as its automatic filter would not pass it.
+    #[cfg(test)]
+    pub(crate) fn with_chatter(mut self, from: u32, msg: &[u8]) -> SimCar {
+        self.chatter.push((from, msg.to_vec()));
+        self
+    }
+
+    /// The same vehicle with the module at `tx` keeping an as-built block, DE00 to DE`last` (read with 22 whatever else
+    /// it speaks; made up).
+    #[cfg(test)]
+    pub(crate) fn with_block(mut self, tx: u32, last: u8) -> SimCar {
+        self.blocks.push((tx, last));
+        self
+    }
+
+    /// What other nodes send while a tester present is answered (`with_chatter`).
+    pub(crate) fn chatter(&self) -> &[(u32, Vec<u8>)] {
+        &self.chatter
+    }
+
+    /// The receive filter a request's answers pass through when no single answer ID is set (ATCRA hhh): an STN chip's
+    /// pass filter (STFAP) when it has one, else ATCF/ATCM; None, automatic.
+    fn mask(&self) -> Option<(u32, u32)> {
+        if self.stn && self.sm != 0 {
+            Some((self.sf, self.sm))
+        } else if self.cm != 0 {
+            Some((self.cf, self.cm))
+        } else {
+            None
         }
     }
 
@@ -772,8 +833,18 @@ impl SimCar {
             on_bus.extend(bus_frames(*h, p));
         }
         publish(on_bus);
-        if let Some(f) = self.filter {
-            msgs.retain(|(h, _)| *h == f);
+        // other nodes heard through a wide filter while a tester present is answered (`with_chatter`)
+        if self.filter.is_none()
+            && self.mask().is_some()
+            && self.header != self.functional()
+            && req.first() == Some(&0x3E)
+        {
+            msgs.splice(0..0, self.chatter.clone());
+        }
+        match (self.filter, self.mask()) {
+            (Some(f), _) => msgs.retain(|(h, _)| *h == f),
+            (None, Some((f, m))) => msgs.retain(|(h, _)| *h & m == f & m),
+            (None, None) => {}
         }
         if msgs.is_empty() {
             return vec!["NO DATA".into()];
@@ -850,7 +921,9 @@ impl SimCar {
         if ms && self.make != Make::Ford {
             return None; // nothing of the other layouts is on a medium-speed CAN
         }
+        let added = self.odd.iter().any(|o| o.0 == tx);
         let (part, uds, codes): (&[u8], bool, &[u8]) = match (self.make, tx) {
+            _ if added && !ms => (b"ICARUS-ODD-ID", true, &[]),
             // the Ford-like layout (`FORD_MODULES`): each module answers on its own bus only
             (Make::Ford, 0x7E0) if !ms => (b"ICARUS-FORD-PCM", true, &[0x01, 0x71, 0x00, 0x09]),
             (Make::Ford, 0x760) if !ms => (b"ICARUS-FORD-ABS", true, &[]),
@@ -1084,6 +1157,10 @@ impl SimCar {
             ([0x22, 0xDE, n @ 0..=2], true) if tx == 0x7C0 => {
                 Some(vec![0x62, 0xDE, *n, 0x2A, *n, 0x14, 0x07])
             }
+            // a block a test gave the module (`with_block`)
+            ([0x22, 0xDE, n], _) if self.blocks.iter().any(|b| b.0 == tx && *n <= b.1) => {
+                Some(vec![0x62, 0xDE, *n, 0xB0, *n])
+            }
             ([0x22, ..], true) => refuse(0x31),
             _ => refuse(0x11),
         }
@@ -1241,8 +1318,10 @@ impl SimCar {
                 return;
             }
             "STI" if self.stn => vec!["STN2255 v5.10.3".into()],
+            // an STN keeps ATCRA's answer ID as one of its pass filters, so clearing them clears it too
             "STFCP" if self.stn => {
                 (self.sf, self.sm) = (0, 0);
+                self.filter = None;
                 ok
             }
             _ if c.starts_with("STFAP") && self.stn => {
@@ -1301,18 +1380,21 @@ impl SimCar {
                 self.csm = c.ends_with('1');
                 ok
             }
+            // three digits for 11-bit IDs, eight for 29-bit; a filter and mask replace ATCRA's one answer ID
             _ if c.starts_with("ATCF")
-                && c.len() == 7
+                && matches!(c.len(), 7 | 12)
                 && u32::from_str_radix(&c[4..], 16).is_ok() =>
             {
                 self.cf = u32::from_str_radix(&c[4..], 16).unwrap_or(0);
+                self.filter = None;
                 ok
             }
             _ if c.starts_with("ATCM")
-                && c.len() == 7
+                && matches!(c.len(), 7 | 12)
                 && u32::from_str_radix(&c[4..], 16).is_ok() =>
             {
                 self.cm = u32::from_str_radix(&c[4..], 16).unwrap_or(0);
+                self.filter = None;
                 ok
             }
             "ATCRA" => {

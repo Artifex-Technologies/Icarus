@@ -838,7 +838,7 @@ fn scan(
     };
     send(Event::ScanStarted(profile.name.clone(), list.len()));
     let (mut found, mut unreachable) = (0, Vec::new());
-    let mut guard = uds::ScanGuard::default();
+    let mut guard = uds::ScanGuard::new(profiles);
     for (i, m) in list.iter().enumerate() {
         if let Some(why) = m.unreachable(elm.reach()) {
             unreachable.push(format!("{:03X}  {}: {why}", m.tx, m.name));
@@ -850,7 +850,8 @@ fn scan(
             i + 1,
             list.len()
         )));
-        let there = match guard.present(elm, m) {
+        // the module as found: with the answer ID it was heard from, which is not always its request ID + 8
+        let there = match guard.find(elm, m) {
             // the adapter refused to switch to that module's bus: it, and the bus from now on, is listed as not reachable
             Err(icarus_obd::elm::ObdError::Adapter(why)) if m.on_ms_can() => {
                 unreachable.push(format!("{:03X}  {}: {why}", m.tx, m.name));
@@ -858,7 +859,8 @@ fn scan(
             }
             r => r.map_err(e)?,
         };
-        if there {
+        if let Some(m) = there {
+            let m = &m;
             found += 1;
             let ((identity, notes), dtcs) = uds::at_module(elm, m, |l| {
                 Ok((

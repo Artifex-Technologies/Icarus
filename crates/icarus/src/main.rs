@@ -53,10 +53,14 @@ Vehicle, through an OBD adapter (read-only: nothing is cleared or written):
                                              find every module (ABS, airbags, cluster...): identity and trouble codes,
                                              as dealer tools do. The make comes from the VIN (or --make, see icarus
                                              vehicles); --sweep tries every request ID from 700 to 7F7 (slower;
-                                             never 7DF or a known answer ID such as 7E8-7EF)
-  icarus obd asbuilt ID[/ANSWER] --adapter A one module's as-built configuration block (22 DE00 on, read only), saved
+                                             never 7DF, a known answer ID such as 7E8-7EF, or an answer ID heard in
+                                             the sweep: a module is found wherever it answers from, not only at +8)
+  icarus obd asbuilt ID[/ANSWER] --adapter A [--set SET]
+                                             one module's as-built configuration block (22 DE00 on, read only), saved
                                              in the vehicle's folder: the backup before any configuration change;
-                                             never an airbag module ([--make NAME] when the VIN does not say it)
+                                             never an airbag module ([--make NAME] when the VIN does not say it); a
+                                             chassis or driver-assist module (ABS, steering, radar, camera...) only
+                                             by the identifiers its file in the vehicle's module-data set lists
   icarus obd module ID[/ANSWER] --adapter A  one module (request ID in hex: 7B0, 713/77D, 18DA30F1): identity and codes
   icarus obd data [MODULE...] --adapter A [--set SET] [--year YYYY] [--find TEXT] [--every MS --count N] [--csv FILE]
                   [--all-years] [--all] [--refused]
@@ -1100,13 +1104,14 @@ fn obd_scan(elm: &mut dyn Link, args: &Args) -> Result<(), String> {
     }
     eprintln!("looking at {} addresses...", list.len());
     let (mut found, mut later) = (0, Vec::new());
-    let mut guard = uds::ScanGuard::default();
+    let mut guard = uds::ScanGuard::new(&all);
     for m in &list {
         if let Some(why) = m.unreachable(elm.reach()) {
             later.push(format!("{:03X}  {}: {why}", m.tx, m.name));
             continue;
         }
-        let there = match guard.present(elm, m) {
+        // the module as found: with the answer ID it was heard from, which is not always its request ID + 8
+        let there = match guard.find(elm, m) {
             // the adapter refused to switch to that module's bus: it, and the bus from now on, is listed as not reachable
             Err(icarus_obd::elm::ObdError::Adapter(why)) if m.on_ms_can() => {
                 later.push(format!("{:03X}  {}: {why}", m.tx, m.name));
@@ -1114,9 +1119,9 @@ fn obd_scan(elm: &mut dyn Link, args: &Args) -> Result<(), String> {
             }
             r => r.map_err(e)?,
         };
-        if there {
+        if let Some(m) = there {
             found += 1;
-            print_module(elm, m)?;
+            print_module(elm, &m)?;
         }
     }
     println!("\n{found} module(s) answered. Codes: P powertrain, C chassis (ABS, steering), B body (airbags, lights), U network.");
@@ -1151,7 +1156,10 @@ fn obd_asbuilt(elm: &mut dyn Link, args: &Args) -> Result<(), String> {
             .and_then(|v| vehicles::for_vin(&all, v))
             .map(|p| p.id.clone()),
     };
-    let b = icarus_obd::asbuilt::read(elm, tx, rx, &all, make.as_deref())?;
+    // and the module-data set chosen for the vehicle as `obd data` chooses it: a chassis or driver-assist module is read
+    // only by the identifiers its file there lists (ICA-100)
+    let set = asbuilt_set(args, &all, vin.as_deref(), make.as_deref())?;
+    let b = icarus_obd::asbuilt::read(elm, tx, rx, &all, make.as_deref(), set.as_ref())?;
     for (did, bytes) in &b {
         let hex: Vec<String> = bytes.iter().map(|x| format!("{x:02X}")).collect();
         println!("{did:04X}  {}", hex.join(" "));
@@ -1163,6 +1171,47 @@ fn obd_asbuilt(elm: &mut dyn Link, args: &Args) -> Result<(), String> {
         p.display()
     );
     Ok(())
+}
+
+/// The module-data set `obd asbuilt` goes by, as used on this vehicle: `--set`, else the one the vehicle's state names, else
+/// the only one that fits its make, model year and model (`vehicledata::choose`; never a guess). None when none fits, or
+/// the one remembered cannot be had; `--set` naming one that cannot is an error.
+fn asbuilt_set(
+    args: &Args,
+    all: &[vehicles::Profile],
+    vin: Option<&str>,
+    make: Option<&str>,
+) -> Result<Option<icarus_obd::moddata::Loaded>, String> {
+    use icarus_obd::moddata;
+    let year = match args.opt("year") {
+        Some(y) => Some(y.parse::<u16>().map_err(|_| "--year needs a model year")?),
+        None => vin.and_then(|v| vin::decode(v).ok()).and_then(|d| d.year),
+    };
+    let model = vin
+        .and_then(garage::get)
+        .map(|d| d.model)
+        .filter(|m| !m.is_empty());
+    let state = match moddata::state_path(vin)? {
+        Some(p) => moddata::State::load(&p)?,
+        None => moddata::State::default(),
+    };
+    let (sets, problems) = moddata::load_all(moddata::user_dir().as_deref(), all);
+    for p in problems {
+        eprintln!("note: a module-data set was left out: {p}");
+    }
+    match icarus_obd::vehicledata::choose(
+        &sets,
+        args.opt("set"),
+        &state,
+        make,
+        year,
+        model.as_deref(),
+        vin,
+    ) {
+        Ok(s) => Ok(Some(s.on_vehicle(all, make))),
+        Err(why) if args.opt("set").is_some() => Err(why),
+        Err(_) => Ok(None),
+    }
 }
 
 fn obd_module(elm: &mut dyn Link, args: &Args) -> Result<(), String> {

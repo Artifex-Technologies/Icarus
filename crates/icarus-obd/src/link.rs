@@ -48,6 +48,15 @@ pub trait Link {
     /// A request to one module on CAN: sent to `tx`, answered from `rx` (11-bit: usually tx + 8; 29-bit 18DAxxF1: from
     /// 18DAF1xx).
     fn request_to(&mut self, tx: u32, rx: u32, data: &[u8]) -> Result<Vec<Answer>, ObdError>;
+    /// A module sweep's probe (ICA-103): tester present (`3E`, nothing else) sent to `tx`, listening to every ID a module
+    /// could answer from rather than only `rx` (11-bit: 700-7FF; 29-bit: 18DAF1xx), since a module does not always answer
+    /// at its request ID + 8. Returns every whole message heard in the answer's time, each with its sender; which of them
+    /// answer the probe is `uds::answers_probe`'s to say. A link that cannot listen that wide listens to `rx` alone (this
+    /// default: a J2534 device's ISO 15765 channel takes in only the IDs it has a filter for).
+    fn probe(&mut self, tx: u32, rx: u32, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
+        crate::uds::check_probe(data)?;
+        self.request_to(tx, rx, data)
+    }
     /// The vehicle's signalling.
     fn protocol(&self) -> Protocol;
     /// What carries the link: the adapter's or device's name and firmware.
@@ -100,6 +109,9 @@ impl<L: Link + ?Sized> Link for Box<L> {
     fn request_to(&mut self, tx: u32, rx: u32, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
         (**self).request_to(tx, rx, data)
     }
+    fn probe(&mut self, tx: u32, rx: u32, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
+        (**self).probe(tx, rx, data)
+    }
     fn protocol(&self) -> Protocol {
         (**self).protocol()
     }
@@ -135,6 +147,9 @@ impl Link for Elm {
     }
     fn request_to(&mut self, tx: u32, rx: u32, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
         Elm::request_to(self, tx, rx, data)
+    }
+    fn probe(&mut self, tx: u32, rx: u32, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
+        Elm::probe(self, tx, rx, data)
     }
     fn protocol(&self) -> Protocol {
         self.protocol

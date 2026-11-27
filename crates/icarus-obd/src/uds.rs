@@ -528,39 +528,180 @@ pub fn sweep_skips(profiles: &[crate::vehicles::Profile]) -> std::collections::B
     skip
 }
 
-/// One scan's memory of the modules it has found, so that it never sends on their answer IDs.
+/// Refuses anything but tester present (`3E` and its sub-function byte) as a sweep's probe (`Link::probe`): a probe is
+/// heard from whatever answers, so nothing else goes out that way.
+pub fn check_probe(data: &[u8]) -> Result<(), ObdError> {
+    match data {
+        [0x3E, _] => Ok(()),
+        _ => Err(ObdError::Adapter(format!(
+            "a probe is tester present (3E) only, not {}",
+            data.iter()
+                .map(|b| format!("{b:02X}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ))),
+    }
+}
+
+/// Whether `a` answers the probe `req` (tester present): its positive answer, 7E (with the sub-function echoed when it
+/// gives one: UDS's 7E 00; KWP2000's may be the one byte), or a refusal of 3E (7F 3E and a code). Any other message heard
+/// in the probe's time (a periodic frame, another tester's request, an answer to something else) is not.
+pub fn answers_probe(req: &[u8], a: &Answer) -> bool {
+    match a.data.as_slice() {
+        [0x7E] => true,
+        [0x7E, sub, ..] => req.get(1) == Some(sub),
+        [0x7F, 0x3E, _, ..] => true,
+        _ => false,
+    }
+}
+
+/// One scan's memory of the modules it has found and the answer IDs it has heard, so that it never sends on them (ICA-103).
 ///
 /// `sweep_skips` knows only the answer IDs that profiles name, but the sweep is there to find modules no profile names. When
 /// one answers at, say, 740 (answering from 748), a later request on 748 would look like that module's own answer, the
-/// hazard `sweep_skips` describes. Candidates go up in order and an answer ID is usually its request ID + 8, so without this
-/// the sweep would reach it. Both scans (the app's and the command line's) ask through [`ScanGuard::present`].
-#[derive(Debug, Default)]
+/// hazard `sweep_skips` describes. Candidates go up in order, so without this the sweep would reach it.
+///
+/// A module does not always answer at its request ID + 8 (+20, or further: 710 from 77A). So a candidate whose answer ID
+/// is only that guess (no `rx` in its profile, every module the sweep tries) is probed listening wide (`Link::probe`: on
+/// raw CAN every frame is heard; an ELM327 or STN opens its receive filter to 700-7FF, or 18DAF1xx on 29-bit CAN). Only
+/// an answer to the probe counts (`answers_probe`), and not from an ID that is another module's (one found earlier in this
+/// scan, or one the profiles pair with another request ID, OBD-II's 7E8-7EF included). A module heard answering from
+/// elsewhere than the guess is asked once more on that answer ID alone and taken only when it answers there again, so a
+/// frame of another conversation heard at the same moment does not make a module; every ID heard answering is never sent
+/// on in this scan either way. A link that cannot listen wide hears the guess only, as before. Both scans (the app's and
+/// the command line's) ask through [`ScanGuard::find`].
+#[derive(Debug)]
 pub struct ScanGuard {
     /// Answer ID -> the request ID of the module found answering from it.
     answers: std::collections::BTreeMap<u32, u32>,
+    /// Every ID heard answering a probe in this scan.
+    heard: std::collections::BTreeSet<u32>,
+    /// Answer ID -> the request IDs the profiles pair with it (OBD-II's 7E8-7EF with 7E0-7E7 always).
+    known: std::collections::BTreeMap<u32, std::collections::BTreeSet<u32>>,
+}
+
+impl Default for ScanGuard {
+    fn default() -> Self {
+        ScanGuard::new(&[])
+    }
 }
 
 impl ScanGuard {
+    /// A guard for a scan with these profiles loaded: the answer IDs they name are paired with their modules' request IDs.
+    pub fn new(profiles: &[crate::vehicles::Profile]) -> ScanGuard {
+        let mut known: std::collections::BTreeMap<u32, std::collections::BTreeSet<u32>> =
+            Default::default();
+        for i in 0..8 {
+            known.entry(0x7E8 + i).or_default().insert(0x7E0 + i);
+        }
+        for m in profiles.iter().flat_map(crate::vehicles::named) {
+            if m.ext.is_none() {
+                known.entry(m.rx()).or_default().insert(m.tx);
+            }
+        }
+        ScanGuard {
+            answers: Default::default(),
+            heard: Default::default(),
+            known,
+        }
+    }
+
     /// The module found earlier in this scan whose answer ID is `tx`, when there is one: the scan must not send on `tx`.
     pub fn answer_of(&self, tx: u32) -> Option<u32> {
         self.answers.get(&tx).copied()
     }
 
-    /// [`present`] for one step of a scan: false, with nothing sent, when `m`'s request ID is the answer ID of a module found
-    /// earlier in this scan; otherwise it asks, and remembers `m`'s answer ID when `m` answers.
+    /// Whether this scan must not send on `id`: a module found in it answers from there, or it was heard answering a probe.
+    pub fn never_sends_on(&self, id: u32) -> bool {
+        self.answers.contains_key(&id) || self.heard.contains(&id)
+    }
+
+    /// Whether `id` could be the answer ID of the module at `tx`: not a broadcast, not the answer ID of another module found
+    /// in this scan, and not one the profiles pair only with other request IDs.
+    fn could_answer(&self, tx: u32, id: u32) -> bool {
+        if id == tx || id == 0x7DF || id == 0x18DB_33F1 {
+            return false;
+        }
+        if self.answers.get(&id).is_some_and(|t| *t != tx) {
+            return false;
+        }
+        self.known.get(&id).is_none_or(|txs| txs.contains(&tx))
+    }
+
+    /// One step of a scan: the module at `m` as found (with the answer ID it was heard from, when that is not the guess),
+    /// or None. Nothing is sent when `m`'s request ID is an ID this scan never sends on; a module found is remembered by its
+    /// answer ID.
+    pub fn find(
+        &mut self,
+        link: &mut dyn Link,
+        m: &crate::vehicles::ModuleAddr,
+    ) -> Result<Option<crate::vehicles::ModuleAddr>, ObdError> {
+        if self.never_sends_on(m.tx) {
+            return Ok(None);
+        }
+        // the answer ID is a guess only where the profile gives none; behind a gateway and on another bus it stays as given
+        let wide = m.rx.is_none() && m.ext.is_none() && !m.on_ms_can();
+        if !wide {
+            let there = at_module(link, m, |l| present(l, m.tx, m.rx()))?;
+            if there {
+                self.answers.insert(m.rx(), m.tx);
+            }
+            return Ok(there.then(|| m.clone()));
+        }
+        let Some(rx) = at_module(link, m, |l| self.probe(l, m))? else {
+            return Ok(None);
+        };
+        self.answers.insert(rx, m.tx);
+        Ok(Some(crate::vehicles::ModuleAddr {
+            rx: (rx != m.rx()).then_some(rx),
+            ..m.clone()
+        }))
+    }
+
+    /// `find`'s probes of `m` (3E 00, then 3E 01 for a KWP2000 module), listening wide: the ID it answers from, or None.
+    fn probe(
+        &mut self,
+        l: &mut dyn Link,
+        m: &crate::vehicles::ModuleAddr,
+    ) -> Result<Option<u32>, ObdError> {
+        let (tx, guess) = (m.tx, m.rx());
+        for req in [[0x3E, 0x00], [0x3E, 0x01]] {
+            let answers = match l.probe(tx, guess, &req) {
+                Ok(a) => a,
+                Err(ObdError::NoData) => Vec::new(),
+                Err(e) => return Err(e),
+            };
+            let mut from: Vec<u32> = Vec::new();
+            for a in answers.iter().filter(|a| answers_probe(&req, a)) {
+                match u32::from_str_radix(&a.from, 16) {
+                    Ok(id) if self.could_answer(tx, id) && !from.contains(&id) => from.push(id),
+                    _ => {}
+                }
+            }
+            // every ID heard answering is some module's answer ID: never sent on, whichever is this module's
+            self.heard.extend(&from);
+            if from.contains(&guess) {
+                return Ok(Some(guess));
+            }
+            // heard from elsewhere: believed when the module answers there again, asked on that answer ID alone
+            for &id in &from {
+                match ask(l, tx, id, &req) {
+                    Ok(Some(a)) if answers_probe(&req, &a) => return Ok(Some(id)),
+                    Ok(_) | Err(ObdError::Garbled(_)) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Whether the module at `m` answers, as [`find`](Self::find) finds it.
     pub fn present(
         &mut self,
-        elm: &mut dyn Link,
+        link: &mut dyn Link,
         m: &crate::vehicles::ModuleAddr,
     ) -> Result<bool, ObdError> {
-        if self.answer_of(m.tx).is_some() {
-            return Ok(false);
-        }
-        let there = at_module(elm, m, |l| present(l, m.tx, m.rx()))?;
-        if there {
-            self.answers.insert(m.rx(), m.tx);
-        }
-        Ok(there)
+        Ok(self.find(link, m)?.is_some())
     }
 }
 
@@ -778,6 +919,124 @@ mod tests {
         for id in [0x787, 0x789, 0x7B7, 0x7B9, 0x7C7, 0x7C9] {
             assert!(on.contains(&id), "{id:03X} was not asked");
         }
+    }
+
+    /// What a sweep through `guard` finds on `link`: each module as found.
+    fn swept_with(
+        link: &mut dyn Link,
+        guard: &mut ScanGuard,
+        list: &[crate::vehicles::ModuleAddr],
+    ) -> Vec<crate::vehicles::ModuleAddr> {
+        list.iter()
+            .filter_map(|m| guard.find(link, m).unwrap())
+            .collect()
+    }
+
+    /// ICA-103: over an ELM327 (and an OBDLink's STN chip) the sweep's probe listens through a wide receive filter, so a
+    /// module answering at its request ID + 20 (7A2 from 7C2) is found with that answer ID and read there, and the sweep
+    /// never sends on 7C2. At its request ID + 8, the old guess, it is not heard.
+    #[test]
+    fn the_sweep_finds_a_module_answering_at_plus_20_through_an_elm327() {
+        use crate::sim::recording::Recorder;
+        for stn in [false, true] {
+            let car = SimCar::new().with_module(0x7A2, 0x7C2);
+            let car = if stn { car.with_stn() } else { car };
+            let (port, sent) = Recorder::new(car);
+            let mut elm = Elm::connect(Box::new(port)).unwrap();
+            assert_eq!(elm.stn.is_some(), stn);
+            let all = crate::vehicles::builtin();
+            let list = sweep(&all);
+            assert!(list.iter().any(|m| m.tx == 0x7C2), "7C2 is in the list");
+            sent.lock().unwrap().clear();
+            let mut guard = ScanGuard::new(&all);
+            let found = swept_with(&mut elm, &mut guard, &list);
+            assert_eq!(
+                found.iter().map(|m| m.tx).collect::<Vec<_>>(),
+                vec![0x700, 0x701, 0x780, 0x7A2, 0x7B0, 0x7C0, 0x7C4, 0x7E0, 0x7E1]
+            );
+            let odd = found.iter().find(|m| m.tx == 0x7A2).unwrap();
+            assert_eq!((odd.rx, guard.answer_of(0x7C2)), (Some(0x7C2), Some(0x7A2)));
+            assert!(
+                found
+                    .iter()
+                    .filter(|m| m.tx != 0x7A2)
+                    .all(|m| m.rx.is_none()),
+                "the others at their usual answer IDs: {found:?}"
+            );
+            let log = sent.lock().unwrap().clone();
+            let on = sent_on(&log);
+            assert!(!on.contains(&0x7C2), "a request went out on 7C2");
+            assert!(on.contains(&0x7C1) && on.contains(&0x7C3));
+            let wide: &[&str] = if stn {
+                &["STFCP\r", "STFAP 700,700\r"]
+            } else {
+                &["ATCF700\r", "ATCM700\r"]
+            };
+            for c in wide {
+                assert!(log.contains(&c.to_string()), "{c:?}: {log:?}");
+            }
+            // afterwards a request to one module listens to its answer ID alone again
+            sent.lock().unwrap().clear();
+            let id = module_identity(&mut elm, odd.tx, odd.rx()).unwrap();
+            assert!(
+                id.contains(&("part number", "ICARUS-ODD-ID".to_string())),
+                "{id:?}"
+            );
+            assert!(sent.lock().unwrap().contains(&"ATCRA7C2\r".to_string()));
+            assert!(!present(&mut elm, 0x7A2, 0x7AA).unwrap(), "not at +8");
+            assert_eq!(crate::j1979::read(&mut elm, 0x0C).unwrap().len(), 1);
+        }
+    }
+
+    /// ICA-103: what else the probes hear is not taken for a module: another tester's tester present (7A0 3E 00), the
+    /// transmission answering someone else's (7E9 7E 00: 7E9 is the transmission's answer ID, not any other module's) and
+    /// an answer to another read (7D5 62 F1 90). Over an ELM327 and over raw CAN the sweep finds the simulated vehicle's
+    /// modules, each at its own answer ID, and nothing more.
+    #[test]
+    fn other_frames_heard_during_the_sweep_are_not_modules() {
+        let car = || {
+            SimCar::new()
+                .with_chatter(0x7A0, &[0x3E, 0x00])
+                .with_chatter(0x7E9, &[0x7E, 0x00])
+                .with_chatter(0x7D5, &[0x62, 0xF1, 0x90, 0x01])
+        };
+        let all = crate::vehicles::builtin();
+        let list = sweep(&all);
+        let mut elm = Elm::connect(Box::new(car())).unwrap();
+        let mut can =
+            crate::canlink::CanLink::connect(crate::canlink::SimBus::new(car()), "vcan0").unwrap();
+        for link in [&mut elm as &mut dyn Link, &mut can] {
+            let mut guard = ScanGuard::new(&all);
+            let found = swept_with(link, &mut guard, &list);
+            assert_eq!(
+                found.iter().map(|m| m.tx).collect::<Vec<_>>(),
+                vec![0x700, 0x701, 0x780, 0x7B0, 0x7C0, 0x7C4, 0x7E0, 0x7E1],
+                "{}",
+                link.adapter()
+            );
+            assert!(found.iter().all(|m| m.rx.is_none()), "{found:?}");
+            assert_eq!(guard.answer_of(0x7E9), Some(0x7E1));
+            for id in [0x7A0, 0x7D5] {
+                assert!(!guard.never_sends_on(id), "{id:03X}");
+            }
+        }
+        // a probe is tester present and nothing else
+        assert!(elm.probe(0x7E0, 0x7E8, &[0x22, 0xF1, 0x90]).is_err());
+        assert!(can.probe(0x7E0, 0x7E8, &[0x22, 0xF1, 0x90]).is_err());
+    }
+
+    /// A link that cannot listen wide (a J2534 device's ISO 15765 channel) is probed at the guessed answer ID only, as
+    /// before, and finds the modules there.
+    #[test]
+    fn a_link_that_cannot_listen_wide_probes_the_guess() {
+        use crate::passthru::{PassThruLink, SimPassThru};
+        let mut l = PassThruLink::connect(SimPassThru::new(SimCar::new())).unwrap();
+        let all = crate::vehicles::builtin();
+        let found = swept_with(&mut l, &mut ScanGuard::new(&all), &sweep(&all));
+        assert_eq!(
+            found.iter().map(|m| m.tx).collect::<Vec<_>>(),
+            vec![0x700, 0x701, 0x780, 0x7B0, 0x7C0, 0x7C4, 0x7E0, 0x7E1]
+        );
     }
 
     #[test]
