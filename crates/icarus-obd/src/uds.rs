@@ -293,14 +293,15 @@ pub fn parse_kwp_dtcs(d: &[u8]) -> Option<Vec<ModuleDtc>> {
 }
 
 /// A KWP2000 status byte in words.
+/// KWP2000's status of a code (ISO 14230-3's statusOfDTC): bits 6-5 are one storage state (01 stored, not present now;
+/// 10 maturing or intermittent; 11 present now), bit 7 the warning light; bits 4-0 are the fault's symptom.
 fn kwp_states(s: u8) -> Vec<&'static str> {
-    let mut states = Vec::new();
-    if s & 0x20 != 0 {
-        states.push("stored");
-    }
-    if s & 0x40 != 0 {
-        states.push("present now");
-    }
+    let mut states = match (s >> 5) & 0b11 {
+        0b01 => vec!["stored"],
+        0b10 => vec!["pending (intermittent)"],
+        0b11 => vec!["stored", "present now"],
+        _ => Vec::new(),
+    };
     if s & 0x80 != 0 {
         states.push("warning light requested");
     }
@@ -656,6 +657,19 @@ mod tests {
             nrc(0x31),
             "request out of range (this identifier does not exist here)"
         );
+    }
+
+    /// Bits 6-5 together are one state: 0x40 alone is a maturing (intermittent) code, not one present now.
+    #[test]
+    fn kwp_status_bits_are_one_storage_state() {
+        assert_eq!(kwp_states(0x20), ["stored"]);
+        assert_eq!(kwp_states(0x40), ["pending (intermittent)"]);
+        assert_eq!(kwp_states(0x60), ["stored", "present now"]);
+        assert_eq!(
+            kwp_states(0xE0),
+            ["stored", "present now", "warning light requested"]
+        );
+        assert!(kwp_states(0x00).is_empty());
     }
 
     #[test]

@@ -55,7 +55,8 @@ Vehicle, through an OBD adapter (read-only: nothing is cleared or written):
                                              vehicles); --sweep tries every request ID from 700 to 7F7 (slower;
                                              never 7DF or a known answer ID such as 7E8-7EF)
   icarus obd asbuilt ID[/ANSWER] --adapter A one module's as-built configuration block (22 DE00 on, read only), saved
-                                             in the vehicle's folder: the backup before any configuration change
+                                             in the vehicle's folder: the backup before any configuration change;
+                                             never an airbag module ([--make NAME] when the VIN does not say it)
   icarus obd module ID[/ANSWER] --adapter A  one module (request ID in hex: 7B0, 713/77D, 18DA30F1): identity and codes
   icarus obd data [MODULE...] --adapter A [--set SET] [--year YYYY] [--find TEXT] [--every MS --count N] [--csv FILE]
                   [--all-years] [--all] [--refused]
@@ -1141,7 +1142,16 @@ fn obd_asbuilt(elm: &mut dyn Link, args: &Args) -> Result<(), String> {
         }
     };
     let vin = j1979::vin(elm).map_err(e)?;
-    let b = icarus_obd::asbuilt::read(elm, tx, rx)?;
+    // the make decides the gates (an airbag module, or a module of unknown kind where the make names none, is not swept)
+    let all = profiles();
+    let make = match args.opt("make") {
+        Some(m) => Some(vehicles::find(&all, m)?.id.clone()),
+        None => vin
+            .as_deref()
+            .and_then(|v| vehicles::for_vin(&all, v))
+            .map(|p| p.id.clone()),
+    };
+    let b = icarus_obd::asbuilt::read(elm, tx, rx, &all, make.as_deref())?;
     for (did, bytes) in &b {
         let hex: Vec<String> = bytes.iter().map(|x| format!("{x:02X}")).collect();
         println!("{did:04X}  {}", hex.join(" "));

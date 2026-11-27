@@ -44,6 +44,7 @@ pub mod sim;
 pub mod slcan;
 pub mod socketcan;
 pub mod uds;
+pub mod units;
 pub mod vehicledata;
 pub mod vehicles;
 pub mod vin;

@@ -84,15 +84,7 @@ fn customary_first(u: crate::levels::Units) -> bool {
 
 /// A vehicle's metric value in the customary unit, for the units that have one.
 fn customary(unit: &str, v: f64) -> Option<(f64, &'static str)> {
-    Some(match unit {
-        "km/h" => (v * 0.621371, "mph"),
-        "km" => (v * 0.621371, "mi"),
-        "°C" => (v * 1.8 + 32.0, "°F"),
-        "kPa" => (v * 0.145038, "psi"),
-        "L/h" => (v * 0.264172, "gal/h"),
-        "Nm" => (v * 0.737562, "lb-ft"),
-        _ => return None,
-    })
+    icarus_obd::units::customary(unit, v)
 }
 
 /// A value as shown first: in the chosen units (the window's settings), the vehicle's own where there is no other.
@@ -104,6 +96,21 @@ pub fn shown_in(u: crate::levels::Units, unit: &str, v: f64) -> (f64, &str) {
     match customary(unit, v) {
         Some(c) if customary_first(u) => c,
         _ => (v, unit),
+    }
+}
+
+/// A value as text in the chosen units, the other unit after it in parentheses when both are chosen: "44.7 mph",
+/// "44.7 mph (72.0 km/h)".
+pub fn value_text(unit: &str, v: f64, dec: usize) -> String {
+    value_text_in(units(), unit, v, dec)
+}
+
+pub fn value_text_in(u: crate::levels::Units, unit: &str, v: f64, dec: usize) -> String {
+    let (x, xu) = shown_in(u, unit, v);
+    let first = format!("{x:.dec$} {xu}").trim_end().to_string();
+    match also_in(u, unit, v) {
+        Some((y, yu)) => format!("{first} ({y:.dec$} {yu})"),
+        None => first,
     }
 }
 
@@ -870,6 +877,17 @@ fn value_at(s: &Series, i: usize, t: f64) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Freeze frames use this, so they follow the units setting as live values do.
+    #[test]
+    fn a_value_in_the_chosen_units() {
+        use crate::levels::Units;
+        assert_eq!(value_text_in(Units::Imperial, "km/h", 72.0, 1), "44.7 mph");
+        assert_eq!(value_text_in(Units::Metric, "km/h", 72.0, 1), "72.0 km/h");
+        assert_eq!(value_text_in(Units::Imperial, "°C", 90.0, 0), "194 °F");
+        assert_eq!(value_text_in(Units::Imperial, "rpm", 800.0, 0), "800 rpm");
+    }
+
     use super::*;
 
     #[test]

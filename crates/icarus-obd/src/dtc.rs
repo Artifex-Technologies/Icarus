@@ -43,12 +43,13 @@ pub fn explain(code: &str, profile: Option<&Profile>) -> Result<CodeInfo, String
         b'B' => "body (airbags, climate, lights, doors)",
         _ => "network (communication between modules)",
     };
-    // which ranges are standard (SAE J2012): P0, P2, P34-P39, B0/C0/U0, B3/C3/U3; the maker's: P1, P30-P33, B1-B2, C1-C2, U1-U2
+    // which ranges are standard (SAE J2012): P0, P2, P34-P39, B0/C0/U0; the maker's: P1, P30-P33, B1-B2, C1-C2, U1-U2; B3, C3
+    // and U3 are reserved, with no standard meaning (some makers use them for their own codes)
     let standard = match (b[0], b[1]) {
         (b'P', b'0' | b'2') => true,
         (b'P', b'3') => b[2] >= b'4',
         (b'P', _) => false,
-        (_, b'0' | b'3') => true,
+        (_, b'0') => true,
         _ => false,
     };
     let area = (b[0] == b'P' && b[1] == b'0').then(|| match b[2] {
@@ -119,6 +120,8 @@ pub fn anatomy(i: &CodeInfo) -> String {
         i.system,
         if i.standard {
             "a standard code (same meaning on every vehicle)"
+        } else if &i.code[..1] != "P" && &i.code[1..2] == "3" {
+            "a range SAE J2012 reserves (no standard meaning; a maker may use it for its own code)"
         } else {
             "the maker's own code (its meaning depends on the make)"
         },
@@ -858,6 +861,12 @@ mod tests {
         assert!(
             !explain("P3000", None).unwrap().standard && explain("P3400", None).unwrap().standard
         );
+        // B3, C3 and U3 are reserved by SAE J2012: no standard meaning
+        for reserved in ["U3534", "B3000", "C3101"] {
+            let r = explain(reserved, None).unwrap();
+            assert!(!r.standard && r.text.is_none(), "{reserved}");
+            assert!(anatomy(&r).contains("reserves"), "{}", anatomy(&r));
+        }
         for bad in ["P017", "X0171", "P01711", "P4000", "P01G1"] {
             assert!(explain(bad, None).is_err(), "{bad}");
         }

@@ -1367,9 +1367,10 @@ impl App {
                     .num_columns(2)
                     .spacing(vec2(16.0, 4.0))
                     .show(ui, |ui| {
+                        // in the chosen units, as live values are
                         for (p, v) in &f.values {
                             if let Some(x) = j1979::pid(*p) {
-                                row(ui, x.name, &format!("{v:.1} {}", x.unit));
+                                row(ui, x.name, &logs::value_text(x.unit, *v, 1));
                             }
                         }
                     });
