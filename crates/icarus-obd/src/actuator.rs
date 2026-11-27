@@ -5,7 +5,8 @@
 //! - Only output control goes out: UDS `2F` (with "short-term adjustment" or "return control to the ECU"), KWP2000 `30`
 //!   (likewise), the diagnostic session it needs (`10 03` and back to `10 01`), tester present, and OBD-II reads for the
 //!   conditions. Security access, routines, writing data, clearing codes and programming are refused (`check`).
-//! - Airbag (SRS) and occupant-detection modules are never tested, whatever a definition says.
+//! - Airbag (SRS) and occupant-detection modules are never tested, whatever a definition says, nor immobilizer, smart-key
+//!   and certification modules (`fence`, by address).
 //! - A test has conditions (engine off, engine running, vehicle stationary) checked before it starts and every second while it
 //!   runs, needs at least 11.5 V measured at the port (an adapter that cannot measure it is refused), and stops by itself
 //!   after its time limit (at most 30 s).
@@ -378,6 +379,13 @@ impl Running {
 /// control. On any failure after the session opened, control is handed back before the error returns.
 pub fn start(elm: &mut dyn Link, def: &TestDef, value: f64) -> Result<Running, String> {
     if let Some(why) = def.refused() {
+        return Err(why);
+    }
+    if let Some(why) = crate::fence::current().refuses(def.module.into(), def.rx().into()) {
+        log(&format!(
+            "refused {:03X} \"{}\": a key module",
+            def.module, def.name
+        ));
         return Err(why);
     }
     crate::lock::writes_allowed(elm)?;

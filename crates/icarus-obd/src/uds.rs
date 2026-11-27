@@ -821,6 +821,7 @@ fn swept(
             name: "found by sweep".into(),
             ext: None,
             bus: None,
+            kind: String::new(),
             checked: false,
         })
         .collect()
@@ -1363,6 +1364,7 @@ mod tests {
             ext: None,
             bus: Some("ms-can".into()),
             checked: false,
+            kind: String::new(),
         };
         let step = ScanGuard::new(&all).scan(&mut elm, &ms).unwrap();
         assert!(matches!(step, Step::Unreachable(_)), "{step:?}");
@@ -1504,6 +1506,7 @@ mod tests {
             name: "VSA".into(),
             ext: None,
             bus: None,
+            kind: String::new(),
             checked: false,
         };
         assert_eq!(vsa.rx(), 0x18DA_F128);
@@ -1583,6 +1586,7 @@ mod tests {
             name: "BCM (body)".into(),
             ext: None,
             bus: Some("ms-can".into()),
+            kind: String::new(),
             checked: false,
         }
     }

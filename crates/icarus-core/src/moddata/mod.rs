@@ -192,7 +192,8 @@ pub struct ModuleHead {
     pub bus: Option<String>,
     #[serde(default)]
     pub dialect: Option<Dialect>,
-    /// The source's word for what the module is ("engine", "transmission", "airbag"...); "airbag" means identity only.
+    /// The source's word for what the module is ("engine", "transmission", "airbag"...); "airbag", and the key modules'
+    /// "immobilizer", "smart-key" and "certification", mean identity only.
     #[serde(default)]
     pub kind: String,
     /// Identity fingerprints (what the module's identification values read), to tell variants apart.

@@ -12,7 +12,7 @@ bidirectional shop scanner, a tuning suite and a bus analyser: on Linux, for man
 | --- | --- |
 | Codes | every module (UDS, KWP2000), meanings, where to start, parts and look-up links, freeze frame, readiness, reports, clearing (report first), Mode 06 test results (CAN) |
 | Live data | 92 standard values with graphs; recording a drive from the window (every value the vehicle offers: the fast ones every sweep, the rest in turn; laptop kept awake; goes on after the adapter drops); the Logs page (fuel trims by driving condition, charts on one time line, following a recording as it is written); `drive_logs` for assistants |
-| Bidirectional | actuator tests, fenced (hold-to-run, conditions, airbag ban) |
+| Bidirectional | actuator tests, fenced (hold-to-run, conditions, airbag ban, key modules fenced by address) |
 | Configuration | tires/gears calculator, speedometer check, battery and charging check |
 | Tuning | map viewer, tune diff (XDF) |
 | Vehicle info | VIN decoder, make profiles, named vehicles, vehicle folders, NHTSA model/engine (asks first) and recalls |
@@ -43,12 +43,20 @@ bidirectional shop scanner, a tuning suite and a bus analyser: on Linux, for man
 | Actuator tests (run the fan, open the throttle, cycle the ABS pump, click a relay) | done 2026-11-07: the engine (actuator.rs: allow-list, airbag ban, conditions, 30 s cap, hold-to-run, control returned on every path, log), `[[test]]` profile entries, five on the simulated vehicle. |
 | Learn module data from another tool: a phone's Bluetooth log of an app and its adapter (pcap, PacketLogger), or a bus log (`icarus bus watch --raw`, candump) | done 2026-11-19, tested on small files written for the tests (`icarus import btlog`/`buslog`, docs/CAPTURES.md): a timed transcript and a set of every identifier a module answered on a data read (21, 22; identity reads 1A listed, not imported), unnamed and unverified; only the OBD conversation kept, VINs masked (in requests and answers) |
 | Learn a test from another tool: watch the bus (adapter monitor mode, a Y-cable) while a shop tool runs it, decode its 2F/30 requests into a `[[test]]` entry | done 2026-11-07 (Bus page, icarus bus watch); one button adds it to the vehicle's file |
-| Learning from another tool, as a step of its own | done 2026-11-08: the Learning page and `icarus learn`: marks name what is learned next, settings and tests are named and added there, what is not learned (security access, routines, refused writes) is noted, each session saved in the vehicle's Logs; Sarina (optional) reads a session and suggests what each thing is (`labyrinth-ask-sarina`, read-only; `learning_sessions` in `icarus mcp`) |
+| Learning from another tool, as a step of its own | done 2026-11-08: the Learning page and `icarus learn`: marks name what is learned next, settings, tests and routines are named and added there, what is not learned (security access, refused writes) is noted, each session saved in the vehicle's Logs; Sarina (optional) reads a session and suggests what each thing is (`labyrinth-ask-sarina`, read-only; `learning_sessions` in `icarus mcp`). Since 2026-11-27 (ICA-101): nothing is learned from an immobilizer, smart-key or certification module (fenced by the frame's ID; its messages are not even written into the session), and on any module a write, routine or output test sent after security access (`27`) is noted, never learned, until the module is back in its default session |
 | Settings in the window | done 2026-11-08: the Settings page (value now, change with a yes, undo) |
-| Customizations: a setting a module keeps (Toyota's customizations, FORScan's feature switches) | done 2026-11-08, tested on the simulated vehicle: settings.rs (`22`/`2E`, `21`/`3B` only; value before kept in the vehicle's Logs first, read back, put back if not taken, undo; wired, 12 V, parked, engine off; never airbag, immobiliser, key or odometer), `[[setting]]` profile entries, learned from the bus like tests (`icarus obd settings / setting / setting-undo`). |
+| Customizations: a setting a module keeps (Toyota's customizations, FORScan's feature switches) | done 2026-11-08, tested on the simulated vehicle: settings.rs (`22`/`2E`, `21`/`3B` only; value before kept in the vehicle's Logs first, read back, put back if not taken, undo; wired, 12 V, parked, engine off; never airbag, immobilizer, key or odometer), `[[setting]]` profile entries, learned from the bus like tests (`icarus obd settings / setting / setting-undo`). Since 2026-11-27 (ICA-102): settings that share one identifier each have a `mask`; a change writes the value read just before with only its bits replaced, and the read-back, the put-back and undo touch only them, so one setting never undoes another; the learner gives a learned setting the bits the other tool changed. |
 
-The smaller writes (clearing codes, actuator tests, settings) each have their own module and allow-list, keep what was
-there first and have a way back; flashing and coding open only when the conditions below are built.
+The smaller writes (clearing codes, actuator tests, settings, service routines) each have their own module and allow-list,
+keep what was there first and have a way back; flashing and coding open only when the conditions below are built.
+
+**The key modules' fence** (ICA-101, `crates/icarus-obd/src/fence.rs`). Immobilizer, smart-key and certification
+modules are fenced by address, whatever a definition calls itself: a profile's `[[module]]` or a module-data file's
+`[module]` gives the kind (`kind = "immobilizer"`, `"smart-key"`, `"certification"`; IDs are u32, so 29-bit modules fit).
+Actuator tests, settings (reading them too), service routines and clearing codes refuse such a module before anything is
+sent; an entry aimed at one is left out when the profiles load; module data and the as-built sweep give it identity only;
+the bus learner learns nothing from it and does not write its messages into a session; `icarus mcp` does not ask it. No
+maker's addresses are built in: my truck's go in from its own identity reads once I have confirmed them.
 
 ## Editing (files only)
 

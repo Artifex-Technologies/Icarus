@@ -496,7 +496,7 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
             Some(Cmd::BusMark(_)) => {}
             Some(Cmd::BusStart(source, learning)) => {
                 live.clear();
-                let mut a = icarus_obd::bus::Analyzer::default();
+                let mut a = icarus_obd::bus::Analyzer::watching(icarus_obd::fence::current());
                 let t0 = Instant::now();
                 let mut last_view = Instant::now();
                 let mut pending: Option<Cmd> = None;

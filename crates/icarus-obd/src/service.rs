@@ -3,7 +3,8 @@
 //! vehicle profile, learned by watching another tool on my own vehicle (`bus`) or verified for it; never guessed into a real
 //! vehicle's profile, since an unverified routine ID could start anything. A routine changes the vehicle, so it runs under
 //! the write rules: the Read-Only switch (`lock`), the battery measured at 12 V or more (an adapter that cannot measure it
-//! is refused), its conditions, never an airbag module, a cable for an entry marked `wired` (coding), every run in the
+//! is refused), its conditions, never an airbag module nor an immobilizer, smart-key or certification module (`fence`, by
+//! address, whatever the entry is called), a cable for an entry marked `wired` (coding), every run in the
 //! action log. Only this module's requests go out: the session (10 01 / 10 03), tester present (3E 00), and routine
 //! control (31 01 start, 31 02 stop, 31 03 results) of its own routine with its own parameters (`check`).
 
@@ -147,6 +148,13 @@ fn hex(b: &[u8]) -> String {
 /// whatever happened. Returns what the module answered (the routine's status bytes, in hex).
 pub fn run(link: &mut dyn Link, s: &ServiceDef, wired: bool) -> Result<String, String> {
     if let Some(why) = s.refused() {
+        return Err(why);
+    }
+    if let Some(why) = crate::fence::current().refuses(s.module.into(), s.rx().into()) {
+        log(&format!(
+            "refused {:03X} {:04X} \"{}\": a key module",
+            s.module, s.routine, s.name
+        ));
         return Err(why);
     }
     crate::lock::writes_allowed(link)?;

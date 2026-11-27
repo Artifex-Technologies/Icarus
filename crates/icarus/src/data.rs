@@ -1112,11 +1112,11 @@ impl Watch<'_> {
                     if m.requests.is_empty() {
                         println!(
                             "   no data requests{}",
-                            if self.set.gates.is_airbag(&m.module) {
-                                " (airbag module: identity only)"
-                            } else {
-                                ""
-                            }
+                            self.set
+                                .gates
+                                .identity_only(&m.module)
+                                .map(|why| format!(" ({why})"))
+                                .unwrap_or_default()
                         );
                     }
                 }

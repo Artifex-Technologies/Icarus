@@ -5,7 +5,14 @@
 //! switch and watch which byte follows), puts diagnostic messages (IDs 700-7FF, ISO-TP) back together and says what they
 //! ask, and learns actuator tests from another tool: an output-control request (UDS `2F ... 03`, KWP2000 `30 .. 07`) becomes
 //! a `[[test]]` entry, unchecked, for the vehicle's profile. A write of one data identifier that the module accepts (UDS
-//! `2E`, KWP2000 `3B`) becomes a `[[setting]]` entry the same way, with the value read just before it (`22`/`21`) as "was".
+//! `2E`, KWP2000 `3B`) becomes a `[[setting]]` entry the same way, with the value read just before it (`22`/`21`) as "was"
+//! and the bits the write changed as its mask (ICA-102). A routine another tool starts (`31 01`) becomes a `[[service]]`.
+//!
+//! What is never learned (ICA-101), only noted: anything to or from an immobilizer, smart-key or certification module
+//! (`fence`, by the frame's CAN ID): its messages are not even put in words in the log, so no learning session, and so no
+//! assistant, sees them; and on any module, a write, routine or output test the other tool sent after it unlocked the
+//! module with security access (`27`), since it may need access Icarus never uses. The module counts as unlocked until it
+//! confirms it is back in its default session (`50 01`, KWP2000's `50 81`) or reset (`51`).
 
 use crate::actuator::{Condition, Control, Protocol, TestDef};
 use crate::elm::Protocol as Bus;
@@ -195,9 +202,21 @@ pub struct Analyzer {
     /// J1939 (heavy-duty vehicles, ICA-94): the 29-bit frames read as parameter groups, when the bus is J1939; a change in
     /// a sender's active faults goes into the log.
     pub j1939: Option<crate::j1939::Decoder>,
+    /// The key modules (`fence`): nothing to or from them is learned or put in words.
+    pub fence: crate::fence::Fence,
+    /// Modules (by request ID) the other tool sent security access (27) to, until they are back in their default session.
+    unlocked: HashSet<u16>,
 }
 
 impl Analyzer {
+    /// An analyzer that keeps away from the key modules of `fence` (`fence::current()` for a real watch).
+    pub fn watching(fence: crate::fence::Fence) -> Analyzer {
+        Analyzer {
+            fence,
+            ..Default::default()
+        }
+    }
+
     /// The person is about to do `label` in the other tool: it goes into the log, and names the next test or setting
     /// learned (one change per mark; what follows it gets the usual "Learned: ..." name). An empty label names nothing.
     pub fn mark(&mut self, label: &str, at: f64) {
@@ -242,6 +261,15 @@ impl Analyzer {
         s.data = f.data.clone();
         s.count += 1;
         s.last = f.at;
+        // a key module's frame: counted in the table, never put together, put in words or learned from
+        if let Some(k) = self.fence.on_id(f.id) {
+            let what = format!(
+                "{} is fenced: nothing to or from it is learned or written down here",
+                k.describe()
+            );
+            self.note(what);
+            return;
+        }
         if !f.ext && (0x700..=0x7FF).contains(&f.id) {
             if let Some(msg) = self.isotp(f) {
                 self.diagnostic(f.id, &msg, f.at);
@@ -333,10 +361,6 @@ impl Analyzer {
                     crate::uds::nrc(*code)
                 ));
             }
-            [0x27, level, ..] if level % 2 == 1 => self.note(format!(
-                "{id:03X}: security access (level {level:02X}): the tool unlocked the module first. Icarus never does this, so \
-                 what the tool did next may need it"
-            )),
             // a routine's start is learned as a service entry (`learn`); its stop and results are only noted
             [0x31, kind @ (0x02 | 0x03), hi, lo, ..] => self.note(format!(
                 "{id:03X}: routine {hi:02X}{lo:02X} ({}): part of a service function the tool ran",
@@ -364,15 +388,36 @@ impl Analyzer {
         // what was written is what the module now holds
         self.read_values.insert(key, value.clone());
         let extended = protocol == Protocol::Uds && self.extended.contains(&tx);
-        if let Some(s) = self
-            .settings
-            .iter_mut()
-            .find(|s| s.module == tx && s.id == did && s.protocol == protocol)
-        {
+        // the bits the tool changed (ICA-102): not known without a read before the write, nor when nothing changed
+        let changed: Option<Vec<u8>> = before
+            .as_ref()
+            .map(|b| {
+                b.iter()
+                    .zip(&value)
+                    .map(|(x, y)| x ^ y)
+                    .collect::<Vec<u8>>()
+            })
+            .filter(|m| m.iter().any(|&b| b != 0));
+        // a setting learned on this identifier before whose bits this write touches: another value of the same setting
+        // (its mask grows to the bits seen changing); a write of other bits only is another setting packed in beside it
+        let overlaps = |s: &SettingDef| match (&s.mask, &changed) {
+            (Some(m), Some(c)) => m.iter().zip(c).any(|(m, c)| m & c != 0),
+            _ => true,
+        };
+        let same_id = |s: &SettingDef| {
+            s.module == tx
+                && s.id == did
+                && s.protocol == protocol
+                && s.values.values().next().map_or(0, Vec::len) == value.len()
+        };
+        if let Some(s) = self.settings.iter_mut().find(|s| same_id(s) && overlaps(s)) {
             s.extended |= extended;
-            if value.len() == s.values.values().next().map_or(0, Vec::len)
-                && s.name_of(&value).is_none()
-            {
+            if let (Some(m), Some(c)) = (&mut s.mask, &changed) {
+                for (m, c) in m.iter_mut().zip(c) {
+                    *m |= c;
+                }
+            }
+            if s.name_of(&value).is_none() {
                 let n = (2..)
                     .find(|n| !s.values.contains_key(&format!("set-{n}")))
                     .unwrap_or(2);
@@ -380,15 +425,19 @@ impl Analyzer {
             }
             return;
         }
+        let beside = self.settings.iter().any(same_id);
         let mut values = BTreeMap::new();
         if let Some(b) = before.filter(|b| *b != value) {
             values.insert("was".to_string(), b);
         }
         values.insert("set".to_string(), value);
-        let default = format!(
+        let mut default = format!(
             "Learned: setting {did:0w$X} on {tx:03X}",
             w = if protocol == Protocol::Uds { 4 } else { 2 }
         );
+        if let Some(c) = changed.as_ref().filter(|_| beside) {
+            default += &format!(", bits {}", hex(c).replace(' ', ""));
+        }
         let s = SettingDef {
             name: self.name_for(default, false),
             module: tx,
@@ -396,22 +445,82 @@ impl Analyzer {
             protocol,
             id: did,
             values,
+            mask: changed,
             extended,
             conditions: vec![Condition::EngineOff, Condition::Stationary],
             note: format!("Learned by watching another tool ({}): find out what it changes before relying on it.", crate::report::now()),
             checked: false,
         };
-        match s.refused() {
+        match s
+            .refused()
+            .or_else(|| self.fence.refuses(tx.into(), s.rx().into()))
+        {
             None => {
                 self.name_for(String::new(), true);
+                if beside {
+                    self.note(format!(
+                        "{tx:03X} {did:X}: the tool changed other bits of an identifier a setting was learned on, so \
+                         \"{}\" is learned as a setting of its own beside it (its own mask); if they are one setting, \
+                         give them one entry",
+                        s.name
+                    ));
+                }
                 self.settings.push(s);
             }
             Some(why) => self.note(format!("{tx:03X} {did:X}: {why}")),
         }
     }
 
+    /// Security access (ICA-101): a module the tool sends `27` to counts as unlocked until it says it is back in its
+    /// default session (UDS `50 01`, KWP2000 `50 81`) or was reset (`51`). Returns whether `msg`, sent to `tx`, is a write,
+    /// routine or output test the tool sent to an unlocked module: those are noted, never learned (they may need access
+    /// Icarus never uses).
+    fn after_unlock(&mut self, tx: u16, msg: &[u8]) -> bool {
+        match msg {
+            [0x27, level, ..] => {
+                if self.unlocked.insert(tx) {
+                    self.note(format!(
+                        "{tx:03X}: security access (level {level:02X}): the tool unlocked the module. Icarus never does \
+                         this, so no write, routine or output test the tool sends {tx:03X} from here on is learned, until \
+                         the module is back in its default session"
+                    ));
+                }
+                return false;
+            }
+            [0x50, 0x01 | 0x81, ..] | [0x51, ..] => {
+                let module = tx.wrapping_sub(8);
+                if self.unlocked.remove(&module) {
+                    self.note(format!(
+                        "{module:03X} is back in its default session (locked again): what the tool does on it is learned \
+                         again"
+                    ));
+                }
+                return false;
+            }
+            _ => {}
+        }
+        if !self.unlocked.contains(&tx) {
+            return false;
+        }
+        let what = match msg {
+            [0x2E, hi, lo, ..] => format!("a write to {hi:02X}{lo:02X}"),
+            [0x3B, lid, ..] => format!("a write to local identifier {lid:02X}"),
+            [0x31, 0x01, hi, lo, ..] => format!("routine {hi:02X}{lo:02X}"),
+            [0x2F, hi, lo, 0x03, ..] => format!("output control {hi:02X}{lo:02X}"),
+            [0x30, lid, 0x07, ..] => format!("output control {lid:02X}"),
+            _ => return false,
+        };
+        self.note(format!(
+            "{tx:03X}: {what} after security access (27): it may need access Icarus never uses, so it is not learned"
+        ));
+        true
+    }
+
     /// An output-control request from another tool becomes a test (the most cautious conditions, unchecked).
     fn learn(&mut self, tx: u16, msg: &[u8]) {
+        if self.after_unlock(tx, msg) {
+            return;
+        }
         self.learn_setting(tx, msg);
         // a routine another tool started: a service entry, unchecked, with the most cautious conditions
         if let [0x31, 0x01, hi, lo, params @ ..] = msg {
@@ -439,7 +548,10 @@ impl Analyzer {
                     ),
                     checked: false,
                 };
-                match s.refused() {
+                match s
+                    .refused()
+                    .or_else(|| self.fence.refuses(tx.into(), s.rx().into()))
+                {
                     None => {
                         self.name_for(String::new(), true);
                         self.services.push(s);
@@ -493,7 +605,10 @@ impl Analyzer {
             watch: None,
             checked: false,
         };
-        match t.refused() {
+        match t
+            .refused()
+            .or_else(|| self.fence.refuses(tx.into(), t.rx().into()))
+        {
             None => {
                 self.name_for(String::new(), true);
                 self.learned.push(t);
@@ -613,7 +728,8 @@ mod tests {
             (0x7C8, &[0x04, 0x62, 0xA0, 0x01, 0x01]),
             (0x7C0, &[0x04, 0x2E, 0xA0, 0x01, 0x00]),
             (0x7C8, &[0x03, 0x6E, 0xA0, 0x01]),
-            (0x7C0, &[0x04, 0x2E, 0xA0, 0x01, 0x02]),
+            // a second write that changes the same bit and the one beside it: the same setting, its mask grows
+            (0x7C0, &[0x04, 0x2E, 0xA0, 0x01, 0x03]),
             (0x7C8, &[0x03, 0x6E, 0xA0, 0x01]),
             // refused: not learned
             (0x7B0, &[0x03, 0x3B, 0x30, 0x01]),
@@ -645,9 +761,14 @@ mod tests {
             v,
             vec![
                 ("set", &[0x00][..]),
-                ("set-2", &[0x02][..]),
+                ("set-2", &[0x03][..]),
                 ("was", &[0x01][..])
             ]
+        );
+        assert_eq!(
+            s.mask,
+            Some(vec![0x03]),
+            "01 to 00 changed bit 0, 00 to 03 bits 0 and 1"
         );
         let entry = crate::settings::to_toml(s);
         let p = crate::vehicles::parse("x", "test", &format!("name = \"x\"\n{entry}")).unwrap();
@@ -664,8 +785,8 @@ mod tests {
             (0x7C8, &[0x03, 0x6E, 0xA0, 0x01]),
             (0x7C0, &[0x04, 0x2E, 0xA0, 0x02, 0x01]),
             (0x7C8, &[0x03, 0x6E, 0xA0, 0x02]),
-            (0x7E0, &[0x02, 0x27, 0x01]),
             (0x7E0, &[0x04, 0x31, 0x01, 0xFF, 0x00]),
+            (0x7E0, &[0x02, 0x27, 0x01]),
             (0x7B0, &[0x03, 0x3B, 0x30, 0x01]),
             (0x7B8, &[0x03, 0x7F, 0x3B, 0x22]),
         ];
@@ -692,7 +813,8 @@ mod tests {
             "{:?}",
             a.notes
         );
-        // the routine the tool started is learned as a service entry, unchecked, with the most cautious conditions
+        // the routine the tool started (before any security access) is learned as a service entry, unchecked, with the
+        // most cautious conditions
         assert_eq!(a.services.len(), 1);
         let r = &a.services[0];
         assert_eq!(
@@ -709,14 +831,184 @@ mod tests {
         );
         // a mark that names a refused kind of setting does not get it learned
         let mut b = Analyzer::default();
-        b.mark("immobiliser: add a key", 0.0);
+        b.mark("immobilizer: add a key", 0.0);
         b.add(&f(0x750, &[0x04, 0x2E, 0x10, 0x01, 0x01], 1.0));
         b.add(&f(0x758, &[0x03, 0x6E, 0x10, 0x01], 1.1));
         assert!(
-            b.settings.is_empty() && b.notes[0].contains("immobiliser"),
+            b.settings.is_empty() && b.notes[0].contains("immobilizer"),
             "{:?}",
             b.notes
         );
+    }
+
+    /// A key registration as a dealer tool might run it (ICA-101): the extended session, security access (27 01 seed,
+    /// 27 02 key), then a routine, a write and an output test. On a simulated smart-key module (fenced by address, its
+    /// name innocent) and on a module of no kind at all, nothing is learned, and the notes say why.
+    fn key_registration(module: u32) -> Vec<(u32, Vec<u8>)> {
+        let answer = module + 8;
+        vec![
+            (module, vec![0x02, 0x10, 0x03]),
+            (answer, vec![0x02, 0x50, 0x03]),
+            (module, vec![0x02, 0x27, 0x01]),
+            (answer, vec![0x04, 0x67, 0x01, 0x12, 0x34]),
+            (module, vec![0x04, 0x27, 0x02, 0x56, 0x78]),
+            (answer, vec![0x02, 0x67, 0x02]),
+            (module, vec![0x04, 0x31, 0x01, 0x12, 0x34]),
+            (answer, vec![0x04, 0x71, 0x01, 0x12, 0x34]),
+            (module, vec![0x03, 0x22, 0x10, 0x01]),
+            (answer, vec![0x04, 0x62, 0x10, 0x01, 0x00]),
+            (module, vec![0x04, 0x2E, 0x10, 0x01, 0x01]),
+            (answer, vec![0x03, 0x6E, 0x10, 0x01]),
+            (module, vec![0x05, 0x2F, 0x20, 0x01, 0x03, 0x01]),
+            (answer, vec![0x05, 0x6F, 0x20, 0x01, 0x03, 0x01]),
+        ]
+    }
+
+    fn watch(a: &mut Analyzer, frames: &[(u32, Vec<u8>)], from: f64) {
+        for (i, (id, d)) in frames.iter().enumerate() {
+            a.add(&f(*id, d, from + i as f64));
+        }
+    }
+
+    #[test]
+    fn nothing_is_learned_from_a_key_module_or_after_security_access() {
+        // a smart-key module, by address: its name says nothing about keys
+        let fence = crate::fence::one_for_test(0x7D5, crate::fence::Kind::SmartKey);
+        let mut a = Analyzer::watching(fence.clone());
+        a.mark("Door lock buzzer", 0.0);
+        watch(&mut a, &key_registration(0x7D5), 1.0);
+        assert!(
+            a.services.is_empty() && a.settings.is_empty() && a.learned.is_empty(),
+            "{:?} {:?} {:?}",
+            a.services,
+            a.settings,
+            a.learned
+        );
+        assert_eq!(a.notes.len(), 1, "{:?}", a.notes);
+        assert!(
+            a.notes[0].contains("7D5 (the smart-key module) is fenced"),
+            "{:?}",
+            a.notes
+        );
+        // its messages are not put in words: the log has the mark and the note, nothing the tool or the module said
+        assert!(
+            a.log
+                .iter()
+                .all(|l| !l.contains("request") && !l.contains("answer") && !l.contains("1234")),
+            "{:?}",
+            a.log
+        );
+        assert_eq!((a.frames, a.ids.len()), (14, 2), "counted in the table");
+        // a module of no kind at all: the same session teaches nothing either, and each thing is noted
+        let mut b = Analyzer::watching(fence.clone());
+        watch(&mut b, &key_registration(0x7A4), 1.0);
+        assert!(
+            b.services.is_empty() && b.settings.is_empty() && b.learned.is_empty(),
+            "{:?} {:?} {:?}",
+            b.services,
+            b.settings,
+            b.learned
+        );
+        for why in [
+            "7A4: security access (level 01)",
+            "7A4: routine 1234 after security access",
+            "7A4: a write to 1001 after security access",
+            "7A4: output control 2001 after security access",
+        ] {
+            assert!(
+                b.notes.iter().any(|n| n.contains(why)),
+                "{why}: {:?}",
+                b.notes
+            );
+        }
+        assert_eq!(b.notes.len(), 4, "27 02 is the same unlock: {:?}", b.notes);
+        // the same routine with no 27 before it is learned as before
+        let mut c = Analyzer::watching(fence.clone());
+        let plain: Vec<(u32, Vec<u8>)> = key_registration(0x7A4)
+            .into_iter()
+            .filter(|(_, d)| d[1] != 0x27 && d[1] != 0x67)
+            .collect();
+        watch(&mut c, &plain, 1.0);
+        assert_eq!(
+            c.services
+                .iter()
+                .map(|s| (s.module, s.routine, s.name.as_str()))
+                .collect::<Vec<_>>(),
+            [(0x7A4, 0x1234, "Learned: routine 1234 on 7A4")]
+        );
+        assert_eq!((c.settings.len(), c.learned.len()), (1, 1), "{:?}", c.notes);
+        // once the module says it is back in its default session it is locked again, and learned from again
+        let mut d = Analyzer::watching(fence);
+        watch(&mut d, &key_registration(0x7A4), 1.0);
+        watch(
+            &mut d,
+            &[
+                (0x7A4, vec![0x02, 0x10, 0x01]),
+                (0x7AC, vec![0x02, 0x50, 0x01]),
+                (0x7A4, vec![0x04, 0x31, 0x01, 0x56, 0x78]),
+            ],
+            20.0,
+        );
+        assert_eq!(
+            d.services.iter().map(|s| s.routine).collect::<Vec<_>>(),
+            [0x5678],
+            "{:?}",
+            d.notes
+        );
+        assert!(d
+            .notes
+            .iter()
+            .any(|n| n.contains("7A4 is back in its default session")));
+    }
+
+    /// ICA-102: a write that changes some bits of an identifier is learned with those bits as its mask; a later write that
+    /// changes only other bits of it is another setting packed beside it, with its own mask and name.
+    #[test]
+    fn a_learned_setting_carries_the_bits_the_tool_changed() {
+        let mut a = Analyzer::default();
+        watch(
+            &mut a,
+            &[
+                (0x7C0, vec![0x02, 0x10, 0x03]),
+                (0x7C8, vec![0x02, 0x50, 0x03]),
+                (0x7C0, vec![0x03, 0x22, 0xA0, 0x02]),
+                (0x7C8, vec![0x04, 0x62, 0xA0, 0x02, 0x05]),
+                // the auto door lock off: bit 0
+                (0x7C0, vec![0x04, 0x2E, 0xA0, 0x02, 0x04]),
+                (0x7C8, vec![0x03, 0x6E, 0xA0, 0x02]),
+                // the interior light's fade long: bits 2 and 3 (01 to 10)
+                (0x7C0, vec![0x04, 0x2E, 0xA0, 0x02, 0x08]),
+                (0x7C8, vec![0x03, 0x6E, 0xA0, 0x02]),
+            ],
+            0.0,
+        );
+        assert_eq!(a.settings.len(), 2, "{:?}", a.settings);
+        let (lock, fade) = (&a.settings[0], &a.settings[1]);
+        assert_eq!(lock.mask, Some(vec![0x01]));
+        assert_eq!(
+            (lock.values["was"].clone(), lock.values["set"].clone()),
+            (vec![0x05], vec![0x04])
+        );
+        assert_eq!(fade.mask, Some(vec![0x0C]));
+        assert_eq!(fade.name, "Learned: setting A002 on 7C0, bits 0C");
+        assert_eq!(
+            (fade.values["was"].clone(), fade.values["set"].clone()),
+            (vec![0x04], vec![0x08])
+        );
+        assert!(
+            a.notes
+                .iter()
+                .any(|n| n.contains("a setting of its own beside it")),
+            "{:?}",
+            a.notes
+        );
+        // the entries round-trip through a profile, the masks with them
+        for s in &a.settings {
+            let entry = crate::settings::to_toml(s);
+            assert!(entry.contains("mask = ["), "{entry}");
+            let p = crate::vehicles::parse("x", "test", &format!("name = \"x\"\n{entry}")).unwrap();
+            assert_eq!(&p.settings[0], s, "{entry}");
+        }
     }
 
     #[test]

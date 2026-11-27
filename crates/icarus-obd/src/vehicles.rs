@@ -64,6 +64,10 @@ pub struct ModuleAddr {
     /// "hs-can" (the default, OBD pins 6 and 14) or another bus the adapter has to switch to ("ms-can" on older Fords).
     #[serde(default)]
     pub bus: Option<String>,
+    /// What the module is, when the file says. "immobilizer", "smart-key" and "certification" fence it (`fence`): its
+    /// identity is read and nothing else, and nothing is learned from it. Other words are kept as written.
+    #[serde(default)]
+    pub kind: String,
     /// True once Icarus has seen the module answer there on a real vehicle.
     #[serde(default)]
     pub checked: bool,
@@ -154,6 +158,7 @@ impl ModuleRange {
                 name: format!("{} {tx:03X}", self.name),
                 ext: None,
                 bus: None,
+                kind: String::new(),
                 checked: false,
             })
             .collect()
@@ -273,17 +278,15 @@ pub fn user_dir() -> Option<PathBuf> {
 }
 
 /// The built-in profiles plus the user's files (a user file replaces the built-in one of the same name). A broken user file
-/// is reported and left out; it never stops Icarus.
+/// is reported and left out; it never stops Icarus. A test, setting or service routine aimed at a key module any profile
+/// names (`fence`) is left out too, and reported, whatever it calls itself.
 pub fn load(dir: Option<&Path>) -> (Vec<Profile>, Vec<String>) {
     let mut all = builtin();
     let mut problems = Vec::new();
-    let Some(dir) = dir else {
-        return (all, problems);
-    };
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return (all, problems);
-    };
-    let mut files: Vec<PathBuf> = entries
+    let mut files: Vec<PathBuf> = dir
+        .and_then(|d| std::fs::read_dir(d).ok())
+        .into_iter()
+        .flatten()
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|x| x == "toml"))
@@ -309,7 +312,50 @@ pub fn load(dir: Option<&Path>) -> (Vec<Profile>, Vec<String>) {
             Err(e) => problems.push(e),
         }
     }
+    // once every file is in: an entry aimed at a key module any profile names is left out, and said
+    let fence = crate::fence::Fence::of(&all);
+    if !fence.is_empty() {
+        for p in &mut all {
+            let refused = fenced_entries(p, &fence);
+            if refused.is_empty() {
+                continue;
+            }
+            p.tests
+                .retain(|t| fence.refuses(t.module.into(), t.rx().into()).is_none());
+            p.settings
+                .retain(|s| fence.refuses(s.module.into(), s.rx().into()).is_none());
+            p.services
+                .retain(|s| fence.refuses(s.module.into(), s.rx().into()).is_none());
+            problems.extend(
+                refused
+                    .into_iter()
+                    .map(|why| format!("{}: {why} (left out)", p.source)),
+            );
+        }
+    }
     (all, problems)
+}
+
+/// Each test, setting and service routine of `p` aimed at a key module of `fence`, with the reason.
+fn fenced_entries(p: &Profile, fence: &crate::fence::Fence) -> Vec<String> {
+    let tests = p.tests.iter().map(|t| ("test", &t.name, t.module, t.rx()));
+    let settings = p
+        .settings
+        .iter()
+        .map(|s| ("setting", &s.name, s.module, s.rx()));
+    let services = p
+        .services
+        .iter()
+        .map(|s| ("service", &s.name, s.module, s.rx()));
+    tests
+        .chain(settings)
+        .chain(services)
+        .filter_map(|(what, name, tx, rx)| {
+            fence
+                .refuses(tx.into(), rx.into())
+                .map(|why| format!("{what} \"{name}\" {why}"))
+        })
+        .collect()
 }
 
 /// A user file adds to the built-in profile of the same name: its name and notes (when given) replace, VIN prefixes and
@@ -374,11 +420,17 @@ pub fn add_test_to_user_file(profile_id: &str, entry: &str) -> Result<PathBuf, S
     {
         return Err(format!("bad profile name {profile_id:?}"));
     }
-    parse(
+    let new = parse(
         profile_id,
         "the new entry",
         &format!("name = \"check\"\n{entry}"),
     )?;
+    if let Some(why) = fenced_entries(&new, &crate::fence::current())
+        .into_iter()
+        .next()
+    {
+        return Err(format!("the new entry: {why}"));
+    }
     let dir = user_dir().ok_or("no config folder")?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let p = dir.join(format!("{profile_id}.toml"));
@@ -573,6 +625,7 @@ fn obd_range() -> Vec<ModuleAddr> {
             },
             ext: None,
             bus: None,
+            kind: String::new(),
             checked: false,
         })
         .collect()
@@ -599,6 +652,7 @@ pub fn candidates_on(p: &Profile, protocol: crate::elm::Protocol) -> Vec<ModuleA
             name: name.into(),
             ext: None,
             bus: None,
+            kind: String::new(),
             checked: false,
         })
         .collect();

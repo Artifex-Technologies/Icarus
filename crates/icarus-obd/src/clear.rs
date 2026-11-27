@@ -76,10 +76,15 @@ pub fn refused(tx: u16, rx: u16, name: &str) -> Option<String> {
     ))
 }
 
-/// All of one module's codes (UDS or KWP2000, as the module spoke when its codes were read). Never an airbag module.
+/// All of one module's codes (UDS or KWP2000, as the module spoke when its codes were read). Never an airbag module, nor an
+/// immobilizer, smart-key or certification module (`fence`): those get their identity and codes read, and nothing else.
 pub fn clear_module(elm: &mut dyn Link, tx: u16, rx: u16, dialect: Dialect) -> Result<(), String> {
     if let Some(why) = refused(tx, rx, "") {
         crate::audit::log(&format!("clear {tx:03X} refused: an airbag module"));
+        return Err(why);
+    }
+    if let Some(why) = crate::fence::current().refuses(tx.into(), rx.into()) {
+        crate::audit::log(&format!("clear {tx:03X} refused: a key module"));
         return Err(why);
     }
     crate::lock::writes_allowed(elm)?;

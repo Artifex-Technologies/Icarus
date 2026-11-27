@@ -217,8 +217,12 @@ pub fn read(
             modules.push(mv);
             continue;
         }
-        if m.requests.is_empty() && set.gates.is_airbag(&m.module) {
-            mv.notes.push("airbag module: identity only".into());
+        if let Some(why) = set
+            .gates
+            .identity_only(&m.module)
+            .filter(|_| m.requests.is_empty())
+        {
+            mv.notes.push(why);
         }
         for (r, o) in moddata::read_module(link, &mut pacer, &set.gates, m, &scope, None) {
             changed |= state.record(moddata::key(m, r), &o, &today);

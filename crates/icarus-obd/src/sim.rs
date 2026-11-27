@@ -310,9 +310,14 @@ impl SimCar {
             stma: false,
             stm_filtered: false,
             routines: Default::default(),
-            settings: [((0x7C0, 0xA001), vec![0x01]), ((0x7B0, 0x20), vec![0x00])]
-                .into_iter()
-                .collect(),
+            // A002: the auto door lock on (bit 0) and the interior light's short fade (bits 2-3: 01)
+            settings: [
+                ((0x7C0, 0xA001), vec![0x01]),
+                ((0x7C0, 0xA002), vec![0x05]),
+                ((0x7B0, 0x20), vec![0x00]),
+            ]
+            .into_iter()
+            .collect(),
             caf: true,
             csm: true,
             stn: false,
@@ -1105,20 +1110,23 @@ impl SimCar {
             ([0x18, ..], false) => Some([&[0x58, (codes.len() / 3) as u8][..], codes].concat()),
             // settings: the cluster's chime (UDS, changed only in the extended session), the ABS module's buzzer (KWP2000,
             // changed only with the engine off)
-            ([0x22, 0xA0, 0x01], true) if tx == 0x7C0 => {
-                Some([&[0x62, 0xA0, 0x01][..], &self.settings[&(tx, 0xA001)]].concat())
+            ([0x22, 0xA0, lo @ (0x01 | 0x02)], true) if tx == 0x7C0 => {
+                let id = u16::from_be_bytes([0xA0, *lo]);
+                Some([&[0x62, 0xA0, *lo][..], &self.settings[&(tx, id)]].concat())
             }
+            // A001 takes 00 or 01; A002 any byte (two settings share it)
             ([0x2E, hi, lo, v @ ..], true) if tx == 0x7C0 => {
-                if u16::from_be_bytes([*hi, *lo]) != 0xA001 {
+                let id = u16::from_be_bytes([*hi, *lo]);
+                if id != 0xA001 && id != 0xA002 {
                     return refuse(0x31);
                 }
                 if !self.extended.contains(&tx) {
                     return refuse(0x7F);
                 }
-                if v.len() != 1 || v[0] > 1 {
+                if v.len() != 1 || (id == 0xA001 && v[0] > 1) {
                     return refuse(if v.len() != 1 { 0x13 } else { 0x31 });
                 }
-                self.settings.insert((tx, 0xA001), v.to_vec());
+                self.settings.insert((tx, id), v.to_vec());
                 Some(vec![0x6E, *hi, *lo])
             }
             ([0x21, 0x20], false) if tx == 0x7B0 => {
@@ -1721,8 +1729,9 @@ pub fn data() -> &'static [(&'static str, &'static str)] {
     ]
 }
 
-/// The simulated vehicle's settings. Like its tests, their identifiers (A001 on the cluster, 20 on the ABS module) exist only
-/// in this simulation.
+/// The simulated vehicle's settings. Like its tests, their identifiers (A001 and A002 on the cluster, 20 on the ABS module)
+/// exist only in this simulation. A002 holds two settings in one byte (ICA-102): the auto door lock in bit 0 and the interior
+/// light's fade time in bits 2-3, each with its mask.
 pub fn settings() -> Vec<crate::settings::SettingDef> {
     use crate::actuator::{Condition::*, Protocol};
     let s = |name: &str, module: u16, protocol: Protocol, id: u16, extended: bool| {
@@ -1738,11 +1747,20 @@ pub fn settings() -> Vec<crate::settings::SettingDef> {
             ]
             .into_iter()
             .collect(),
+            mask: None,
             extended,
             conditions: vec![EngineOff, Stationary],
             note: String::new(),
             checked: true,
         }
+    };
+    let packed = |name: &str, mask: u8, values: &[(&str, u8)]| crate::settings::SettingDef {
+        values: values
+            .iter()
+            .map(|(n, v)| (n.to_string(), vec![*v]))
+            .collect(),
+        mask: Some(vec![mask]),
+        ..s(name, 0x7C0, Protocol::Uds, 0xA002, true)
     };
     vec![
         s(
@@ -1758,6 +1776,16 @@ pub fn settings() -> Vec<crate::settings::SettingDef> {
             Protocol::Kwp,
             0x20,
             false,
+        ),
+        packed(
+            "Cluster: auto door lock",
+            0x01,
+            &[("off", 0x00), ("on", 0x01)],
+        ),
+        packed(
+            "Cluster: interior light fade",
+            0x0C,
+            &[("off", 0x00), ("short", 0x04), ("long", 0x08)],
         ),
     ]
 }

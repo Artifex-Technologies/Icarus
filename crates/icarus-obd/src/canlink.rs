@@ -1060,6 +1060,7 @@ mod tests {
             ext: None,
             bus: None,
             checked: false,
+            kind: String::new(),
         };
         let car = || SimCar::new().with_module(0x6F0, 0x6F8);
         let mut l = link(car());

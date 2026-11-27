@@ -19,6 +19,8 @@
 //!    differ: the stricter holds; `Gates::for_vehicle`) has no profile naming its airbag module (GM, Honda, Nissan,
 //!    Stellantis, BMW... today), or is not known, a module whose kind is not known (no `kind`, not in the profile) gets
 //!    none either: it could be the airbag module;
+//!    immobilizer, smart-key and certification modules (`fence`: by their file's kind or name, or an address any vehicle
+//!    profile gives one of those kinds; 29-bit IDs too): identity only, as the airbag module;
 //!    one request ID is one module: a second module file on the same ID gets no data requests;
 //!    a sweep (reads of identifiers no file lists: the as-built block, discovery later) passes `Gates::sweep` besides
 //!    (ICA-100): chassis and driver-assist modules (ABS and stability control, brakes, steering, radar, cameras, cruise,
@@ -108,6 +110,8 @@ pub struct Gates {
     /// Addresses (request ID, extended address) the vehicle's profile names as a chassis or driver-assist module (with
     /// the make unknown, every profile's): (the profile's id, the name it gives, what kind of module that is).
     chassis_at: BTreeMap<(u16, Option<u8>), (String, String, &'static str)>,
+    /// The immobilizer, smart-key and certification modules every vehicle profile names (`fence`).
+    fence: crate::fence::Fence,
 }
 
 /// What makes a module a chassis or driver-assist one (ICA-100): a word of its kind or name, in upper or lower case, whole
@@ -324,6 +328,7 @@ impl Gates {
         Gates {
             skips,
             chassis_at,
+            fence: crate::fence::Fence::of(profiles),
             profiles: profiles.to_vec(),
             airbag_tx: airbags
                 .iter()
@@ -460,11 +465,27 @@ impl Gates {
             || (h.ext.is_none() && small(h.rx()).is_some_and(|r| self.airbag_rx.contains(&r)))
     }
 
+    /// The kind of key module `h` is, if it is one (`fence`): by its own file's kind or name, or at an address a vehicle
+    /// profile gives one of those kinds. Any kind of ID: 29-bit addresses are matched whole.
+    pub fn key_module(&self, h: &ModuleHead) -> Option<crate::fence::Kind> {
+        crate::fence::Kind::of(&h.kind, &h.name)
+            .or_else(|| self.fence.at(h.tx, h.ext, h.rx()).map(|f| f.kind))
+    }
+
+    /// Why a module gets its identity read and nothing else, if it does: an airbag or occupant module, or a key module.
+    pub fn identity_only(&self, h: &ModuleHead) -> Option<String> {
+        if self.is_airbag(h) {
+            return Some("airbag module: identity only".into());
+        }
+        self.key_module(h)
+            .map(|k| format!("{} module: identity only", k.word()))
+    }
+
     /// Why no data request may go to this module, if none may.
     pub fn module_refused(&self, m: &ModuleDef) -> Option<String> {
         let h = &m.module;
-        if self.is_airbag(h) {
-            return Some("airbag module: identity only".into());
+        if let Some(why) = self.identity_only(h) {
+            return Some(why);
         }
         if h.ids != Ids::Can11 {
             return None; // not reachable yet, which `reachable` says; its IDs are not 11-bit request IDs
@@ -570,11 +591,20 @@ pub fn reachable(m: &ModuleDef) -> Result<(), &'static str> {
 /// a vehicle's state and the pacer know a module by its request ID.
 pub fn gate(modules: &mut [ModuleDef], gates: &Gates) -> Vec<(String, String)> {
     let mut out = Vec::new();
-    // a request ID one file calls the airbag module's is the airbag module's in every file
+    // a request ID one file calls the airbag module's is the airbag module's in every file, and the same for a key module
     let airbag: BTreeSet<(&str, u32)> = modules
         .iter()
         .filter(|m| m.module.ext.is_none() && gates.is_airbag(&m.module))
         .map(|m| (m.module.ids.word(), m.module.tx))
+        .collect();
+    let keys: HashMap<(&str, u32), crate::fence::Kind> = modules
+        .iter()
+        .filter(|m| m.module.ext.is_none())
+        .filter_map(|m| {
+            gates
+                .key_module(&m.module)
+                .map(|k| ((m.module.ids.word(), m.module.tx), k))
+        })
         .collect();
     let mut first: HashMap<(&str, u32), u32> = HashMap::new();
     for m in modules.iter_mut() {
@@ -585,6 +615,8 @@ pub fn gate(modules: &mut [ModuleDef], gates: &Gates) -> Vec<(String, String)> {
             None
         } else if airbag.contains(&id) {
             Some("airbag module: identity only".to_string())
+        } else if let Some(k) = keys.get(&id) {
+            Some(format!("{} module: identity only", k.word()))
         } else {
             match first.get(&id) {
                 Some(rx) => Some(format!(
@@ -1906,6 +1938,111 @@ mod tests {
                 "{tx}, a {set_make} set on a {vehicle}: {e}"
             );
         }
+    }
+
+    /// ICA-101: module-data files of the key kinds load, and get no data request (identity only), as the airbag module;
+    /// so does a module of an innocent kind at an address a vehicle profile gives a key kind, a 29-bit one included, and
+    /// the as-built sweep sends such a module nothing.
+    #[test]
+    fn key_modules_get_no_data_request() {
+        use crate::sim::recording::Recorder;
+        let builtin = crate::vehicles::builtin();
+        for (extra, why) in [
+            (
+                "kind = \"immobilizer\"",
+                "immobilizer module: identity only",
+            ),
+            ("kind = \"smart-key\"", "smart-key module: identity only"),
+            (
+                "kind = \"certification\"",
+                "certification module: identity only",
+            ),
+            (
+                "kind = \"immobiliser ECU\"",
+                "immobilizer module: identity only",
+            ),
+        ] {
+            // read as a set's files, as the loader reads them
+            let file = format!(
+                "format = 1\n[module]\nname = \"m\"\ntx = 0x7D5\n{extra}\n[[request]]\nservice = 0x22\nident = 0x1F21\n\
+                 [[request.value]]\nid = \"X\"\nname = \"x\"\nbyte = 0\nbits = 8\n"
+            );
+            let set = "format = 1\nname = \"keys\"\nmake = \"toyota\"\n[source]\nfrom = \"hand\"\n";
+            let (info, mut ms, problems) = read_files(
+                &[("set.toml".into(), set.into()), ("7D5.toml".into(), file)],
+                "test",
+            )
+            .unwrap();
+            assert!(problems.is_empty(), "{problems:?}");
+            let gates = Gates::new(&builtin, &ms, &info.make);
+            let refused = gate(&mut ms, &gates);
+            assert_eq!(refused.len(), 1, "{extra}");
+            assert_eq!(refused[0].1, why, "{extra}");
+            assert!(ms[0].requests.is_empty(), "kept for its identity");
+            assert_eq!(gates.identity_only(&ms[0].module).as_deref(), Some(why));
+        }
+        // by a profile's address, whatever the module's own file says
+        let p = crate::vehicles::parse(
+            "toyota",
+            "a test",
+            "name = \"t\"\n\
+             [[module]]\ntx = 0x7D5\nname = \"module\"\nkind = \"smart-key\"\n\
+             [[module]]\ntx = 0x18DA40F1\nname = \"module\"\nkind = \"certification\"\n\
+             [[module]]\ntx = 0x750\nrx = 0x758\next = 0x5C\nname = \"module\"\nkind = \"immobilizer\"\n",
+        )
+        .unwrap();
+        let profiles = [builtin.clone(), vec![p]].concat();
+        let body = module("0x7D5", "");
+        let wide = module("0x18DA40F1", "ids = \"can29\"");
+        let behind = module("0x750", "rx = 0x758\next = 0x5C\ntester = 0x5C");
+        let main_body = module("0x750", "rx = 0x758\next = 0x40\ntester = 0x40");
+        let gates = Gates::new(
+            &profiles,
+            &[
+                body.clone(),
+                wide.clone(),
+                behind.clone(),
+                main_body.clone(),
+            ],
+            "toyota",
+        );
+        assert_eq!(
+            gates.module_refused(&body).as_deref(),
+            Some("smart-key module: identity only")
+        );
+        assert_eq!(
+            gates.module_refused(&wide).as_deref(),
+            Some("certification module: identity only"),
+            "29-bit, matched whole"
+        );
+        assert_eq!(
+            gates.module_refused(&behind).as_deref(),
+            Some("immobilizer module: identity only")
+        );
+        assert_eq!(
+            gates.module_refused(&main_body),
+            None,
+            "another module behind the same gateway is not fenced"
+        );
+        let (port, log) = Recorder::new(SimCar::new());
+        let mut elm = Elm::connect(Box::new(port)).unwrap();
+        log.lock().unwrap().clear();
+        let o = read_request(
+            &mut elm,
+            &mut pacer(),
+            &gates,
+            &body,
+            &body.requests[0],
+            &Scope::default(),
+        );
+        assert_eq!(
+            o,
+            Outcome::Skipped("smart-key module: identity only".into())
+        );
+        let e = crate::asbuilt::read(&mut elm, 0x7D5, 0x7DD, &profiles, Some("toyota"), None)
+            .unwrap_err();
+        assert!(e.contains("smart-key module: identity only"), "{e}");
+        assert!(sent(&log.lock().unwrap()).is_empty(), "nothing was sent");
     }
 
     #[test]

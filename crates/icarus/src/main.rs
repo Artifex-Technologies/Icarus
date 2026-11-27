@@ -1237,6 +1237,7 @@ fn obd_module(elm: &mut dyn Link, args: &Args) -> Result<(), String> {
         name: "module".into(),
         ext: None,
         bus: None,
+        kind: String::new(),
         checked: false,
     };
     if !uds::present(elm, tx, m.rx()).map_err(e)? {
@@ -1848,7 +1849,8 @@ fn obd_setting(args: &Args, undo: bool) -> Result<(), String> {
         s.show(&now),
         s.show(&target)
     );
-    if now == target {
+    // a setting with a mask is compared on its own bits only
+    if s.same(&now, &target) {
         println!("Already so: nothing to write.");
         return Ok(());
     }
@@ -2127,7 +2129,7 @@ fn bus_watch(a: &[String], serial: &OpenSerial<'_>) -> Result<bus::Analyzer, Str
         .transpose()?
         .unwrap_or(10.0);
     actuator::catch_interrupt();
-    let mut an = bus::Analyzer::default();
+    let mut an = bus::Analyzer::watching(icarus_obd::fence::current());
     if j1939 {
         an.j1939 = Some(Default::default());
     }
@@ -2311,7 +2313,7 @@ fn cmd_learn(a: &[String]) -> Result<(), String> {
         }
     });
     actuator::catch_interrupt();
-    let mut an = bus::Analyzer::default();
+    let mut an = bus::Analyzer::watching(icarus_obd::fence::current());
     let start = std::time::Instant::now();
     let mut printed = 0u64;
     let mut step = |an: &mut bus::Analyzer, f: Option<bus::Frame>| {

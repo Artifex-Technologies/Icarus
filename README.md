@@ -194,14 +194,22 @@ icarus learn --can can0 --ask-sarina
 Or the **Learning** page: Start learning, type what you are about to do and press Mark before each change, Stop and save.
 
 - **What is learned.** A write the module accepted (UDS `2E` answered `6E`, KWP2000 `3B` answered `7B`) becomes a
-  `[[setting]]`, with the value the tool read just before (`22`/`21`) as "was" and the written one as "set", and whether
-  the tool opened the extended session first. An output-control request (UDS `2F ... 03`, KWP2000 `30 .. 07`) becomes a
-  `[[test]]`. A mark names the next one learned; one change per mark works best. Both are unchecked, with the most
-  cautious conditions; the airbag modules and immobiliser, key and odometer settings are never learned.
-- **What is not learned, but noted.** Security access (the tool unlocking a module), routines (service functions, coding
-  steps), writes too long for a setting, memory writes and programming, and writes the module refused, each in words.
+  `[[setting]]`, with the value the tool read just before (`22`/`21`) as "was" and the written one as "set", the bits
+  the write changed as its `mask` (so a setting packed into an identifier with others is changed alone; a later write of
+  other bits of the same identifier is learned as a setting of its own), and whether the tool opened the extended session
+  first. An output-control request (UDS `2F ... 03`, KWP2000 `30 .. 07`) becomes a `[[test]]`, and a routine the tool
+  starts (`31 01`) a `[[service]]`. A mark names the next one learned; one change per mark works best. All are unchecked,
+  with the most cautious conditions; the airbag modules and immobilizer, key and odometer settings are never learned.
+- **What is never learned from: the key modules, and anything after security access.** Nothing to or from an
+  immobilizer, smart-key or certification module (a profile's `[[module]]` with `kind = "immobilizer"`, `"smart-key"` or
+  `"certification"`: fenced by address, whatever the tool or a mark calls it) is learned, and its messages are not written
+  into the session. On any module, a write, routine or output test the tool sends after unlocking the module with
+  security access (`27`) is noted and never learned, since it may need access Icarus never uses, until the module says it
+  is back in its default session.
+- **What is not learned, but noted.** Security access (the tool unlocking a module), a routine's stop and results, writes
+  too long for a setting, memory writes and programming, and writes the module refused, each in words.
 - **The session** is saved in the vehicle's `Logs` folder as `learning-DATE-TIME.md`: the module names from Icarus's
-  profile, the marks, what was learned, what was noted, and every diagnostic message in words. No VIN.
+  profile, the marks, what was learned, what was noted, and every diagnostic message in words (but a key module's). No VIN.
 - **Naming and adding.** On the Learning page each learned setting gets a name and names for its values ("was"/"set"
   become "on"/"off"), and one button adds it to the vehicle's file (`~/.config/icarus/vehicles/MAKE.toml`); the Module settings
   and Tests pages then offer it.
@@ -224,10 +232,12 @@ icarus obd test throttle --adapter A --value 30 --seconds 3    # asks "yes", run
 
 In the window (Tests page) a test runs only while its button is held. The fence is in code (`crates/icarus-obd/src/
 actuator.rs`): only output control goes out (UDS `2F`, KWP2000 `30`, the session and tester present they need); never
-security access, routines, coding, clearing or programming; never airbag or occupant-detection modules; conditions (engine
-off or running, vehicle stopped) checked before and every second during a test; at least 11.5 V; a time limit of at most
-30 s; control handed back on every way out (release, time, condition, error, Ctrl+C, closed window), and by the module
-itself if Icarus dies (its diagnostic session times out); every start and stop in `~/.local/state/icarus/actions.log`.
+security access, routines, coding, clearing or programming; never airbag or occupant-detection modules, nor an
+immobilizer, smart-key or certification module (`crates/icarus-obd/src/fence.rs`: by its address, whatever the test is
+called); conditions (engine off or running, vehicle stopped) checked before and every second during a test; at least
+11.5 V; a time limit of at most 30 s; control handed back on every way out (release, time, condition, error, Ctrl+C,
+closed window), and by the module itself if Icarus dies (its diagnostic session times out); every start and stop in
+`~/.local/state/icarus/actions.log`.
 
 The tests are data: `[[test]]` entries in a vehicle profile (module, protocol, output ID, on/off or percent, conditions,
 time limit, warning, a live value to watch). Their IDs are each maker's own, so a profile carries only IDs from a source,
@@ -248,7 +258,8 @@ icarus obd services --adapter A                                   # the vehicle'
 icarus obd service "Throttle relearn (simulated)" --adapter sim:off --yes   # runs one (without --yes: says what it would do)
 ```
 
-Running one checks first: the definition (never an airbag module), the Read-Only switch, a cable for coding, the battery
+Running one checks first: the definition (never an airbag module, nor a key module by its address), the Read-Only
+switch, a cable for coding, the battery
 at 12 V or more, its conditions (engine off, parked...). Only the session (10 01/03), tester present and that routine's
 own start, stop and result requests go out; its result is asked for until the module gives it or the time limit stops it;
 the default session comes back whatever happened, and every run is in `~/.local/state/icarus/actions.log`. `sim:off` has
@@ -273,7 +284,7 @@ repository.
 ## Module settings
 
 What dealer tools call customizations: a feature a module keeps switched on or off, or a value it keeps (a chime, a lock
-behaviour, a light). Icarus learns them by watching such a tool change one on my own vehicle (previous section), and then
+behavior, a light). Icarus learns them by watching such a tool change one on my own vehicle (previous section), and then
 changes them itself, on the Module settings page (asks first, with the value now and the one chosen) or:
 
 ```sh
@@ -284,7 +295,8 @@ icarus obd setting-undo "seat belt chime" --adapter A          # back to what it
 
 The fence is in code (`crates/icarus-obd/src/settings.rs`): only reading and writing one data identifier goes out (UDS
 `22`/`2E`, KWP2000 `21`/`3B`, the session they need and tester present); never security access, routines or programming;
-never airbag or occupant-detection modules, immobiliser or key settings, or odometer values. A change needs a wired adapter
+never airbag or occupant-detection modules, immobilizer or key settings, or odometer values, and nothing at all (not even
+a read) in an immobilizer, smart-key or certification module, by its address. A change needs a wired adapter
 (not Bluetooth or Wi-Fi), the battery at 12 V or more, and its conditions (by default engine off and parked). The value
 there before is read and written to the vehicle's `Logs/settings-changes.tsv` before anything is written; the new value is
 read back, and if the module did not take it, the old one is written back. Only named values from the profile can be
@@ -292,9 +304,13 @@ written: a value never seen on the vehicle goes into its profile first, by hand.
 `~/.local/state/icarus/actions.log`.
 
 Settings are data too: `[[setting]]` entries (module, protocol, identifier, named values, whether the module needs the
-extended session, conditions). None are in the built-in profiles: each maker's are its own, and each module's differ by
-model and year, so they come from watching a tool on my own vehicle. `sim:off` has two to try: the cluster's seat belt chime
-(UDS) and the ABS module's buzzer (KWP2000).
+extended session, conditions). A module may pack several settings into one identifier, each in its own bits: such a
+setting has a `mask` (`mask = [0x0C]`, as long as its values). Its change writes the value read just before with only
+those bits replaced, its read-back and put-back look only at them, and its undo puts back only them (the change log keeps
+the mask), so changing or undoing one never puts another back. None are in the built-in profiles: each maker's are its
+own, and each module's differ by model and year, so they come from watching a tool on my own vehicle. `sim:off` has four
+to try: the cluster's seat belt chime (UDS), the ABS module's buzzer (KWP2000), and the cluster's auto door lock and
+interior light fade, which share one identifier.
 
 ## Module data (each module's own values)
 
@@ -337,7 +353,9 @@ that writes are listed as left out. DBC bus files are read by `icarus bus watch 
 The fence is in code (`crates/icarus-obd/src/moddata.rs`), checked when a set is loaded and again before every request:
 services 21 and 22 only, built by Icarus from the identifier (files carry no raw bytes; a file may also name `1A`,
 identification, which is kept for a later build and never sent today); never on 7DF or any answer ID; airbag and occupant
-modules identity only, and on a make whose profile names no airbag module, a module of unknown kind gets nothing either;
+modules identity only, and so immobilizer, smart-key and certification modules (by their file's `kind` or name, or an
+address a vehicle profile gives that kind, 29-bit IDs included), and on a make whose profile names no airbag module, a
+module of unknown kind gets nothing either;
 nothing that needs a diagnostic session is sent (Icarus opens none); at least 50 ms between any two sends, a busy module
 slowed, a refused request, one that keeps failing or a silent module dropped. Modules behind a gateway that answer
 with their own address byte first (Toyota's 750: tire pressure 2A, as OBDb's Tacoma set has it) are read through the
@@ -364,7 +382,7 @@ module-data set: every identifier a module answered on a data read (`22`, `21`) 
 placeholder value over its answer's bytes, not verified, with the answers seen as samples. Identity reads (`1A`) are
 listed as seen, not imported (identity comes in a later build). Writes, tests, routines,
 clearing and security access the tool did are listed as seen, never imported; the gates of `icarus obd data` apply (airbag
-modules identity only, never 7DF or an answer ID). **Privacy:** only the OBD conversation is kept. Bluetooth addresses,
+and key modules identity only, never 7DF or an answer ID). **Privacy:** only the OBD conversation is kept. Bluetooth addresses,
 device names, link keys and every other Bluetooth channel are never written to any output, adapter commands are counted
 but not kept, and VINs (in answers and in requests, also split over several messages) are masked in the transcript and
 the set unless `--keep-vin`. How to capture, what is read and how
@@ -441,7 +459,9 @@ means, where to start, the parts), `vehicle_check` (identity, check-engine light
 current values, on-board test results), `vehicle_modules` (every module's codes), `module_data` (each module's own
 values), `learning_sessions` (what Icarus saved while watching another tool), `drive_logs` (recorded drives summarized)
 and `tires_gears`. Nothing that clears
-codes, runs a test or writes is offered to a model; a test fails if a tool with such a name appears. The adapter comes from
+codes, runs a test or writes is offered to a model; a test fails if a tool with such a name appears. Nothing from an
+immobilizer, smart-key or certification module reaches a model either: `vehicle_modules` does not ask them, `module_data`
+sends them no data request, and a learning session never holds their messages. The adapter comes from
 `ICARUS_ADAPTER` in the server's environment (`sim` for the simulated vehicle). For Sarina, a definition file of its own:
 
 ```json

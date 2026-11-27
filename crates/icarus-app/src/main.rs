@@ -1885,8 +1885,23 @@ impl App {
                                 .color(pal.dim),
                             );
                         }
+                        // a key module (immobilizer, smart key, certification) by its profile kind or name: no button
+                        // either (clear_module refuses it by address too, `fence`)
+                        let key = icarus_obd::fence::Kind::of(&m.addr.kind, &m.addr.name).is_some();
+                        if !codes.is_empty() && key {
+                            ui.label(
+                                RichText::new(
+                                    "A key module's codes are never cleared by Icarus: its identity and codes are \
+                                     read, nothing else.",
+                                )
+                                .small()
+                                .color(pal.dim),
+                            );
+                        }
                         // a module behind a gateway is read only in this build (no clear path carries its address)
-                        if let Some((tx, rx)) = clear_ids.filter(|_| !codes.is_empty() && !airbag) {
+                        if let Some((tx, rx)) =
+                            clear_ids.filter(|_| !codes.is_empty() && !airbag && !key)
+                        {
                             if ui.button("Clear this module's codes...").clicked() {
                                 ask_clear = Some((
                                     tx,
@@ -5381,6 +5396,7 @@ mod advanced_detail {
             name: "engine (ECM)".into(),
             ext: None,
             bus: None,
+            kind: String::new(),
             checked: true,
         };
         assert_eq!(module_title(&a, false), "engine (ECM)");

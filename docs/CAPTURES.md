@@ -90,6 +90,7 @@ The captures, transcripts and sets of a real vehicle stay outside this repositor
 | A write, test, routine, clearing, security access, session or reset (`2E`, `2F`, `31`, `3B`, `14`, `27`, `10`, `11`...) | listed as "seen, not imported" |
 | Standard OBD-II (`01`, `09`...) and anything sent to every module (`7DF`, BMW's `6F1` to `DF` or the E-series' `EF`, K-line's functional addresses `33` and `6A`) | listed as "seen, not imported" |
 | An airbag or occupant module | identity only, as for every set (the vehicle gates of `icarus obd data` apply when the set is written and when it is used) |
+| An immobilizer, smart-key or certification module (by an address a vehicle profile gives that kind, or its kind or name in the set) | identity only, the same way: none of its reads becomes a request in the set |
 
 Everything the gates of `icarus obd data` refuse (an answer ID used as a request ID, a second module on one request ID, a
 module of unknown kind on a make without a named airbag module) is refused here too, with the reason. A set learned from a

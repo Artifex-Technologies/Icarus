@@ -54,6 +54,11 @@ rx = 0x758
 ext = 0x40
 name = "main body"
 
+# The immobilizer, smart-key and certification modules are fenced by address (kind = "immobilizer", "smart-key" or
+# "certification"): Icarus reads their identity and nothing else, never writes to them, and learns nothing from them. None
+# is listed here: their addresses go in from my own truck's identity reads once I have confirmed them, never guessed. Until
+# then such a module is written down in ~/.config/icarus/vehicles/toyota.toml as a [[module]] with its tx, name and kind.
+
 # The maker's own trouble codes Icarus can explain (from public sources; add more here or in ~/.config/icarus/vehicles/).
 [codes]
 C1241 = "Low battery voltage (or abnormally high) at the skid control (ABS/VSC) module: often a weak battery or poor connection, not the module"

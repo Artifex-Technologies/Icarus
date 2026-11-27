@@ -4,7 +4,9 @@
 //! **Read-only, always.** The tools here only read: identity, codes with their meanings, the freeze frame, live values,
 //! every module's codes, the tires/gears arithmetic, and the learning sessions Icarus saved while watching another tool. Clearing codes, actuator tests and anything else that changes a
 //! vehicle are never offered to a model (a test checks the tool list), as Sarina's own rules keep launching agents
-//! CLI-only. The adapter is the one named by ICARUS_ADAPTER in the server's environment, else the one the window last used.
+//! CLI-only. Nothing from an immobilizer, smart-key or certification module is given out (`icarus_obd::fence`): the
+//! module list does not ask them, module data sends them no data request, and a learning session never holds their
+//! messages. The adapter is the one named by ICARUS_ADAPTER in the server's environment, else the one the window last used.
 
 use icarus_obd::elm::Elm;
 use icarus_obd::port::Target;
@@ -338,14 +340,24 @@ fn module_data_on(elm: &mut Elm, module: Option<&str>) -> Result<String, String>
 
 fn vehicle_modules() -> Result<String, String> {
     let mut elm = connect()?;
-    let e = |x: icarus_obd::elm::ObdError| x.to_string();
     let all = vehicles::load(vehicles::user_dir().as_deref()).0;
-    let vin = j1979::vin(&mut elm).map_err(e)?;
+    vehicle_modules_on(&mut elm, &all, &icarus_obd::fence::current())
+}
+
+/// Every module's codes on a connected vehicle. The immobilizer, smart-key and certification modules (`fence`) are not
+/// asked, so nothing from them reaches an assistant.
+fn vehicle_modules_on(
+    elm: &mut Elm,
+    all: &[vehicles::Profile],
+    fence: &icarus_obd::fence::Fence,
+) -> Result<String, String> {
+    let e = |x: icarus_obd::elm::ObdError| x.to_string();
+    let vin = j1979::vin(elm).map_err(e)?;
     let profile = vin
         .as_deref()
-        .and_then(|v| vehicles::for_vin(&all, v))
+        .and_then(|v| vehicles::for_vin(all, v))
         .cloned()
-        .or_else(|| vehicles::find(&all, "generic").ok().cloned());
+        .or_else(|| vehicles::find(all, "generic").ok().cloned());
     let mut o = String::new();
     let protocol = elm.protocol;
     for m in profile
@@ -356,8 +368,17 @@ fn vehicle_modules() -> Result<String, String> {
         if m.unreachable(elm.reach()).is_some() {
             continue;
         }
+        if let Some(k) = fence.at(m.tx, m.ext, m.rx()) {
+            o += &format!(
+                "{:03X} {}: not asked ({}: nothing from a key module is given to an assistant).\n",
+                m.tx,
+                m.name,
+                k.describe()
+            );
+            continue;
+        }
         let (tx, rx) = (m.tx, m.rx());
-        let codes = match uds::at_module(&mut elm, &m, |l| {
+        let codes = match uds::at_module(elm, &m, |l| {
             if !uds::present(l, tx, rx)? {
                 return Ok(None);
             }
@@ -394,7 +415,7 @@ fn vehicle_modules() -> Result<String, String> {
     if o.is_empty() {
         o = "No module answered.".into();
     }
-    o += &dropped_notes(&mut elm);
+    o += &dropped_notes(elm);
     Ok(o)
 }
 
@@ -616,5 +637,41 @@ mod tests {
         );
         let r = handle(&json!({"jsonrpc": "2.0", "id": 5, "method": "resources/list"})).unwrap();
         assert_eq!(r["error"]["code"], -32601);
+    }
+
+    /// ICA-101: a key module (the simulated cluster, given the smart-key kind for this test) is not asked by
+    /// `vehicle_modules`, so nothing from it reaches an assistant; the other modules are read as before.
+    #[test]
+    fn vehicle_modules_never_asks_a_key_module() {
+        let mut all = vehicles::builtin();
+        let mut elm = Elm::connect(Box::new(icarus_obd::sim::SimCar::new())).unwrap();
+        let open = icarus_obd::fence::Fence::default();
+        let text = vehicle_modules_on(&mut elm, &all, &open).unwrap();
+        assert!(text.contains("7C0 instrument cluster"), "{text}");
+        assert!(!text.contains("not asked"), "{text}");
+        let toyota = all.iter_mut().find(|p| p.id == "toyota").unwrap();
+        toyota
+            .modules
+            .iter_mut()
+            .find(|m| m.tx == 0x7C0)
+            .unwrap()
+            .kind = "smart-key".into();
+        let fence = icarus_obd::fence::Fence::of(&all);
+        elm.take_sent();
+        let text = vehicle_modules_on(&mut elm, &all, &fence).unwrap();
+        assert!(
+            text.contains(
+                "7C0 instrument cluster (combination meter): not asked (7C0 (the smart-key module)"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("7E0 engine (ECM)"),
+            "the others as before: {text}"
+        );
+        assert!(
+            !elm.take_sent().iter().any(|(_, tx, _)| *tx == 0x7C0),
+            "nothing was sent to the cluster"
+        );
     }
 }

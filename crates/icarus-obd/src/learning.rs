@@ -33,8 +33,10 @@ pub fn session_text(
     if !seen.is_empty() {
         t += "## Modules on the bus (as Icarus's profile names them)\n\n";
         for m in seen {
+            let key =
+                a.fence.on_id(m.tx).is_some() || crate::fence::Kind::of(&m.kind, &m.name).is_some();
             t += &format!(
-                "- {:03X} (answers {:03X}): {}{}\n",
+                "- {:03X} (answers {:03X}): {}{}{}\n",
                 m.tx,
                 m.rx(),
                 m.name,
@@ -42,6 +44,11 @@ pub fn session_text(
                     ""
                 } else {
                     " (address from public sources, not yet checked on this vehicle)"
+                },
+                if key {
+                    "; a key module: fenced, its messages are not written down"
+                } else {
+                    ""
                 }
             );
         }
@@ -226,6 +233,7 @@ mod tests {
             name: "combination meter (cluster)".into(),
             ext: None,
             bus: None,
+            kind: String::new(),
             checked: false,
         };
         let t = session_text(&a, "the adapter sim:off", "Toyota", &[cluster]);
