@@ -112,6 +112,12 @@ impl<F: Frames> CanLink<F> {
         Self::with_timing(bus, name, Timing::default())
     }
 
+    /// The frame source underneath, for a test that looks at what went out on it.
+    #[cfg(test)]
+    pub(crate) fn frames_mut(&mut self) -> &mut F {
+        &mut self.bus
+    }
+
     /// `connect` with other waits.
     pub fn with_timing(bus: F, name: &str, timing: Timing) -> Result<Self, ObdError> {
         let mut link = CanLink {
@@ -321,8 +327,9 @@ impl<F: Frames> CanLink<F> {
     /// message does not add up (a frame lost or repeated, one missing at the end, lengths classic CAN cannot carry) is
     /// named with why and its messages left out, never kept short or wrong.
     ///
-    /// With no `fc_to` (a sweep's probe, whose answer is one frame) only single frames are taken: a first frame gets no
-    /// flow control, so nothing is sent into another sender's conversation, and its consecutive frames are passed over.
+    /// With no `fc_to` (a sweep's probe, whose answer is one frame) a first frame is taken as it is, the start of a longer
+    /// message (its bytes after the length, so the scan's guard sees what kind of message it is), with no flow control, so
+    /// nothing is sent into another sender's conversation; its consecutive frames are passed over.
     fn gather(
         &mut self,
         from: &dyn Fn(u32) -> bool,
@@ -358,7 +365,13 @@ impl<F: Frames> CanLink<F> {
             let Some(&pci) = d.first() else { continue };
             let mut whole: Option<Vec<u8>> = None;
             let problem = match pci >> 4 {
-                1 | 2 if fc_to.is_none() => None,
+                1 if fc_to.is_none() => {
+                    if d.len() >= room && !done.iter().any(|a| a.from == sender(id)) {
+                        whole = Some(d[2..room].to_vec());
+                    }
+                    None
+                }
+                2 if fc_to.is_none() => None,
                 0 => {
                     let n = (pci & 0x0F) as usize;
                     if n == 0 || n >= room || d.len() < 1 + n {
@@ -524,29 +537,32 @@ impl<F: Frames> Link for CanLink<F> {
         Ok(answers)
     }
 
-    /// A sweep's probe (ICA-103): tester present to `tx`, and every single frame heard from 700-7FF (but `tx` itself), or
-    /// on 29-bit CAN from 18DAF1xx, in the answer's time (`timing.answer`, longer after a "response pending"): raw frames
-    /// carry every ID, so the module is heard wherever it answers from. Behind a gateway the probe listens to `rx` alone,
-    /// as `request_to` does.
+    /// A sweep's probe (ICA-103): tester present to `tx`, and every frame heard from `rx` and from 700-7FF (but `tx`
+    /// itself), or on 29-bit CAN from 18DAF1xx, in the answer's time (`timing.answer`, longer after a "response pending"):
+    /// raw frames carry every ID, so the module is heard wherever it answers from, and `rx` as `request_to` hears it. A
+    /// first frame of a longer message is taken as its start, with no flow control (`gather`). Behind a gateway, or for a
+    /// 29-bit ID that is not ISO 15765-4's 18DAxxF1, the probe listens to `rx` alone, as `request_to` does.
     fn probe(&mut self, tx: u32, rx: u32, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
         crate::uds::check_probe(data)?;
-        if self.ext.is_some() {
+        let can29 = tx > 0x7FF;
+        if self.ext.is_some() || (can29 && !crate::vehicles::is_fixed29_request(tx)) {
             return self.request_to(tx, rx, data);
         }
         self.read_only_check(data)?;
-        let can29 = tx > 0x7FF;
-        if tx > 0x1FFF_FFFF || (can29 && !crate::vehicles::is_fixed29_request(tx)) {
+        if tx > 0x1FFF_FFFF || rx > 0x1FFF_FFFF || can29 != (rx > 0x7FF) || tx == rx {
             return Err(ObdError::Adapter(format!(
-                "{tx:X} is not a module request ID to probe"
+                "{tx:X}/{rx:X} are not a request and an answer ID, both 11-bit or both 29-bit"
             )));
         }
         self.send_message(tx, None, None, data)?;
         let from = move |id: u32| {
-            if can29 {
-                id & 0xFFFF_FF00 == 0x18DA_F100
-            } else {
-                (0x700..=0x7FF).contains(&id) && id != tx
-            }
+            id != tx
+                && (id == rx
+                    || if can29 {
+                        id & 0xFFFF_FF00 == 0x18DA_F100
+                    } else {
+                        (0x700..=0x7FF).contains(&id)
+                    })
         };
         // a sender whose frames do not add up is not an answer to the probe
         let (answers, _) = self.gather(&from, None, None, false)?;
@@ -676,9 +692,10 @@ impl SimBus {
     /// The module's answers to a whole request on `to`.
     fn answer(&mut self, to: u32, ext: Option<u8>, req: &[u8]) {
         let functional = to == self.car.functional() && ext.is_none();
-        // other nodes on the bus while a tester present is answered (`SimCar::with_chatter`): a raw interface hears them all
+        // other nodes on the bus while a tester present is answered (`SimCar::with_chatter`, `with_chatter_once`): a raw
+        // interface hears them all
         if !functional && req.first() == Some(&0x3E) {
-            for (from, msg) in self.car.chatter().to_vec() {
+            for (from, msg) in self.car.chatter_at(to) {
                 self.out.extend(Self::frames(from, None, &msg));
             }
         }
@@ -988,6 +1005,69 @@ mod tests {
             "{id:?}"
         );
         assert!(!uds::present(&mut l, 0x710, 0x718).unwrap());
+    }
+
+    /// ICA-103: another node's long message in the probe's window (7D6's 62 F1 90 and seven bytes more: a first frame and
+    /// its consecutive frames, while each tester present is answered) gets no flow control from the probe, so every frame
+    /// the sweep sends is a tester present. 7D6 is not taken for a module, the probe hears its message's start, and since
+    /// that is an answer the sweep never sends on 7D6.
+    #[test]
+    fn the_probe_sends_no_flow_control_into_another_conversation() {
+        let mut l =
+            link(SimCar::new().with_chatter(0x7D6, &[0x62, 0xF1, 0x90, 1, 2, 3, 4, 5, 6, 7]));
+        let all = crate::vehicles::builtin();
+        let list = uds::sweep(&all);
+        assert!(list.iter().any(|m| m.tx == 0x7D6), "7D6 is in the list");
+        sent(&mut l);
+        let mut guard = uds::ScanGuard::new(&all);
+        let found: Vec<u32> = list
+            .iter()
+            .filter_map(|m| guard.find(&mut l, m).unwrap())
+            .map(|m| m.tx)
+            .collect();
+        assert_eq!(
+            found,
+            vec![0x700, 0x701, 0x780, 0x7B0, 0x7C0, 0x7C4, 0x7E0, 0x7E1]
+        );
+        let frames = sent(&mut l);
+        assert!(
+            !frames.iter().any(|f| f.data[0] & 0xF0 == 0x30),
+            "flow control went out: {:?}",
+            frames.iter().find(|f| f.data[0] & 0xF0 == 0x30)
+        );
+        assert!(frames.iter().all(|f| f.data[..2] == [0x02, 0x3E]));
+        assert!(guard.never_sends_on(0x7D6));
+        assert!(!frames.iter().any(|f| f.id == 0x7D6));
+        let heard = l.probe(0x702, 0x70A, &[0x3E, 0x00]).unwrap();
+        assert!(
+            heard
+                .iter()
+                .any(|a| a.from == "7D6" && a.data == [0x62, 0xF1, 0x90, 1, 2, 3]),
+            "{heard:?}"
+        );
+        assert!(sent(&mut l).iter().all(|f| f.data[0] & 0xF0 != 0x30));
+    }
+
+    /// ICA-103: a probe hears at least what a request to the guessed answer ID alone hears, there too where the wide range
+    /// does not reach: a module a profile names at 6F0 with no answer ID, answering at 6F8, is found there, on raw CAN as
+    /// through an ELM327 (which probes it at 6F8 alone).
+    #[test]
+    fn the_probe_hears_a_guess_below_the_wide_range() {
+        let m = crate::vehicles::ModuleAddr {
+            tx: 0x6F0,
+            rx: None,
+            name: "a module below 700".into(),
+            ext: None,
+            bus: None,
+            checked: false,
+        };
+        let car = || SimCar::new().with_module(0x6F0, 0x6F8);
+        let mut l = link(car());
+        let mut elm = crate::elm::Elm::connect(Box::new(car())).unwrap();
+        for link in [&mut l as &mut dyn Link, &mut elm] {
+            let found = uds::ScanGuard::new(&[]).find(link, &m).unwrap();
+            assert_eq!(found.map(|f| f.rx()), Some(0x6F8), "{}", link.adapter());
+        }
     }
 
     #[test]

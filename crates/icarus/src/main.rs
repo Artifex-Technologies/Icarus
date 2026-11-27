@@ -1001,6 +1001,13 @@ fn cmd_obd(a: &[String]) -> Result<(), String> {
 }
 
 fn print_module(elm: &mut dyn Link, m: &vehicles::ModuleAddr) -> Result<(), String> {
+    show_module(&uds::read_module(elm, m).map_err(e)?);
+    Ok(())
+}
+
+/// A module as read (`uds::read_module`): where it answers, its identity and its trouble codes.
+fn show_module(s: &uds::Scanned) {
+    let m = &s.addr;
     let (tx, rx) = (m.tx, m.rx());
     let at = if m.rx.is_none_or(|r| r == tx + 8) {
         format!("{tx:03X}")
@@ -1019,13 +1026,7 @@ fn print_module(elm: &mut dyn Link, m: &vehicles::ModuleAddr) -> Result<(), Stri
     if let Some(a) = m.ext {
         println!("     behind the gateway at {tx:03X}, address {a:02X} (read only)");
     }
-    let ((identity, id_notes), codes) = uds::at_module(elm, m, |l| {
-        Ok((
-            uds::module_identity_notes(l, tx, rx)?,
-            uds::module_dtcs(l, tx, rx)?,
-        ))
-    })
-    .map_err(e)?;
+    let (identity, id_notes, codes) = (&s.identity, &s.notes, &s.dtcs);
     for (what, value) in identity {
         println!("     {what:<17} {value}");
     }
@@ -1039,7 +1040,7 @@ fn print_module(elm: &mut dyn Link, m: &vehicles::ModuleAddr) -> Result<(), Stri
     match codes {
         Err(why) => println!("     trouble codes     none of Icarus's requests gave them\n                       ({why})"),
         Ok((dialect, codes)) => {
-            let lang = if dialect == uds::Dialect::Uds {
+            let lang = if *dialect == uds::Dialect::Uds {
                 "UDS"
             } else {
                 "KWP2000"
@@ -1060,7 +1061,6 @@ fn print_module(elm: &mut dyn Link, m: &vehicles::ModuleAddr) -> Result<(), Stri
             }
         }
     }
-    Ok(())
 }
 
 fn profiles() -> Vec<vehicles::Profile> {
@@ -1110,18 +1110,15 @@ fn obd_scan(elm: &mut dyn Link, args: &Args) -> Result<(), String> {
             later.push(format!("{:03X}  {}: {why}", m.tx, m.name));
             continue;
         }
-        // the module as found: with the answer ID it was heard from, which is not always its request ID + 8
-        let there = match guard.find(elm, m) {
-            // the adapter refused to switch to that module's bus: it, and the bus from now on, is listed as not reachable
-            Err(icarus_obd::elm::ObdError::Adapter(why)) if m.on_ms_can() => {
-                later.push(format!("{:03X}  {}: {why}", m.tx, m.name));
-                continue;
+        // the module as found, read at the answer ID it was heard from (not always its request ID + 8); a bus the adapter
+        // refused to switch to is listed as not reachable, it and the bus from now on
+        match guard.scan(elm, m).map_err(e)? {
+            uds::Step::Unreachable(why) => later.push(format!("{:03X}  {}: {why}", m.tx, m.name)),
+            uds::Step::Absent => {}
+            uds::Step::Found(s) => {
+                found += 1;
+                show_module(&s);
             }
-            r => r.map_err(e)?,
-        };
-        if let Some(m) = there {
-            found += 1;
-            print_module(elm, &m)?;
         }
     }
     println!("\n{found} module(s) answered. Codes: P powertrain, C chassis (ABS, steering), B body (airbags, lights), U network.");

@@ -50,9 +50,11 @@ pub trait Link {
     fn request_to(&mut self, tx: u32, rx: u32, data: &[u8]) -> Result<Vec<Answer>, ObdError>;
     /// A module sweep's probe (ICA-103): tester present (`3E`, nothing else) sent to `tx`, listening to every ID a module
     /// could answer from rather than only `rx` (11-bit: 700-7FF; 29-bit: 18DAF1xx), since a module does not always answer
-    /// at its request ID + 8. Returns every whole message heard in the answer's time, each with its sender; which of them
-    /// answer the probe is `uds::answers_probe`'s to say. A link that cannot listen that wide listens to `rx` alone (this
-    /// default: a J2534 device's ISO 15765 channel takes in only the IDs it has a filter for).
+    /// at its request ID + 8. Returns every message heard in the answer's time, each with its sender (one longer than a frame
+    /// may be only its first frame's bytes: a probe's answer is one frame, so no flow control goes out for the rest); which
+    /// of them answer the probe is `uds::answers_probe`'s to say, and which show their sender to be some module's answer ID
+    /// `uds::is_response`'s. It hears at least what `request_to(tx, rx)` would. A link that cannot listen that wide listens
+    /// to `rx` alone (this default: a J2534 device's ISO 15765 channel takes in only the IDs it has a filter for).
     fn probe(&mut self, tx: u32, rx: u32, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
         crate::uds::check_probe(data)?;
         self.request_to(tx, rx, data)

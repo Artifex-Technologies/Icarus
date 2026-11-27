@@ -321,6 +321,47 @@ mod tests {
         assert_eq!(b.len(), 3, "the cluster is no chassis module: {b:?}");
     }
 
+    /// ICA-100: a set made for another make (a Ford set, with no file for 7B0) chosen for the Toyota does not open the
+    /// Toyota's ABS/VSC module to the sweep: the Toyota profile's name for 7B0 still keeps it to identity only, and nothing
+    /// is sent.
+    #[test]
+    fn a_set_for_another_make_does_not_open_the_vehicles_chassis_module() {
+        let profiles = crate::vehicles::builtin();
+        let files = vec![
+            (
+                "set.toml".to_string(),
+                "format = 1\nname = \"ford-test\"\nmake = \"ford\"\n\n[source]\nfrom = \"hand\"\n"
+                    .to_string(),
+            ),
+            (
+                "726.toml".to_string(),
+                "format = 1\n\n[module]\nname = \"BCM\"\ntx = 0x726\nkind = \"body\"\n".to_string(),
+            ),
+        ];
+        let set = crate::moddata::load_files(&files, "test", &profiles)
+            .unwrap()
+            .on_vehicle(&profiles, Some("toyota"));
+        let (mut elm, sent) = recorded(SimCar::new().with_block(0x7B0, 0x1F));
+        let e = read(
+            &mut elm,
+            0x7B0,
+            0x7B8,
+            &profiles,
+            Some("toyota"),
+            Some(&set),
+        )
+        .unwrap_err();
+        assert!(
+            e.contains("the toyota profile names it \"ABS / VSC / TRC")
+                && e.contains("nothing was sent"),
+            "{e}"
+        );
+        assert!(
+            sent.lock().unwrap().is_empty(),
+            "nothing reached the adapter"
+        );
+    }
+
     /// ICA-100: a module file that lists DE00-DE0F for the ABS gets exactly those read, though the module keeps 32.
     #[test]
     fn a_chassis_module_gets_the_identifiers_its_file_lists() {

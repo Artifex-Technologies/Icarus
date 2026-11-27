@@ -110,64 +110,134 @@ pub struct Gates {
     chassis_at: BTreeMap<(u16, Option<u8>), (String, String, &'static str)>,
 }
 
-/// What makes a module a chassis or driver-assist one (ICA-100): a whole word of its kind or name, in upper or lower case.
-/// Brakes and stability control (ABS, the makers' names for stability and traction control such as the Toyota profile's
-/// VSC and TRC and the Subaru profile's VDC, electric parking brakes, suspension), steering (EPS, the Ford profile's
-/// PSCM), and driver assistance (radar, cameras, cruise, lane, collision, parking, blind-spot). A word too many only
-/// keeps a sweep off a module; it never lets anything be sent.
+/// What makes a module a chassis or driver-assist one (ICA-100): a word of its kind or name, in upper or lower case, whole
+/// or as a part of a word run together (`ParkAssist`, `FrontCamera`). Brakes and stability control (ABS, the makers' names
+/// for stability and traction control such as the Toyota profile's VSC and TRC and the Subaru profile's VDC, electric
+/// parking brakes, suspension, yaw rate), steering (EPS, the Ford profile's PSCM, the steering angle sensor, the steering
+/// column module), and driver assistance (radar, cameras, cruise and adaptive cruise, lane keeping and departure,
+/// collision warning and braking, parking aids, blind-spot and cross-traffic warning, around-view cameras), with the
+/// abbreviations module names commonly use for them. A word too many only keeps a sweep off a module; it never lets
+/// anything be sent, so the list leans to too many.
 const CHASSIS: &[(&str, &[&str])] = &[
     (
         "brake or stability control",
         &[
             "abs",
+            "atrac",
             "brake",
             "brakes",
             "braking",
             "chassis",
             "dsc",
             "ebcm",
+            "ebd",
+            "ebs",
             "epb",
             "esc",
             "esp",
+            "hdc",
+            "kdss",
             "skid",
             "stability",
             "suspension",
             "tcs",
+            "traction",
             "trc",
             "vdc",
+            "vdim",
             "vsa",
             "vsc",
+            "yaw",
         ],
     ),
-    ("steering", &["eps", "epas", "pscm", "steering"]),
+    (
+        "steering",
+        &[
+            "afs", "ehps", "epas", "eps", "mdps", "pscm", "sas", "sasm", "sccm", "steering",
+        ],
+    ),
     (
         "driver-assist",
         &[
+            "acc",
             "adas",
+            "aeb",
             "assist",
+            "avm",
             "blind",
+            "bsd",
             "bsm",
+            "bsw",
             "camera",
+            "cmbs",
             "collision",
             "cruise",
+            "distronic",
+            "drcc",
+            "eyesight",
+            "fcw",
+            "icc",
+            "ipma",
+            "ipmb",
+            "kafas",
             "lane",
+            "lda",
+            "ldw",
             "lidar",
             "lka",
             "lkas",
+            "lta",
+            "pam",
             "parking",
+            "pcs",
+            "pdc",
+            "pksb",
             "radar",
+            "rcta",
+            "scc",
+            "sodl",
+            "sodr",
             "sonar",
+            "spas",
+            "ultrasonic",
         ],
     ),
 ];
 
+/// The words of `text` as `chassis_kind` matches them, lower case: each run of letters and digits whole, and its parts
+/// where it changes case or between letters and digits (`ParkAssist`: parkassist, park, assist; `ABSModule`: absmodule,
+/// abs, module; `EPS2`: eps2, eps, 2).
+fn words_of(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for token in text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+    {
+        out.push(token.to_lowercase());
+        let c: Vec<char> = token.chars().collect();
+        let mut start = 0;
+        for i in 1..c.len() {
+            let (a, b) = (c[i - 1], c[i]);
+            let split = (a.is_lowercase() && b.is_uppercase())
+                || (a.is_uppercase()
+                    && b.is_uppercase()
+                    && c.get(i + 1).is_some_and(|n| n.is_lowercase()))
+                || (a.is_ascii_digit() != b.is_ascii_digit());
+            if split {
+                out.push(c[start..i].iter().collect::<String>().to_lowercase());
+                start = i;
+            }
+        }
+        if start > 0 {
+            out.push(c[start..].iter().collect::<String>().to_lowercase());
+        }
+    }
+    out
+}
+
 /// What kind of chassis or driver-assist module `words` (a module's kind or name) names, if any (`CHASSIS`).
 pub fn chassis_kind(words: &str) -> Option<&'static str> {
-    let w: Vec<String> = words
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| !w.is_empty())
-        .map(str::to_lowercase)
-        .collect();
+    let w = words_of(words);
     CHASSIS
         .iter()
         .find(|(_, list)| w.iter().any(|x| list.contains(&x.as_str())))
@@ -1758,6 +1828,84 @@ mod tests {
         assert_eq!(chassis_kind("instrument cluster (combination meter)"), None);
         assert_eq!(chassis_kind("air conditioning"), None);
         assert_eq!(chassis_kind("tire pressure"), None);
+        // the abbreviations module names use for them, and words run together, count as their words do
+        for (name, what) in [
+            ("MDPS", "steering"),
+            ("SCC (7D0)", "driver-assist"),
+            ("ACC", "driver-assist"),
+            ("SAS", "steering"),
+            ("yaw rate sensor", "brake or stability control"),
+            ("AVM", "driver-assist"),
+            ("SPAS", "driver-assist"),
+            ("EyeSight", "driver-assist"),
+            ("PCS", "driver-assist"),
+            ("FCW", "driver-assist"),
+            ("AEB", "driver-assist"),
+            ("LDW", "driver-assist"),
+            ("RCTA", "driver-assist"),
+            ("IPMA (image processing)", "driver-assist"),
+            ("SCCM", "steering"),
+            ("ParkAssist", "driver-assist"),
+            ("FrontCamera", "driver-assist"),
+            ("BlindSpot", "driver-assist"),
+            ("ABSModule", "brake or stability control"),
+            ("EPS2", "steering"),
+        ] {
+            assert_eq!(chassis_kind(name), Some(what), "{name}");
+        }
+        for name in [
+            "BodyControl",
+            "keyless access",
+            "gateway (GWM)",
+            "ACM (audio)",
+            "HVAC",
+            "main body",
+        ] {
+            assert_eq!(chassis_kind(name), None, "{name}");
+        }
+    }
+
+    /// ICA-100: a set made for one make, used on a vehicle of another, still keeps a sweep off the address the vehicle's own
+    /// profile names a chassis module, though the set's make names nothing there: a Ford set on the Toyota at 7B0 (the
+    /// Toyota profile's ABS), and a Toyota set on a Ford at 760 (the Ford profile's ABS).
+    #[test]
+    fn a_set_for_another_make_keeps_the_vehicles_chassis_names() {
+        let profiles = crate::vehicles::builtin();
+        let range = || 0xDE00..=0xDEFF;
+        for (tx, set_make, vehicle, named) in [
+            (
+                "0x7B0",
+                "ford",
+                "toyota",
+                "the toyota profile names it \"ABS / VSC / TRC",
+            ),
+            (
+                "0x760",
+                "toyota",
+                "ford",
+                "the ford profile names it \"ABS\"",
+            ),
+        ] {
+            let m = module(tx, "");
+            let alone = Gates::for_vehicle(
+                &profiles,
+                std::slice::from_ref(&m),
+                set_make,
+                Some(set_make),
+            );
+            assert_eq!(
+                alone.sweep(&m, 0x22, range()),
+                Ok(Sweep::Whole),
+                "{tx} on a {set_make}"
+            );
+            let g =
+                Gates::for_vehicle(&profiles, std::slice::from_ref(&m), set_make, Some(vehicle));
+            let e = g.sweep(&m, 0x22, range()).unwrap_err();
+            assert!(
+                e.contains(named),
+                "{tx}, a {set_make} set on a {vehicle}: {e}"
+            );
+        }
     }
 
     #[test]

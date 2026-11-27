@@ -301,6 +301,9 @@ pub struct Elm {
     bus: Option<Bus>,
     /// Why this adapter cannot switch to the medium-speed CAN, once it refused to.
     no_ms_can: Option<String>,
+    /// Why this adapter cannot open its receive filter wide for a sweep's probe, once it refused to or reported trouble
+    /// under it (`probe`, which then listens to the guessed answer ID alone for the rest of the connection).
+    no_wide: Option<String>,
     /// CAN auto-formatting is off (`ATCAF0`, for watching the bus): it goes back on (`ATCAF1`) before the next request,
     /// which needs the adapter to add and strip ISO-TP's length bytes.
     raw_frames: bool,
@@ -393,6 +396,7 @@ impl Elm {
             want_bus: Bus::Main,
             bus: Some(Bus::Main),
             no_ms_can: None,
+            no_wide: None,
             raw_frames: false,
             dropped: Vec::new(),
             unseen: Vec::new(),
@@ -703,42 +707,50 @@ impl Elm {
     }
 
     /// A sweep's probe (`Link::probe`, ICA-103): tester present to `tx`, with the answers shown from every ID a module could
-    /// answer from, not only `rx`. The adapter's receive filter is opened to 700-7FF (`ATCF700`, `ATCM700`), or on 29-bit
-    /// CAN to 18DAF1xx (`ATCF18DAF100`, `ATCM1FFFFF00`), in place of `ATCRA`; an STN chip gets its own pass filter
-    /// instead (`STFCP`, then `STFAP`), as for watching (`monitor_ids`). Only the probe goes out under it. Afterwards the
-    /// filter goes back to automatic (`ATCRA`, or `STFCP` on an STN), and the next request says its own header and answer ID
-    /// again whatever happened. Behind a gateway, on the medium-speed CAN, or where the wide filter would not pass `rx`
-    /// (an 11-bit ID below 700), it listens to `rx` alone, as `request_to` does.
+    /// answer from, not only `rx`. The header and flow control are said as for one module, with `ATCRA` alone in place of
+    /// its answer ID, so no earlier request's answer ID stays among the adapter's filters whichever of them it goes by; then
+    /// the receive filter is opened to 700-7FF (`ATCF700`, `ATCM700`), or on 29-bit CAN to 18DAF1xx (`ATCF18DAF100`,
+    /// `ATCM1FFFFF00`); an STN chip gets its own pass filter instead (`STFCP`, then `STFAP`), as for watching
+    /// (`monitor_ids`). Only the probe goes out under it. Afterwards the filter goes back to automatic (`ATCRA`, or `STFCP`
+    /// on an STN), and the next request says its own header and answer ID again whatever happened. Behind a gateway, on the
+    /// medium-speed CAN, or where the wide filter would not pass `rx` (an 11-bit ID below 700), it listens to `rx` alone,
+    /// as `request_to` does.
+    ///
+    /// It hears at least what `request_to(tx, rx)` hears, so no module is missed that the probe at `rx` alone found before:
+    /// when nothing from `rx` answered the probe through the wide filter, the probe is sent once more to `rx` alone and what
+    /// that hears is added. An adapter that refuses the wide filter (`?` to ATCF, ATCM, STFCP or STFAP), or reports trouble
+    /// under it, is probed at `rx` alone for the rest of the connection (`no_wide`); the scan goes on.
+    ///
+    /// What the module did with the probe goes in the vehicle's record (ICA-70) only from `rx`'s answer: another sender heard
+    /// in the window says nothing about the module at `tx`. When `rx` did not answer, the probe at `rx` alone records it, as
+    /// a request to one module does; a module found answering elsewhere is recorded when the scan asks it there again.
     ///
     /// UNVERIFIED ON HARDWARE: the filter commands are the ELM327 and STN references' as I understand them, tested only
-    /// against the simulated adapter, like `STN_UNVERIFIED`.
+    /// against the simulated adapter, like `STN_UNVERIFIED`. The probe at `rx` alone is the floor for that reason.
     pub fn probe(&mut self, tx: u32, rx: u32, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
         crate::uds::check_probe(data)?;
-        let wide = tx > 0x7FF;
-        let (f, m) = if wide { WIDE29 } else { WIDE11 };
-        if self.want_ext.is_some()
+        let can29 = tx > 0x7FF;
+        let (f, m) = if can29 { WIDE29 } else { WIDE11 };
+        if self.no_wide.is_some()
+            || self.want_ext.is_some()
             || self.want_bus != Bus::Main
             || rx & m != f
-            || (wide && !crate::vehicles::is_fixed29_request(tx))
+            || (can29 && !crate::vehicles::is_fixed29_request(tx))
         {
             return self.request_to(tx, rx, data);
         }
-        let r = self.probe_inner(tx, rx, data);
-        // what the module did with it, for the vehicle's record (ICA-70), as `request_to` keeps it: the first answer to the
-        // probe, or silence
-        let got = match &r {
-            Ok(answers) => Some(
-                match answers.iter().find(|a| crate::uds::answers_probe(data, a)) {
-                    Some(a) => match a.refusal() {
-                        Some((_, code)) => crate::record::Got::Refused(code),
-                        None => crate::record::Got::Data(a.data.len()),
-                    },
-                    None => crate::record::Got::Silent,
-                },
-            ),
-            Err(_) => None,
+        let Some(mut heard) = self.probe_wide(tx, rx, data)? else {
+            // the adapter would not listen wide (remembered): the probe at rx alone
+            return self.request_to(tx, rx, data);
         };
-        if let Some(got) = got {
+        let from_rx = heard.iter().find(|a| {
+            u32::from_str_radix(&a.from, 16).ok() == Some(rx) && crate::uds::answers_probe(data, a)
+        });
+        if let Some(a) = from_rx {
+            let got = match a.refusal() {
+                Some((_, code)) => crate::record::Got::Refused(code),
+                None => crate::record::Got::Data(a.data.len()),
+            };
             if self.outcomes.len() < 10_000 {
                 self.outcomes.push(crate::record::Outcome {
                     tx,
@@ -747,41 +759,64 @@ impl Elm {
                     got,
                 });
             }
+            return Ok(heard);
         }
-        r
+        // the floor: the probe at rx alone, as before the wide probe (its outcome kept by `request_to`)
+        match self.request_to(tx, rx, data) {
+            Ok(a) => heard.extend(a),
+            Err(ObdError::NoData) => {}
+            Err(e) => return Err(e),
+        }
+        Ok(heard)
     }
 
-    fn probe_inner(&mut self, tx: u32, rx: u32, data: &[u8]) -> Result<Vec<Answer>, ObdError> {
+    /// Why this adapter's probes listen to the guessed answer ID alone, when it refused the wide filter (`probe`).
+    pub fn no_wide(&self) -> Option<&str> {
+        self.no_wide.as_deref()
+    }
+
+    /// `probe`'s wide window: what the adapter showed through the wide filter, or None when it refused the filter or
+    /// reported trouble under it (then remembered in `no_wide`). A link's own trouble (no prompt, the port lost) is an error.
+    fn probe_wide(
+        &mut self,
+        tx: u32,
+        rx: u32,
+        data: &[u8],
+    ) -> Result<Option<Vec<Answer>>, ObdError> {
         self.read_only_check(data)?;
-        let wide = self.sendable(tx, rx, data)?.0;
+        let can29 = self.sendable(tx, rx, data)?.0;
         self.bus_to(Bus::Main)?;
         self.format_frames()?;
         self.ext_to(None)?;
-        // the header and flow control as for one module, the wide filter in place of ATCRA's one answer ID
-        let (f, m) = if wide { WIDE29 } else { WIDE11 };
-        let mut cmds: Vec<String> = header_commands(Some((tx, rx)), wide)
+        // whatever happens from here, the next request says its header and answer ID again
+        self.target = Some(UNKNOWN_TARGET);
+        let header: Vec<String> = header_commands(Some((tx, rx)), can29)
             .into_iter()
-            .filter(|c| !c.starts_with("ATCRA"))
+            .map(|c| {
+                if c.starts_with("ATCRA") {
+                    "ATCRA".to_string()
+                } else {
+                    c
+                }
+            })
             .collect();
+        self.ok_commands(&header.iter().map(String::as_str).collect::<Vec<_>>())?;
+        let (f, m) = if can29 { WIDE29 } else { WIDE11 };
         let hex = |id: u32| {
-            if wide {
+            if can29 {
                 format!("{id:08X}")
             } else {
                 format!("{id:03X}")
             }
         };
-        if self.stn.is_some() {
-            cmds.extend(["STFCP".into(), format!("STFAP {},{}", hex(f), hex(m))]);
+        let wide: Vec<String> = if self.stn.is_some() {
+            vec!["STFCP".into(), format!("STFAP {},{}", hex(f), hex(m))]
         } else {
-            cmds.extend([format!("ATCF{}", hex(f)), format!("ATCM{}", hex(m))]);
-        }
-        // whatever happens from here, the next request says its header and answer ID again
-        self.target = Some(UNKNOWN_TARGET);
-        let refs: Vec<&str> = cmds.iter().map(String::as_str).collect();
+            vec![format!("ATCF{}", hex(f)), format!("ATCM{}", hex(m))]
+        };
         let heard = self
-            .ok_commands(&refs)
-            .and_then(|()| self.request_lines(data))
-            .and_then(|lines| parse_each(&lines, self.protocol));
+            .ok_commands(&wide.iter().map(String::as_str).collect::<Vec<_>>())
+            .and_then(|()| self.request_lines(data));
         // back to automatic receive filtering; a failure here is put right by the next request, which sets its own filter
         // (ATCRA with its answer ID, or ATCRA alone before a broadcast)
         let back: &[&str] = if self.stn.is_some() {
@@ -791,9 +826,14 @@ impl Elm {
         };
         let _ = self.ok_commands(back);
         match heard {
-            // a sender whose message does not add up is not an answer to the probe (a probe's answer is one frame)
-            Ok((answers, _)) => Ok(answers),
-            Err(ObdError::NoData) => Ok(Vec::new()),
+            Ok(lines) => Ok(Some(probe_heard(&lines, self.protocol))),
+            Err(ObdError::NoData) => Ok(Some(Vec::new())),
+            Err(ObdError::Adapter(why)) => {
+                self.no_wide = Some(format!(
+                    "the adapter would not listen to every answer ID ({why}), so each probe listens at the guessed one"
+                ));
+                Ok(None)
+            }
             Err(e) => Err(e),
         }
     }
@@ -1226,8 +1266,31 @@ pub fn parse_lines_ext(lines: &[String], protocol: Protocol) -> Result<Vec<Answe
     }
 }
 
-/// `parse_each` for frames of `frame` ISO-TP bytes (8 on classic CAN, 7 behind a gateway).
-fn parse_sized(lines: &[String], protocol: Protocol, frame: usize) -> Result<Parsed, ObdError> {
+/// What a sweep's probe heard through the wide filter (`Elm::probe`): every sender's whole message, and for a sender whose
+/// message did not add up (another conversation's long message, its frames cut off) the start of it as its first frame
+/// gives it, so the scan's guard still sees what kind of message it was (`uds::is_response`). A probe's own answer is one
+/// frame. Lines that are not frames at all are nothing heard.
+fn probe_heard(lines: &[String], protocol: Protocol) -> Vec<Answer> {
+    let Ok((mut answers, bad)) = parse_each(lines, protocol) else {
+        return Vec::new();
+    };
+    let frames = frames_of(lines, protocol).unwrap_or_default();
+    for (from, _) in bad {
+        let start = frames
+            .iter()
+            .find(|(h, b)| *h == from && b.len() >= 8 && b[0] >> 4 == 1);
+        if let Some((_, b)) = start {
+            answers.push(Answer {
+                from,
+                data: b[2..8].to_vec(),
+            });
+        }
+    }
+    answers
+}
+
+/// Lines with headers as frames: (header, bytes), or the first line that is not a frame.
+fn frames_of(lines: &[String], protocol: Protocol) -> Result<Vec<(String, Vec<u8>)>, ObdError> {
     let hc = protocol.header_chars();
     let mut frames: Vec<(String, Vec<u8>)> = Vec::new();
     for l in lines {
@@ -1244,6 +1307,12 @@ fn parse_sized(lines: &[String], protocol: Protocol, frame: usize) -> Result<Par
             .collect();
         frames.push((hex[..hc].to_uppercase(), bytes));
     }
+    Ok(frames)
+}
+
+/// `parse_each` for frames of `frame` ISO-TP bytes (8 on classic CAN, 7 behind a gateway).
+fn parse_sized(lines: &[String], protocol: Protocol, frame: usize) -> Result<Parsed, ObdError> {
+    let frames = frames_of(lines, protocol)?;
     let mut bad: Vec<(String, String)> = Vec::new();
     if !protocol.is_can() {
         // header (priority, target, sender) then data then a checksum byte
@@ -1393,6 +1462,32 @@ fn parse_sized(lines: &[String], protocol: Protocol, frame: usize) -> Result<Par
 
 #[cfg(test)]
 mod tests {
+    /// ICA-103: what a probe heard through the wide filter keeps the start of a long message whose frames were cut off, as
+    /// its first frame gives it, so the scan sees it was an answer; a whole message stays whole, and lines that are not
+    /// frames are nothing heard.
+    #[test]
+    fn a_probe_keeps_the_start_of_a_message_cut_off() {
+        use super::{probe_heard, Answer, Protocol};
+        let lines: Vec<String> = ["7D6 10 0A 62 F1 90 01 02 03", "7C8 02 7E 00 AA AA AA AA AA"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            probe_heard(&lines, Protocol::Can11At500),
+            vec![
+                Answer {
+                    from: "7C8".into(),
+                    data: vec![0x7E, 0x00]
+                },
+                Answer {
+                    from: "7D6".into(),
+                    data: vec![0x62, 0xF1, 0x90, 0x01, 0x02, 0x03]
+                },
+            ]
+        );
+        assert!(probe_heard(&["SEARCHING".to_string()], Protocol::Can11At500).is_empty());
+    }
+
     /// A serial port at one speed: the simulated car where the adapter answers; elsewhere a garbled reply to each command
     /// (a wrong speed), or bytes that never stop (an adapter left in monitor mode).
     struct AtSpeed {

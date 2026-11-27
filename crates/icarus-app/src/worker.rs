@@ -850,31 +850,28 @@ fn scan(
             i + 1,
             list.len()
         )));
-        // the module as found: with the answer ID it was heard from, which is not always its request ID + 8
-        let there = match guard.find(elm, m) {
-            // the adapter refused to switch to that module's bus: it, and the bus from now on, is listed as not reachable
-            Err(icarus_obd::elm::ObdError::Adapter(why)) if m.on_ms_can() => {
+        // the module as found, read at the answer ID it was heard from (not always its request ID + 8); a bus the adapter
+        // refused to switch to is listed as not reachable, it and the bus from now on
+        match guard.scan(elm, m).map_err(e)? {
+            uds::Step::Unreachable(why) => {
                 unreachable.push(format!("{:03X}  {}: {why}", m.tx, m.name));
-                continue;
             }
-            r => r.map_err(e)?,
-        };
-        if let Some(m) = there {
-            let m = &m;
-            found += 1;
-            let ((identity, notes), dtcs) = uds::at_module(elm, m, |l| {
-                Ok((
-                    uds::module_identity_notes(l, m.tx, m.rx())?,
-                    uds::module_dtcs(l, m.tx, m.rx())?,
-                ))
-            })
-            .map_err(e)?;
-            send(Event::Module(ModuleView {
-                addr: m.clone(),
-                identity,
-                notes,
-                dtcs,
-            }));
+            uds::Step::Absent => {}
+            uds::Step::Found(s) => {
+                found += 1;
+                let uds::Scanned {
+                    addr,
+                    identity,
+                    notes,
+                    dtcs,
+                } = *s;
+                send(Event::Module(ModuleView {
+                    addr,
+                    identity,
+                    notes,
+                    dtcs,
+                }));
+            }
         }
     }
     send(Event::ScanDone { found, unreachable });

@@ -261,6 +261,12 @@ pub struct SimCar {
     chatter: Vec<(u32, Vec<u8>)>,
     /// As-built blocks a test gives modules (`with_block`): (request ID, the last identifier's low byte), DE00 on.
     blocks: Vec<(u32, u8)>,
+    /// Messages other nodes send once, while the first tester present to a request ID is answered (`with_chatter_once`):
+    /// (that request ID, sender, message).
+    once: Vec<(u32, u32, Vec<u8>)>,
+    /// The adapter takes a receive filter and mask, or an STN pass filter, and then shows no answer through them
+    /// (`with_wide_filter_deaf`).
+    wide_deaf: bool,
 }
 
 impl Default for SimCar {
@@ -320,6 +326,8 @@ impl SimCar {
             odd: Vec::new(),
             chatter: Vec::new(),
             blocks: Vec::new(),
+            once: Vec::new(),
+            wide_deaf: false,
         }
     }
 
@@ -463,9 +471,34 @@ impl SimCar {
         self
     }
 
-    /// What other nodes send while a tester present is answered (`with_chatter`).
-    pub(crate) fn chatter(&self) -> &[(u32, Vec<u8>)] {
-        &self.chatter
+    /// The same vehicle with another node sending `msg` from `from` once, while the first tester present to `tx` is answered
+    /// (not again, so a sweep asking that sender once more hears nothing from it): a frame of another conversation that
+    /// happens to fall in a probe's window. A filter shows it as it would any frame.
+    #[cfg(test)]
+    pub(crate) fn with_chatter_once(mut self, tx: u32, from: u32, msg: &[u8]) -> SimCar {
+        self.once.push((tx, from, msg.to_vec()));
+        self
+    }
+
+    /// The same vehicle behind an adapter that takes ATCF and ATCM (or STFAP) and then shows no answer through them, the
+    /// worst an adapter whose filters do not work as Icarus understands them could do to a probe.
+    #[cfg(test)]
+    pub(crate) fn with_wide_filter_deaf(self) -> SimCar {
+        SimCar {
+            wide_deaf: true,
+            ..self
+        }
+    }
+
+    /// What other nodes send while a tester present to `tx` is answered (`with_chatter`, and `with_chatter_once`'s, which it
+    /// gives once).
+    pub(crate) fn chatter_at(&mut self, tx: u32) -> Vec<(u32, Vec<u8>)> {
+        let mut out = self.chatter.clone();
+        if let Some(i) = self.once.iter().position(|o| o.0 == tx) {
+            let (_, from, msg) = self.once.remove(i);
+            out.push((from, msg));
+        }
+        out
     }
 
     /// The receive filter a request's answers pass through when no single answer ID is set (ATCRA hhh): an STN chip's
@@ -833,16 +866,20 @@ impl SimCar {
             on_bus.extend(bus_frames(*h, p));
         }
         publish(on_bus);
-        // other nodes heard through a wide filter while a tester present is answered (`with_chatter`)
-        if self.filter.is_none()
-            && self.mask().is_some()
-            && self.header != self.functional()
-            && req.first() == Some(&0x3E)
-        {
-            msgs.splice(0..0, self.chatter.clone());
+        // other nodes heard through a wide filter while a tester present is answered (`with_chatter`), and once, through
+        // whatever filter is set (`with_chatter_once`)
+        if self.header != self.functional() && req.first() == Some(&0x3E) {
+            if let Some(i) = self.once.iter().position(|o| o.0 == self.header) {
+                let (_, from, msg) = self.once.remove(i);
+                msgs.insert(0, (from, msg));
+            }
+            if self.filter.is_none() && self.mask().is_some() {
+                msgs.splice(0..0, self.chatter.clone());
+            }
         }
         match (self.filter, self.mask()) {
             (Some(f), _) => msgs.retain(|(h, _)| *h == f),
+            (None, Some(_)) if self.wide_deaf => msgs.clear(),
             (None, Some((f, m))) => msgs.retain(|(h, _)| *h & m == f & m),
             (None, None) => {}
         }
@@ -1318,10 +1355,11 @@ impl SimCar {
                 return;
             }
             "STI" if self.stn => vec!["STN2255 v5.10.3".into()],
-            // an STN keeps ATCRA's answer ID as one of its pass filters, so clearing them clears it too
+            // ATCRA's answer ID stays until ATCRA alone clears it, whatever is said of the pass filters or the filter and
+            // mask after it: whether a real ELM327 or STN lets those replace it is not known here, so the simulated
+            // adapter takes the case that needs Icarus to clear it (`Elm::probe`)
             "STFCP" if self.stn => {
                 (self.sf, self.sm) = (0, 0);
-                self.filter = None;
                 ok
             }
             _ if c.starts_with("STFAP") && self.stn => {
@@ -1380,13 +1418,12 @@ impl SimCar {
                 self.csm = c.ends_with('1');
                 ok
             }
-            // three digits for 11-bit IDs, eight for 29-bit; a filter and mask replace ATCRA's one answer ID
+            // three digits for 11-bit IDs, eight for 29-bit; ATCRA's one answer ID, when set, still goes first (above)
             _ if c.starts_with("ATCF")
                 && matches!(c.len(), 7 | 12)
                 && u32::from_str_radix(&c[4..], 16).is_ok() =>
             {
                 self.cf = u32::from_str_radix(&c[4..], 16).unwrap_or(0);
-                self.filter = None;
                 ok
             }
             _ if c.starts_with("ATCM")
@@ -1394,7 +1431,6 @@ impl SimCar {
                 && u32::from_str_radix(&c[4..], 16).is_ok() =>
             {
                 self.cm = u32::from_str_radix(&c[4..], 16).unwrap_or(0);
-                self.filter = None;
                 ok
             }
             "ATCRA" => {
