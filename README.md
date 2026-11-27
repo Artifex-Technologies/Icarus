@@ -3,8 +3,7 @@
 # Icarus
 
 A vehicle tuning, learning and diagnostics tool for Linux: engine, transmission and other control modules (ECU, ECM, PCM,
-TCM). I'm building it to learn vehicle electronics hands-on while I build two off-road vehicles, and because no open tool on
-Linux tunes factory ECUs.
+TCM). I'm building it to learn vehicle electronics hands-on while I build off-road vehicles.
 
 Part of the Artifex ecosystem (Labyrinth OS, Yggdrasil, Heimdall, Sarina, Daedalus...). Licensed MPL-2.0. Nothing from a real
 vehicle is ever in this repository: no VIN, ECU image, calibration or log (the VINs in the tests are made up).
