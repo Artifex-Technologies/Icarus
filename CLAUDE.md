@@ -28,8 +28,6 @@ it with HOME/XDG_STATE_HOME pointed at a scratch folder. There is no CI workflow
   keeps `*.bin` and `/private` out). The repository is public, which is why nothing from a real vehicle may ever be committed.
   Write docs in the first person as the owner, and "Sarina", not "her".
 - Push every commit as you make it; stage files by explicit path; `git pull --rebase` first.
-- **Limits:** no one-click emissions "delete" features, no immobiliser bypass, no odometer changes. Thresholds and
-  calibration values are ordinary maps; emissions readings are ordinary live data.
 - **Clean-room:** the reference projects (LibreTune, FoxTune, ZedSuite, Denso ECU Toolkit, ecutools, HyperTuner: GPL; Atlas:
   proprietary) are for ideas and file formats only, never code. Third-party definition files and ECU images are never
   committed; tests use small files written for them.
