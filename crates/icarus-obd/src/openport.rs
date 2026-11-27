@@ -5,7 +5,7 @@
 //! device (`--adapter openport`).
 //!
 //! The command words and the packet layout were learned by reading NikolaKozina's and Dale Schultz's j2534 library for Linux
-//! and macOS (github.com/NikolaKozina/j2534, BSD 3-Clause, with thanks; its notice is in docs/THIRD_PARTY.md). That library is
+//! and macOS (github.com/NikolaKozina/j2534, with thanks; credited in docs/REFERENCES.md). That library is
 //! C over libusb; the code here is Icarus's own. It has not met a cable in hand yet: the tests use a stand-in that answers the
 //! way that library expects the cable to.
 //!

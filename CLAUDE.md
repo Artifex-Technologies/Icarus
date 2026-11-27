@@ -65,7 +65,8 @@ docs/plans/BACKLOG.md and docs/plans/LOG.md (private; ask the owner).
   `O`; tests use `slcan::recorded::Session`), `openport[:/dev/ttyACM0]` (a Tactrix OpenPort 2.0 J2534 cable, `openport.rs`
   under `passthru::PassThruLink`; tests use its stand-in `Cable`), `mongoose:/dev/ttyACM0` (a Drewtech Mongoose Pro,
   `mongoose.rs`: raw CAN, so `canlink::CanLink` over it; its stand-in `Cable` sits on `SimBus`), `sim:j2534`;
-  `ICARUS_ADAPTER` sets a default. Code
-  learned from a BSD or MIT project keeps its notice in docs/THIRD_PARTY.md.
+  `ICARUS_ADAPTER` sets a default.
+- Shared repositories are references only, whatever their license: they show what is missing and how a device or format
+  works; nothing is copied from them (no code, no data), and docs/REFERENCES.md credits what was learned from each.
 - `crates/icarus-obd/src/uds.rs` lets only reading services out; each write lives in its own module behind its allow-list.
 - Interfaces and tuners with Windows-only software, and how Icarus reaches them: [docs/INTERFACES.md](docs/INTERFACES.md).

@@ -4,8 +4,8 @@
 //! a `canlink::Frames`, and Icarus's own ISO-TP (`canlink::CanLink`: flow control, "response pending", the broadcast)
 //! runs over it (`--adapter mongoose:/dev/ttyACM0`).
 //!
-//! The protocol was learned from roffe/gocan's native Mongoose Pro GM II driver (github.com/roffe/gocan, MIT, with thanks;
-//! its notice is in docs/THIRD_PARTY.md), which decoded it from the cable's Windows library. The code here is written for
+//! The protocol was learned from roffe/gocan's native Mongoose Pro GM II driver (github.com/roffe/gocan, with thanks; credited
+//! in docs/REFERENCES.md), which decoded it from the cable's Windows library. Nothing was copied: the code here is written for
 //! Icarus. Only the Mongoose Pro GM II is known to speak it; the other Mongoose Pro models (the Toyota one Techstream uses,
 //! Ford, Honda) are expected to, unchecked. Not yet tried on a cable in hand: the tests use a stand-in that answers as gocan
 //! describes the cable, in front of the simulated car on `canlink::SimBus`.
@@ -571,18 +571,23 @@ mod tests {
         }
     }
 
-    /// A frame the cable sent, as captured on a Mongoose Pro GM II (gocan's TestParseCANFrameCapture, MIT): 7E8 01 50.
+    /// A received frame laid out as the module doc says (written for this test): the engine's speed answer, 7E8 03 41 0D 2A.
     #[test]
-    fn a_captured_frame_is_read() {
+    fn a_received_frame_is_read() {
+        let mut body = vec![RECEIVED, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        body.extend_from_slice(&0x0001_86A0u32.to_le_bytes()); // timestamp
+        body.extend_from_slice(&[0, 0]);
+        body.extend_from_slice(&(4u16 + 5).to_le_bytes()); // the ID's four bytes and five of data
+        body.extend_from_slice(&0x7E8u32.to_be_bytes());
+        body.extend_from_slice(&[0x03, 0x41, 0x0D, 0x2A, 0x00]);
+        let packet = from_cable(CAN, &body);
+        // the length (what follows byte 3) and its check, length XOR 0x51E6
+        assert_eq!(&packet[..4], &[0x21, 0x00, 0xC7, 0x51]);
         let mut buf = vec![0x51, 0xE6, 0x07]; // noise first
-        buf.extend_from_slice(&[
-            0x1e, 0x00, 0xf8, 0x51, 0x00, 0x00, 0x01, 0x05, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x48, 0x0b, 0x00, 0x00, 0x00, 0x00, 0xfc, 0x37, 0x0d, 0x00, 0x06, 0x00, 0x06, 0x00,
-            0x00, 0x00, 0x07, 0xe8, 0x01, 0x50,
-        ]);
+        buf.extend_from_slice(&packet);
         let p = next_packet(&mut buf).unwrap();
         assert!(!p.out && p.channel == 5 && p.command() == RECEIVED && !p.is_reply());
-        assert_eq!(p.frame(), Some((0x7E8, vec![0x01, 0x50])));
+        assert_eq!(p.frame(), Some((0x7E8, vec![0x03, 0x41, 0x0D, 0x2A, 0x00])));
         assert!(buf.is_empty());
         // what Icarus sends reads back the same
         let mut w = wire(CAN, &[CONNECT, 0, 7, 0, 0, 0, 0, 0]);

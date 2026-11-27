@@ -635,5 +635,5 @@ What Icarus is built to do, the rules every write follows, and its known limitat
 ## Licence
 
 MPL-2.0, like the rest of the ecosystem. The reference projects I looked at are GPL or proprietary: Icarus takes ideas and
-file formats from them, never code. The OpenPort 2.0 and Mongoose drivers learned their cables' protocols from a BSD- and
-an MIT-licensed project; their notices are in [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md).
+file formats from them, never code. The projects I share are references in the same way, whatever their license: nothing is
+copied from them, and [docs/REFERENCES.md](docs/REFERENCES.md) credits what Icarus learned from each.
