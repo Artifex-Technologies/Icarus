@@ -865,14 +865,26 @@ fn can_interface(args: &Args) -> Option<String> {
 /// An ELM327/STN adapter itself, for what only an adapter does (its monitor mode).
 /// The adapter set up to listen only (ICA-80): `Elm::listen` on the protocol `--protocol` names (an ELM327 protocol number,
 /// 6 by default: CAN 11-bit at 500 kbit/s). No request goes onto the bus, not even `connect`'s protocol search.
+/// An ELM327 protocol number as written: hex 1 to C ("A" is J1939), or the adapter's own "A6" form (automatic, then 6).
+fn elm_protocol(p: &str) -> Option<u8> {
+    let p = p.trim();
+    let digits = if p.len() > 1 && (p.starts_with('A') || p.starts_with('a')) {
+        &p[1..]
+    } else {
+        p
+    };
+    u8::from_str_radix(digits, 16)
+        .ok()
+        .filter(|n| (1..=0xC).contains(n))
+}
+
 fn listen_elm(args: &Args) -> Result<Elm, String> {
     let (spec, target) = adapter_target(args)?;
     let protocol = match args.opt("protocol") {
         None => 6,
-        Some(p) => u8::from_str_radix(p.trim_start_matches('A'), 16)
-            .ok()
-            .filter(|n| (1..=0xC).contains(n))
-            .ok_or("--protocol is an ELM327 protocol number, 1 to C (6: CAN 11-bit, 500 kbit/s)")?,
+        Some(p) => elm_protocol(p).ok_or(
+            "--protocol is an ELM327 protocol number, 1 to C (6: CAN 11-bit, 500 kbit/s; A: J1939)",
+        )?,
     };
     eprintln!("connecting to {spec} to listen (protocol {protocol:X})...");
     let (elm, note) =
@@ -2027,7 +2039,7 @@ fn watch_slcan(
 fn bus_watch(a: &[String], serial: &OpenSerial<'_>) -> Result<bus::Analyzer, String> {
     if a.first().map(String::as_str) != Some("watch") {
         return Err(
-            "usage: icarus bus watch (--adapter A [--protocol N] | --can can0 | --adapter slcan:/dev/ttyACM0) [--seconds N] [--raw] [--diagnostic] [--dbc FILE]"
+            "usage: icarus bus watch (--adapter A [--protocol N] | --can can0 | --adapter slcan:/dev/ttyACM0) [--seconds N] [--raw] [--diagnostic] [--j1939] [--dbc FILE]"
                 .into(),
         );
     }
@@ -2036,9 +2048,11 @@ fn bus_watch(a: &[String], serial: &OpenSerial<'_>) -> Result<bus::Analyzer, Str
     // --diagnostic: only IDs 700-7FF (another tool's requests and the modules' answers), when the whole bus is more than an
     // ELM/STN adapter's serial link carries
     let diagnostic = a.iter().any(|x| x == "--diagnostic");
+    // --j1939: the 29-bit frames read as J1939 (heavy-duty vehicles, ICA-94); an adapter on protocol A does it by itself
+    let j1939 = a.iter().any(|x| x == "--j1939");
     let rest: Vec<String> = a[1..]
         .iter()
-        .filter(|x| *x != "--raw" && *x != "--diagnostic")
+        .filter(|x| *x != "--raw" && *x != "--diagnostic" && *x != "--j1939")
         .cloned()
         .collect();
     let args = parse_args(&rest, &["adapter", "can", "seconds", "protocol", "dbc"])?;
@@ -2063,6 +2077,9 @@ fn bus_watch(a: &[String], serial: &OpenSerial<'_>) -> Result<bus::Analyzer, Str
         .unwrap_or(10.0);
     actuator::catch_interrupt();
     let mut an = bus::Analyzer::default();
+    if j1939 {
+        an.j1939 = Some(Default::default());
+    }
     let start = std::time::Instant::now();
     let mut printed = 0u64;
     let mut step = |an: &mut bus::Analyzer, f: Option<bus::Frame>| {
@@ -2116,6 +2133,9 @@ fn bus_watch(a: &[String], serial: &OpenSerial<'_>) -> Result<bus::Analyzer, Str
         // listen only: the adapter is set up without the protocol search's request (it sent one 0100 before, 2026-11-22)
         let mut elm = listen_elm(&args)?;
         let proto = elm.protocol;
+        if proto == icarus_obd::elm::Protocol::J1939 && an.j1939.is_none() {
+            an.j1939 = Some(Default::default());
+        }
         if raw {
             // the adapter first, so a firmware change shows in the log; bus::parse_line skips this line
             println!(
@@ -2198,6 +2218,16 @@ fn bus_watch(a: &[String], serial: &OpenSerial<'_>) -> Result<bus::Analyzer, Str
         println!("\nService routines seen started by another tool (add them to the vehicle's file after checking what each does):\n");
         for s in &an.services {
             println!("{}", icarus_obd::service::to_toml(s));
+        }
+    }
+    if let Some(d) = &an.j1939 {
+        println!("\nJ1939 (heavy-duty vehicles): what each sender reported (values in the last message):");
+        let summary = d.summary();
+        if summary.is_empty() {
+            println!("  nothing of J1939's common groups or faults was seen");
+        }
+        for l in summary {
+            println!("  {l}");
         }
     }
     Ok(an)
@@ -2730,6 +2760,17 @@ fn cmd_devices() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    /// `--protocol`: hex 1 to C, "A" being J1939 (it was refused: the letter was stripped as a prefix), and the "A6" form.
+    #[test]
+    fn protocol_numbers_include_j1939() {
+        use super::elm_protocol as p;
+        assert_eq!(
+            (p("6"), p("A"), p("a"), p("A6"), p("C")),
+            (Some(6), Some(0xA), Some(0xA), Some(6), Some(0xC))
+        );
+        assert_eq!((p("0"), p("D"), p("10"), p("")), (None, None, None, None));
+    }
+
     use super::*;
 
     /// A recording made with --gps has the GPS's three columns, one made without has none (both on the simulators, into

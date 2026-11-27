@@ -19,6 +19,7 @@ pub mod elm;
 pub mod garage;
 pub mod gps;
 pub mod history;
+pub mod j1939;
 pub mod j1979;
 pub mod learning;
 pub mod link;

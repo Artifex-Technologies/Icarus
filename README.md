@@ -153,6 +153,14 @@ watch which byte follows), what each ID is where the vehicle profile knows it (t
 OBD-II's own, and the IDs a profile's `[bus]` table names; the profile chosen on the Modules page, else the VIN's), and
 diagnostic messages between a tool and the modules put in words. Watching only: nothing is sent onto the bus. What another tool does while Icarus watches is learned (next section).
 
+**Heavy-duty vehicles (J1939).** Diesel trucks and buses, motorhomes on a truck chassis, farm and construction equipment
+talk SAE J1939 on 29-bit CAN (usually 250 kbit/s). `icarus bus watch --adapter A --protocol A` (an adapter's J1939
+protocol), or `--can can0 --j1939` / `--adapter slcan:...#250000 --j1939`, reads it: each module's active faults (DM1, put
+back together from the transport protocol when longer than one frame) as SPN and FMI with their meaning, the warning lamps,
+and the common engine values (engine speed, coolant temperature, vehicle speed, fuel rate, oil pressure), in °F, mph and psi
+with the metric value beside. The layouts follow public descriptions of J1939-21, -71 and -73; SPN names cover a handful of
+common ones (others show as their number). `--adapter sim:j1939` is a simulated truck to try it on.
+
 **A CAN database names the bytes.** `--dbc FILE` reads a `.dbc` (a vehicle's from opendbc or a maker's; the file is yours,
 never part of Icarus) and, after the ID table, shows each named ID's signals in its last frame, in their units and with
 their named values ("DriverDoor open"): Intel and Motorola byte order, signed values, multiplexed signals, 29-bit IDs and

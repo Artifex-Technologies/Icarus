@@ -192,6 +192,9 @@ pub struct Analyzer {
     pub frames: u64,
     /// Diagnostic messages described so far (the log keeps only the last 500).
     pub logged: u64,
+    /// J1939 (heavy-duty vehicles, ICA-94): the 29-bit frames read as parameter groups, when the bus is J1939; a change in
+    /// a sender's active faults goes into the log.
+    pub j1939: Option<crate::j1939::Decoder>,
 }
 
 impl Analyzer {
@@ -242,6 +245,15 @@ impl Analyzer {
         if !f.ext && (0x700..=0x7FF).contains(&f.id) {
             if let Some(msg) = self.isotp(f) {
                 self.diagnostic(f.id, &msg, f.at);
+            }
+        }
+        if f.ext {
+            if let Some(line) = self.j1939.as_mut().and_then(|d| d.add(f.id, &f.data, f.at)) {
+                self.log.push_back(line);
+                self.logged += 1;
+                if self.log.len() > 500 {
+                    self.log.pop_front();
+                }
             }
         }
     }

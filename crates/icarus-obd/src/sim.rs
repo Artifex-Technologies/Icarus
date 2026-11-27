@@ -52,6 +52,63 @@ fn shared_now() -> u64 {
     SHARED.lock().unwrap_or_else(|p| p.into_inner()).0
 }
 
+/// The J1939 truck's bus at tick `t` (5 ms each, as `bus_tick`), as an adapter on protocol A shows it with headers and
+/// spaces: the 29-bit ID as four bytes, then the data.
+fn j1939_tick(t: u64) -> Vec<String> {
+    let line = |id: u32, d: &[u8]| {
+        let mut b = id.to_be_bytes().to_vec();
+        b.extend_from_slice(d);
+        b.iter()
+            .map(|x| format!("{x:02X}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let rpm = ((650.0 + 30.0 * (t as f64 * 0.05).sin()) * 8.0) as u16;
+    let mut out = vec![line(
+        0x0CF0_0400,
+        &[
+            0xF0,
+            0x7D,
+            0x7D,
+            rpm as u8,
+            (rpm >> 8) as u8,
+            0x00,
+            0xFF,
+            0xFF,
+        ],
+    )];
+    if t.is_multiple_of(20) {
+        // ET1: 85 °C; CCVS1: standing still
+        out.push(line(
+            0x18FE_EE00,
+            &[125, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+        ));
+        out.push(line(
+            0x18FE_F100,
+            &[0xFF, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+        ));
+    }
+    if t.is_multiple_of(400) {
+        // DM1 from the engine, amber lamp on: SPN 110 FMI 0 (3 times), SPN 3251 FMI 16, SPN 157 FMI 4 (twice); 14 bytes,
+        // so a BAM: the announcement, then two packets
+        out.push(line(0x1CEC_FF00, &[0x20, 14, 0, 2, 0xFF, 0xCA, 0xFE, 0x00]));
+        out.push(line(
+            0x1CEB_FF00,
+            &[1, 0x04, 0xFF, 0x6E, 0x00, 0x00, 0x03, 0xB3],
+        ));
+        out.push(line(
+            0x1CEB_FF00,
+            &[2, 0x0C, 0x10, 0x01, 0x9D, 0x00, 0x04, 0x02],
+        ));
+        // the transmission: no active faults
+        out.push(line(
+            0x18FE_CA03,
+            &[0x00, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF],
+        ));
+    }
+    out
+}
+
 /// A message as the CAN frames it goes as (ISO-TP: a single frame, or a first frame and consecutive frames), each with its
 /// ID and all 8 data bytes, as a bus monitor shows them before formatting.
 fn bus_frames(id: u32, payload: &[u8]) -> Vec<String> {
@@ -105,6 +162,9 @@ pub enum Make {
     Gm,
     /// 11-bit CAN, and body modules on the medium-speed CAN (pins 3 and 11) that an OBDLink switches to.
     Ford,
+    /// A heavy-duty vehicle on J1939 (ICA-94): its modules broadcast parameter groups on 29-bit IDs, watched on protocol A;
+    /// only `bus_tick` is its own (OBD-II requests are answered as for the Toyota-like vehicle).
+    Truck,
 }
 
 /// The Ford-like simulation's modules: (request ID, on the medium-speed CAN). The engine and ABS on the main bus, a body
@@ -271,6 +331,16 @@ impl SimCar {
         SimCar {
             make: Make::Gm,
             vin: GM_VIN.to_string(),
+            ..SimCar::new()
+        }
+    }
+
+    /// The J1939 truck (`sim:j1939`): the engine (address 00) broadcasts its speed (EEC1), coolant temperature (ET1) and
+    /// the vehicle speed (CCVS1), and every two seconds its active faults (DM1, three of them, so in a BAM transfer); the
+    /// transmission (03) reports none. Made-up values, as public descriptions of J1939 lay them out.
+    pub fn truck() -> SimCar {
+        SimCar {
+            make: Make::Truck,
             ..SimCar::new()
         }
     }
@@ -477,6 +547,9 @@ impl SimCar {
     /// door switch every 20 (it flips every 400), and every 400 ticks another tool changing a cluster setting and an ABS
     /// setting, then running a throttle test and an ABS pump test, for the analyser to learn.
     fn bus_tick(&self, t: u64) -> Vec<String> {
+        if self.make == Make::Truck {
+            return j1939_tick(t);
+        }
         let mut out = Vec::new();
         let rpm = (790.0 + 40.0 * (t as f64 * 0.05).sin()) as u16;
         out.push(format!("0B4 00 00 00 00 00 00 00 {:02X}", t as u8));

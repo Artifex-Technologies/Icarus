@@ -15,6 +15,7 @@ pub trait Port {
 /// Where to reach the adapter, as written on the command line:
 ///   `sim` or `sim:off`             Icarus's simulated car, engine running or ignition on with the engine off
 ///   `sim:listen`                   a second simulated adapter on the same simulated bus, for listening (ICA-80)
+///   `sim:j1939`                    a simulated heavy-duty vehicle on J1939, for watching (ICA-94)
 ///   `/dev/ttyUSB0` or `/dev/ttyUSB0@115200`   a USB adapter (38400 baud unless given)
 ///   `bt:AA:BB:CC:DD:EE:FF` or `...#2`         a paired Bluetooth adapter, RFCOMM channel 1 unless given
 ///   `tcp:192.168.0.10:35000`       a Wi-Fi adapter
@@ -28,6 +29,8 @@ pub enum Target {
     Sim {
         engine_on: bool,
         listen: bool,
+        /// `sim:j1939`: a heavy-duty vehicle whose modules talk J1939 (watched on protocol A).
+        j1939: bool,
     },
     Serial {
         path: String,
@@ -68,10 +71,11 @@ impl Target {
     }
 
     pub fn parse(s: &str) -> Result<Target, String> {
-        if s == "sim" || s == "sim:off" || s == "sim:listen" {
+        if matches!(s, "sim" | "sim:off" | "sim:listen" | "sim:j1939") {
             return Ok(Target::Sim {
                 engine_on: s != "sim:off",
                 listen: s == "sim:listen",
+                j1939: s == "sim:j1939",
             });
         }
         if let Some(rest) = s.strip_prefix("slcan:") {
@@ -179,6 +183,7 @@ impl Target {
                     format!("{path} is an SLCAN adapter, opened listen-only for watching the bus (icarus bus watch, icarus learn); this needs an OBD adapter or a CAN interface"),
                 ))
             }
+            Target::Sim { j1939: true, .. } => Box::new(crate::sim::SimCar::truck()),
             Target::Sim { listen: true, .. } => Box::new(crate::sim::SimCar::listening()),
             Target::Sim { engine_on: true, .. } => Box::new(crate::sim::SimCar::new()),
             Target::Sim { engine_on: false, .. } => Box::new(crate::sim::SimCar::engine_off()),
@@ -424,14 +429,16 @@ mod tests {
             Target::parse("sim").unwrap(),
             Target::Sim {
                 engine_on: true,
-                listen: false
+                listen: false,
+                j1939: false,
             }
         );
         assert_eq!(
             Target::parse("sim:off").unwrap(),
             Target::Sim {
                 engine_on: false,
-                listen: false
+                listen: false,
+                j1939: false,
             }
         );
         assert_eq!(
