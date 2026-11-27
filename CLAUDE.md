@@ -65,6 +65,8 @@ docs/plans/BACKLOG.md and docs/plans/LOG.md (private; ask the owner).
   `mongoose.rs`: raw CAN, so `canlink::CanLink` over it; its stand-in `Cable` sits on `SimBus`), `sim:j2534`;
   `ICARUS_ADAPTER` sets a default.
 - Shared repositories are references only, whatever their license: they show what is missing and how a device or format
-  works; nothing is copied from them (no code, no data), and docs/REFERENCES.md credits what was learned from each.
+  works; nothing is copied from them (no code, no data), and docs/REFERENCES.md credits what was learned from each. One
+  exception, my choice (2026-11-27): OBDex's CC0 trouble-code texts stay bundled (crates/icarus-obd/data/obdex). Any other
+  bundled data needs my decision the same way.
 - `crates/icarus-obd/src/uds.rs` lets only reading services out; each write lives in its own module behind its allow-list.
 - Interfaces and tuners with Windows-only software, and how Icarus reaches them: [docs/INTERFACES.md](docs/INTERFACES.md).

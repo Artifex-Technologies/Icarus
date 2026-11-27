@@ -635,4 +635,5 @@ What Icarus is built to do, the rules every write follows, and its known limitat
 
 MPL-2.0, like the rest of the ecosystem. The reference projects I looked at are GPL or proprietary: Icarus takes ideas and
 file formats from them, never code. The projects I share are references in the same way, whatever their license: nothing is
-copied from them, and [docs/REFERENCES.md](docs/REFERENCES.md) credits what Icarus learned from each.
+copied from them, and [docs/REFERENCES.md](docs/REFERENCES.md) credits what Icarus learned from each. The one exception I
+chose is OBDex's public-domain (CC0) trouble-code texts, which Icarus bundles.
