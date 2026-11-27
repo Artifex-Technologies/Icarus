@@ -7,7 +7,8 @@
 //!   conditions. Security access, routines, writing data, clearing codes and programming are refused (`check`).
 //! - Airbag (SRS) and occupant-detection modules are never tested, whatever a definition says.
 //! - A test has conditions (engine off, engine running, vehicle stationary) checked before it starts and every second while it
-//!   runs, needs at least 11.5 V at the port, and stops by itself after its time limit (at most 30 s).
+//!   runs, needs at least 11.5 V measured at the port (an adapter that cannot measure it is refused), and stops by itself
+//!   after its time limit (at most 30 s).
 //! - Every stop path hands control back to the module (`stop`). If Icarus dies mid-test, the module's own diagnostic-session
 //!   timer (about 5 s without tester present) does the same.
 //! - Every start and stop is written to `~/.local/state/icarus/actions.log` (see `audit`).
@@ -262,6 +263,24 @@ fn send(elm: &mut dyn Link, t: &TestDef, data: &[u8]) -> Result<Answer, String> 
     Err("the module stayed busy".into())
 }
 
+/// The battery check every write path makes (actuator tests, clearing codes, settings, service routines): the voltage at
+/// the OBD port measured now, and at least `min`. A link that cannot measure it (a SocketCAN interface, the Mongoose), or
+/// cannot this time (an ELM327 whose `ATRV` does not answer with a number), is refused, not let through, and a reading
+/// from when the link connected is never used instead: a write cut short by a sagging battery is how a module is left
+/// half-written. `what` names the write in the reason ("changing a setting"). Returns the voltage measured.
+pub fn battery_holds(link: &mut dyn Link, min: f64, what: &str) -> Result<f64, String> {
+    match link.voltage() {
+        Some(v) if v.is_finite() && v >= min => Ok(v),
+        Some(v) if v.is_finite() => Err(format!(
+            "the battery is at {v:.1} V; {what} needs at least {min} V (connect a charger)"
+        )),
+        _ => Err(format!(
+            "the adapter cannot measure the battery, so {what} is refused; use an adapter that reads the OBD port's \
+             voltage"
+        )),
+    }
+}
+
 /// Whether the conditions hold now: engine speed and road speed from the standard OBD-II values.
 pub fn conditions_hold(elm: &mut dyn Link, conds: &[Condition]) -> Result<(), String> {
     let engine = |r: Vec<j1979::Reading>| {
@@ -362,13 +381,7 @@ pub fn start(elm: &mut dyn Link, def: &TestDef, value: f64) -> Result<Running, S
         return Err(why);
     }
     crate::lock::writes_allowed(elm)?;
-    if let Some(v) = elm.voltage() {
-        if v < MIN_VOLTS {
-            return Err(format!(
-                "the battery is at {v:.1} V; tests need at least {MIN_VOLTS} V (connect a charger)"
-            ));
-        }
-    }
+    battery_holds(elm, MIN_VOLTS, "an actuator test")?;
     conditions_hold(elm, &def.conditions)?;
     let session = def.protocol == Protocol::Uds;
     if session {
@@ -540,6 +553,135 @@ mod tests {
             (tp(&mut elm) - rest).abs() < 0.5,
             "control returned to the engine computer"
         );
+    }
+
+    /// A test over a link that cannot measure the battery (a SocketCAN interface, or a reading that is not a
+    /// number) is refused before anything is sent; measured above 11.5 V it runs as before.
+    #[test]
+    fn a_test_starts_only_with_the_battery_measured() {
+        use crate::canlink::{CanLink, SimBus};
+        crate::lock::switch_for_test(&[]);
+        let throttle = crate::sim::tests()
+            .into_iter()
+            .find(|t| t.name.starts_with("Throttle"))
+            .unwrap();
+        let on_bus = |volts: Option<f64>| {
+            let mut bus = SimBus::new(SimCar::engine_off());
+            bus.voltage = volts;
+            CanLink::connect(bus, "vcan0").unwrap()
+        };
+        for volts in [None, Some(f64::NAN)] {
+            let mut l = on_bus(volts);
+            let sent = l.frames().sent.len();
+            let e = start(&mut l, &throttle, 30.0).err().unwrap();
+            assert!(
+                e.contains("cannot measure the battery") && e.contains("an actuator test"),
+                "{e}"
+            );
+            assert_eq!(l.frames().sent.len(), sent, "nothing was sent");
+        }
+        let e = start(&mut on_bus(Some(11.0)), &throttle, 30.0)
+            .err()
+            .unwrap();
+        assert!(e.contains("11.0 V") && e.contains("at least 11.5 V"), "{e}");
+        let mut l = on_bus(Some(12.6));
+        let mut run = start(&mut l, &throttle, 30.0).unwrap();
+        assert!(
+            (j1979::read(&mut l, 0x11).unwrap()[0].value - 30.0).abs() < 1.0,
+            "the throttle opened to 30 %"
+        );
+        stop(&mut l, &mut run, "test").unwrap();
+    }
+
+    /// An ELM327 that read the battery when it connected and cannot now: its `ATRV` after that answers `answer` (`?`, or
+    /// a line left from a bus watch) instead of a number. The simulated vehicle, engine off, is behind it.
+    struct Unmeasured {
+        car: SimCar,
+        answer: &'static str,
+        atrv: u32,
+        said: std::collections::VecDeque<u8>,
+    }
+
+    impl crate::port::Port for Unmeasured {
+        fn send(&mut self, data: &[u8]) -> std::io::Result<()> {
+            if data == b"ATRV\r" {
+                self.atrv += 1;
+                if self.atrv > 1 {
+                    self.said.extend(format!("{}\r\r>", self.answer).bytes());
+                    return Ok(());
+                }
+            }
+            self.car.send(data)
+        }
+        fn recv(&mut self, buf: &mut [u8], timeout: Duration) -> std::io::Result<usize> {
+            if self.said.is_empty() {
+                return self.car.recv(buf, timeout);
+            }
+            let n = buf.len().min(self.said.len());
+            for (b, s) in buf.iter_mut().zip(self.said.drain(..n)) {
+                *b = s;
+            }
+            Ok(n)
+        }
+    }
+
+    /// The battery is judged by a reading taken at the moment of the write, never by the one from when the adapter
+    /// connected: an adapter that read 12.6 V then and gives no number now has every write path refused (an actuator
+    /// test, clearing codes, a setting, a service routine), and nothing that changes the vehicle goes out.
+    #[test]
+    fn a_write_needs_the_battery_measured_now_not_when_the_adapter_connected() {
+        crate::lock::switch_for_test(&[]);
+        let throttle = crate::sim::tests()
+            .into_iter()
+            .find(|t| t.name.starts_with("Throttle"))
+            .unwrap();
+        let setting = crate::sim::settings().remove(0);
+        let off = setting.values["off"].clone();
+        let oil = crate::sim::services()
+            .into_iter()
+            .find(|s| s.name.starts_with("Oil"))
+            .unwrap();
+        let log = std::env::temp_dir().join(format!("icarus-unmeasured-{}", std::process::id()));
+        for answer in ["?", "7E8 03 7F 22 78"] {
+            let connect = || {
+                let mut e = Elm::connect(Box::new(Unmeasured {
+                    car: SimCar::engine_off(),
+                    answer,
+                    atrv: 0,
+                    said: Default::default(),
+                }))
+                .unwrap();
+                assert_eq!(e.voltage, Some(12.6), "measured when it connected");
+                e.take_sent();
+                e
+            };
+            let mut e = connect();
+            assert_eq!(Link::voltage(&mut e), None, "{answer:?}: not measured now");
+            let refused = |e: &mut Elm, r: Result<(), String>, what: &str| {
+                let why = r.unwrap_err();
+                assert!(
+                    why.contains("cannot measure the battery") && why.contains(what),
+                    "{answer:?}: {why}"
+                );
+                let sent = e.take_sent();
+                assert!(
+                    !sent.iter().any(|(_, _, d)| crate::lock::changes_vehicle(d)),
+                    "{answer:?}: {sent:02X?}"
+                );
+            };
+            let r = start(&mut e, &throttle, 30.0).map(|_| ());
+            refused(&mut e, r, "an actuator test");
+            let mut e = connect();
+            let r = crate::clear::clear_obd(&mut e).map(|_| ());
+            refused(&mut e, r, "clearing codes");
+            let mut e = connect();
+            let r = crate::settings::change(&mut e, &setting, &off, &log).map(|_| ());
+            refused(&mut e, r, "changing a setting");
+            assert!(!log.exists(), "nothing was logged as changed");
+            let mut e = connect();
+            let r = crate::service::run(&mut e, &oil, true).map(|_| ());
+            refused(&mut e, r, "a service routine");
+        }
     }
 
     #[test]

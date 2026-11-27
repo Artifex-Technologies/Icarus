@@ -68,8 +68,19 @@ A module is bricked when a write stops halfway or puts the wrong thing in. Icaru
 4. **Steady power.** A battery charger or maintainer on (the battery above 12.5 V and holding steady, sampled during the
    write too); the computer kept awake (done: power_guard blocks sleep, lid switch and power keys). The computer's own
    battery working and charged (above 50 %), not mains only: a laptop with a dead battery switches off the moment its
-   cable is pulled or the supply dips, halfway through the write.
-5. **A wired cable.** Never over Bluetooth or Wi-Fi: a dropped wireless link mid-write is a classic brick.
+   cable is pulled or the supply dips, halfway through the write. A battery that cannot be measured counts as too low
+   (done for actuator tests, clearing codes, settings and service routines: a SocketCAN interface or the Mongoose
+   measures nothing, so they are refused through either). The reading is taken at the moment of the write: an adapter
+   that read 12.6 V when it connected and gives no number now is refused, not judged by the old reading.
+5. **A wired cable.** Never over Bluetooth or Wi-Fi: a dropped wireless link mid-write is a classic brick. Icarus tells a
+   cable by where Linux puts the device, not by what it is called (done: `port::Target::wired`): a serial port or CAN
+   interface counts only when sysfs puts it on a USB bus, and anything it cannot tell is not wired. So a symlink to an
+   `rfcomm` port, a pty standing in for a Wi-Fi adapter, a built-in serial port, an slcan interface over Bluetooth and a
+   vcan interface (cannelloni or `cangw` can carry its frames anywhere) do not count. A connected `rfcomm` port is moved
+   by the kernel under the Bluetooth controller, which on most computers is on USB itself, so nothing under a Bluetooth
+   controller counts (and an `rfcomm` name is refused as well); nor does a cable attached over USB/IP (`vhci_hcd`), whose
+   bytes go over the network. A connection kept open, as in the window, is judged by the port it opened (its device
+   number), so a udev symlink moved to another adapter after connecting does not change the answer.
 6. **Calibration only, when the family allows it.** Write the calibration area and leave the boot loader alone, so the
    module can always be reached and written again.
 7. **Read back and compare** after writing; on any doubt, write the backup back.
@@ -80,7 +91,8 @@ A module is bricked when a write stops halfway or puts the wrong thing in. Icaru
     while any vehicle is switched, one whose VIN cannot be read is refused too (done: clearing, actuator tests, settings).
     Under them, `Elm::request` and `request_to` refuse any request `lock::changes_vehicle` names (everything but reads,
     tester present and hand-backs) to a switched vehicle, so a write path that forgets the check still cannot reach it.
-    Any other link to a vehicle (a J2534 device, SocketCAN diagnostics) must do the same before it sends.
+    Any other link to a vehicle (a J2534 device, SocketCAN diagnostics) must do the same before it sends (done), and no
+    link hands out what is under it (its socket, device or adapter commands) to send on past that check.
 
 ## Writing a module (flash): the conditions
 

@@ -4,12 +4,19 @@
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub trait Port {
     fn send(&mut self, data: &[u8]) -> io::Result<()>;
     /// Bytes that arrived, waiting up to `timeout`; 0 when nothing came in time.
     fn recv(&mut self, buf: &mut [u8], timeout: Duration) -> io::Result<usize>;
+    /// Whether this port, as it was opened, is a cable all the way (what `Target::wired` asks of a path, asked of the open
+    /// port itself, so where a path leads later does not change it). Not unless the port can tell: a socket, a pipe or a
+    /// stand-in is not.
+    fn wired(&self) -> bool {
+        false
+    }
 }
 
 /// Where to reach the adapter, as written on the command line:
@@ -74,16 +81,142 @@ fn can_name(s: &str) -> bool {
     digits.is_some_and(|d| !d.is_empty() && d.len() <= 3 && d.chars().all(|c| c.is_ascii_digit()))
 }
 
+/// What the wired check (`Target::wired_on`) reads of the computer: this one (`ThisComputer`), or one a test makes up.
+pub trait Computer {
+    /// Its sysfs tree: `/sys`.
+    fn sys(&self) -> PathBuf;
+    /// Where a device path leads with every symlink followed; None when it leads nowhere.
+    fn resolve(&self, path: &Path) -> Option<PathBuf>;
+}
+
+/// This computer: `/sys` and its own symlinks.
+pub struct ThisComputer;
+
+impl Computer for ThisComputer {
+    fn sys(&self) -> PathBuf {
+        PathBuf::from("/sys")
+    }
+    fn resolve(&self, path: &Path) -> Option<PathBuf> {
+        std::fs::canonicalize(path).ok()
+    }
+}
+
+/// Whether the sysfs link `link` (under `sys`), followed, leads to a device on a USB cable: through a bus's root hub and a
+/// device on that bus (`devices/pci0000:00/0000:00:14.0/usb1/1-2/1-2:1.0`). Never a device under a Bluetooth controller
+/// (`.../bluetooth/hci0/hci0:256`): the kernel moves an `rfcomm` port there while it is connected, and the controller is
+/// often on USB itself. Never one on USB/IP's virtual host controller (`devices/platform/vhci_hcd.0/usb3/3-1/...`): a
+/// cable plugged into another computer, its bytes carried over the network (Wi-Fi). A virtual device (an slcan or vcan
+/// interface, an `rfcomm` port not connected) has no device link at all, and anything that does not resolve is not on
+/// USB.
+fn on_usb(sys: &Path, link: &Path) -> bool {
+    let (Ok(root), Ok(dev)) = (
+        std::fs::canonicalize(sys),
+        std::fs::canonicalize(sys.join(link)),
+    ) else {
+        return false;
+    };
+    let Ok(rest) = dev.strip_prefix(&root) else {
+        return false;
+    };
+    let parts: Vec<String> = rest
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    parts.first().is_some_and(|p| p == "devices")
+        && !parts
+            .iter()
+            .any(|p| p == "bluetooth" || p.starts_with("vhci_hcd"))
+        && parts.windows(2).any(|w| {
+            w[0].strip_prefix("usb").is_some_and(|n| {
+                !n.is_empty()
+                    && n.bytes().all(|b| b.is_ascii_digit())
+                    && w[1].starts_with(&format!("{n}-"))
+            })
+        })
+}
+
+/// Whether the tty `name` (`ttyUSB0`) is on a USB cable: its device in sysfs (`class/tty/NAME/device`) is on a USB bus
+/// (`on_usb`). A Bluetooth `rfcomm` port is refused by its name as well as by where it sits.
+fn tty_on_usb(sys: &Path, name: &str) -> bool {
+    !name.starts_with("rfcomm") && on_usb(sys, &Path::new("class/tty").join(name).join("device"))
+}
+
+/// Whether `path` is a serial port on a USB cable: its symlinks followed, a tty in /dev (`/dev/ttyUSB0`, `/dev/ttyACM0`)
+/// that `tty_on_usb` puts on USB. A pty (in /dev/pts) is not one.
+fn usb_tty(pc: &dyn Computer, path: &str) -> bool {
+    let Some(real) = pc.resolve(Path::new(path)) else {
+        return false;
+    };
+    let Some(name) = real.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    real.parent() == Some(Path::new("/dev")) && tty_on_usb(&pc.sys(), name)
+}
+
+/// Whether the character device numbered `major:minor` is a tty on a USB cable: sysfs's `dev/char/MAJ:MIN` leads to its
+/// folder, which must be a tty's own (`class/tty/NAME`), and `tty_on_usb` must put that tty on USB. A raw USB device
+/// node, or anything else that is not a tty, is not one.
+fn usb_char(sys: &Path, major: u32, minor: u32) -> bool {
+    let Ok(dir) = std::fs::canonicalize(sys.join(format!("dev/char/{major}:{minor}"))) else {
+        return false;
+    };
+    let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    std::fs::canonicalize(sys.join("class/tty").join(name)).is_ok_and(|t| t == dir)
+        && tty_on_usb(sys, name)
+}
+
+/// The link type of every CAN interface (the kernel's ARPHRD_CAN, in `class/net/NAME/type`).
+const ARPHRD_CAN: &str = "280";
+
+/// Whether the network interface `ifn` is a CAN adapter on a USB cable (a CANable on gs_usb: its device in sysfs,
+/// `class/net/NAME/device`, is on a USB bus). An slcan or vcan interface has no device in sysfs, whatever it is named: a
+/// vcan reaches no vehicle by itself, but cannelloni, socketcand or the kernel's CAN gateway (`cangw`) can carry its
+/// frames to one over anything, so it is not counted as a cable.
+fn usb_can(pc: &dyn Computer, ifn: &str) -> bool {
+    if ifn.is_empty() || ifn.contains('/') || ifn == "." || ifn == ".." {
+        return false;
+    }
+    let dir = Path::new("class/net").join(ifn);
+    std::fs::read_to_string(pc.sys().join(&dir).join("type")).is_ok_and(|t| t.trim() == ARPHRD_CAN)
+        && on_usb(&pc.sys(), &dir.join("device"))
+}
+
 impl Target {
     /// A cable all the way: what anything that writes a module's memory needs (a dropped wireless link mid-write can leave
-    /// the module half-written). A serial port named `rfcomm` is Bluetooth; the simulation and a CAN interface (a USB CAN
-    /// adapter) count as wired.
+    /// the module half-written). Judged by where Linux puts the device in sysfs, not by what it is called, and whatever
+    /// cannot be told counts as not wired:
+    /// - a serial port (an ELM327 cable, SLCAN, the OpenPort, the Mongoose), its symlinks followed, must be a tty in /dev
+    ///   whose device sysfs puts on a USB bus (`on_usb`): not under a Bluetooth controller, where a connected `rfcomm`
+    ///   port sits (an `rfcomm` name is refused as well), and not on USB/IP's virtual host controller; a pty (socat's
+    ///   stand-in for a Wi-Fi adapter), a built-in serial port and a symlink to any of them are not;
+    /// - a CAN interface must be a CAN adapter sysfs puts on a USB bus (gs_usb): an slcan interface over Bluetooth is not,
+    ///   even named `can0`, and neither is a vcan interface, whose frames a bridge can carry anywhere;
+    /// - the OpenPort found by its USB IDs (`openport`) is judged by the serial port it was found with;
+    /// - Bluetooth and TCP never; the simulation always.
+    ///
+    /// A path is judged by where it leads now. A connection kept open is judged by its own port instead (`Port::wired`,
+    /// `Elm::wired`), so a symlink moved after connecting does not change the answer.
     pub fn wired(&self) -> bool {
+        self.wired_on(&ThisComputer)
+    }
+
+    /// `wired`, reading `pc` (a computer a test makes up) instead of this one.
+    pub fn wired_on(&self, pc: &dyn Computer) -> bool {
         match self {
-            Target::Sim { .. } | Target::Can(_) => true,
-            // a USB cable, or the simulation
-            Target::J2534(_) => true,
-            Target::Serial { path, .. } | Target::Slcan { path, .. } => !path.contains("rfcomm"),
+            Target::Sim { .. } | Target::J2534(J2534Device::Sim) => true,
+            Target::Serial { path, .. }
+            | Target::Slcan { path, .. }
+            | Target::J2534(J2534Device::OpenPort(Some(path)) | J2534Device::Mongoose(path)) => {
+                usb_tty(pc, path)
+            }
+            // the cable `passthru::open_link` would find
+            Target::J2534(J2534Device::OpenPort(None)) => {
+                crate::openport::find(&pc.sys().join("bus/usb/devices"))
+                    .is_ok_and(|p| usb_tty(pc, &p))
+            }
+            Target::Can(ifn) => usb_can(pc, ifn),
             Target::Bluetooth { .. } | Target::Tcp(_) => false,
         }
     }
@@ -248,6 +381,20 @@ impl Target {
 /// A file descriptor (serial line or Bluetooth socket), read with poll so a silent adapter never hangs Icarus.
 pub struct FdPort(OwnedFd);
 
+impl FdPort {
+    /// Whether this open port is a serial port on a USB cable, judged by the open file itself: its device number
+    /// (`st_rdev`) leads to its folder in sysfs (`usb_char`), so a symlink moved since it was opened cannot change the
+    /// answer. A Bluetooth socket, a pipe or anything else that is not a character device is not.
+    pub fn wired_on(&self, pc: &dyn Computer) -> bool {
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(self.0.as_raw_fd(), &mut st) } != 0 {
+            return false;
+        }
+        st.st_mode & libc::S_IFMT == libc::S_IFCHR
+            && usb_char(&pc.sys(), libc::major(st.st_rdev), libc::minor(st.st_rdev))
+    }
+}
+
 impl Port for FdPort {
     fn send(&mut self, mut data: &[u8]) -> io::Result<()> {
         while !data.is_empty() {
@@ -301,6 +448,10 @@ impl Port for FdPort {
             };
         }
         Ok(n as usize)
+    }
+
+    fn wired(&self) -> bool {
+        self.wired_on(&ThisComputer)
     }
 }
 
@@ -463,12 +614,243 @@ mod tests {
 
     use super::*;
 
+    /// A made-up computer in a scratch folder: its `/dev` and `/sys` under `root`, laid out as Linux lays them out.
+    struct Made {
+        root: PathBuf,
+    }
+
+    impl Computer for Made {
+        fn sys(&self) -> PathBuf {
+            self.root.join("sys")
+        }
+        fn resolve(&self, path: &Path) -> Option<PathBuf> {
+            let root = std::fs::canonicalize(&self.root).ok()?;
+            let real = std::fs::canonicalize(self.root.join(path.strip_prefix("/").ok()?)).ok()?;
+            Some(Path::new("/").join(real.strip_prefix(root).ok()?))
+        }
+    }
+
+    impl Made {
+        /// A new one, in a folder of its own: tests run side by side, and each makes its own computer.
+        fn new(name: &str) -> Made {
+            static MADE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let n = MADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let root = std::env::temp_dir()
+                .join(format!("icarus-wired-{name}-{}-{n}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).unwrap();
+            Made { root }
+        }
+        /// A file (its folders made first).
+        fn file(&self, at: &str, text: &str) {
+            let p = self.root.join(at);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, text).unwrap();
+        }
+        fn dir(&self, at: &str) {
+            std::fs::create_dir_all(self.root.join(at)).unwrap();
+        }
+        /// A symlink at `at` to `to`, written relative as udev and sysfs write theirs.
+        fn link(&self, at: &str, to: &str) {
+            let p = self.root.join(at);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(to, p).unwrap();
+        }
+        /// The `device` link in sysfs folder `at` to `device`, a folder above it, written as the kernel writes it
+        /// (`../../../1-2:1.0`).
+        fn device_link(&self, at: &str, device: &str) {
+            let up = at.matches('/').count() - device.matches('/').count() + 1;
+            let last = &device[device.rfind('/').unwrap() + 1..];
+            self.link(
+                &format!("sys/{at}/device"),
+                &format!("{}{last}", "../".repeat(up)),
+            );
+        }
+        /// A tty in /dev, its sysfs folder at `class_at` (under sys), whose device is `device` (a folder above it), or a
+        /// virtual one (no device link).
+        fn tty(&self, name: &str, device: Option<&str>, class_at: &str) {
+            self.file(&format!("dev/{name}"), "");
+            self.dir(&format!("sys/{class_at}"));
+            self.link(
+                &format!("sys/class/tty/{name}"),
+                &format!("../../{class_at}"),
+            );
+            if let Some(d) = device {
+                self.device_link(class_at, d);
+            }
+        }
+        /// The character device `major:minor` in sysfs (`dev/char/MAJ:MIN`), leading to its folder at `class_at`.
+        fn char_dev(&self, major: u32, minor: u32, class_at: &str) {
+            self.link(
+                &format!("sys/dev/char/{major}:{minor}"),
+                &format!("../../{class_at}"),
+            );
+        }
+        /// A network interface of the kernel's CAN type, its sysfs folder at `class_at`, whose device is `device` (a
+        /// folder above it), or a virtual one.
+        fn can(&self, name: &str, device: Option<&str>, class_at: &str) {
+            self.file(&format!("sys/{class_at}/type"), "280\n");
+            self.link(
+                &format!("sys/class/net/{name}"),
+                &format!("../../{class_at}"),
+            );
+            if let Some(d) = device {
+                self.device_link(class_at, d);
+            }
+        }
+    }
+
+    impl Drop for Made {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    const HUB: &str = "devices/pci0000:00/0000:00:14.0/usb1";
+
+    /// A laptop like mine, made up: an OBDLink EX on USB (ftdi_sio, ttyUSB0), an OpenPort on USB (cdc_acm, ttyACM0, found
+    /// by its IDs too), an OBDLink MX+ over Bluetooth (rfcomm0, connected, so the kernel has moved it under the Bluetooth
+    /// controller, which is on USB; with a udev symlink to it), an FTDI cable plugged into another computer and attached
+    /// here over USB/IP (ttyUSB1), a socat pty standing in for a Wi-Fi adapter, the built-in serial port, a CANable (gs_usb
+    /// can0) and a vcan. Each tty also by its device number (`dev/char`), as an open port is judged.
+    fn laptop() -> Made {
+        let m = Made::new("laptop");
+        let ftdi = format!("{HUB}/1-1/1-1:1.0/ttyUSB0");
+        m.tty("ttyUSB0", Some(&ftdi), &format!("{ftdi}/tty/ttyUSB0"));
+        m.char_dev(188, 0, &format!("{ftdi}/tty/ttyUSB0"));
+        m.link(
+            "dev/serial/by-id/usb-FTDI_FT231X_USB_UART-if00-port0",
+            "../../ttyUSB0",
+        );
+        let acm = format!("{HUB}/1-2/1-2:1.0");
+        m.tty("ttyACM0", Some(&acm), &format!("{acm}/tty/ttyACM0"));
+        m.char_dev(166, 0, &format!("{acm}/tty/ttyACM0"));
+        m.file(&format!("sys/{HUB}/1-2/idVendor"), "0403\n");
+        m.file(&format!("sys/{HUB}/1-2/idProduct"), "cc4d\n");
+        m.link("sys/bus/usb/devices/1-2", &format!("../../../{HUB}/1-2"));
+        m.link("sys/bus/usb/devices/1-2:1.0", &format!("../../../{acm}"));
+        // rfcomm_reparent_device: a connected rfcomm port's device is the Bluetooth connection (hci0:256)
+        let hci = format!("{HUB}/1-4/1-4:1.0/bluetooth/hci0/hci0:256");
+        m.tty("rfcomm0", Some(&hci), &format!("{hci}/rfcomm0"));
+        m.char_dev(216, 0, &format!("{hci}/rfcomm0"));
+        m.link("dev/obdlink", "rfcomm0");
+        let usbip = "devices/platform/vhci_hcd.0/usb3/3-1/3-1:1.0/ttyUSB1";
+        m.tty("ttyUSB1", Some(usbip), &format!("{usbip}/tty/ttyUSB1"));
+        m.char_dev(188, 1, &format!("{usbip}/tty/ttyUSB1"));
+        m.file("dev/pts/3", "");
+        m.link("tmp/ttyV0", "../dev/pts/3");
+        m.tty(
+            "ttyS0",
+            Some("devices/platform/serial8250"),
+            "devices/platform/serial8250/tty/ttyS0",
+        );
+        m.char_dev(4, 64, "devices/platform/serial8250/tty/ttyS0");
+        // the raw USB device node of the EX (/dev/bus/usb/001/002): on USB, but not a tty
+        m.char_dev(189, 1, &format!("{HUB}/1-1"));
+        let canable = format!("{HUB}/1-3/1-3:1.0");
+        m.can("can0", Some(&canable), &format!("{canable}/net/can0"));
+        m.can("vcan0", None, "devices/virtual/net/vcan0");
+        m
+    }
+
+    /// What is wired is told by sysfs, not by a name, and anything that cannot be told is not wired. Read from a made-up
+    /// computer, so the test passes on any machine.
     #[test]
     fn only_a_cable_is_wired() {
-        let w = |s: &str| Target::parse(s).unwrap().wired();
-        assert!(w("sim") && w("/dev/ttyUSB0") && w("/dev/ttyACM0@115200"));
-        assert!(!w("/dev/rfcomm0") && !w("bt:AA:BB:CC:DD:EE:FF") && !w("tcp:192.168.0.10:35000"));
-        assert!(w("openport") && w("openport:/dev/ttyACM0") && w("sim:j2534"));
+        let pc = laptop();
+        let w = |s: &str| Target::parse(s).unwrap().wired_on(&pc);
+        // cables on USB, by name or by udev's symlink
+        assert!(w("/dev/ttyUSB0") && w("/dev/ttyUSB0@115200") && w("/dev/ttyACM0@115200"));
+        assert!(w("/dev/serial/by-id/usb-FTDI_FT231X_USB_UART-if00-port0"));
+        assert!(w("slcan:/dev/ttyACM0") && w("can0"));
+        assert!(w("openport") && w("openport:/dev/ttyACM0") && w("mongoose:/dev/ttyACM0"));
+        // the simulation reaches no vehicle
+        assert!(w("sim") && w("sim:off") && w("sim:j2534"));
+        // Bluetooth and Wi-Fi, under any name
+        assert!(
+            !w("/dev/rfcomm0") && !w("/dev/obdlink"),
+            "a symlink to rfcomm0"
+        );
+        assert!(!w("/tmp/ttyV0") && !w("/dev/pts/3"), "a pty");
+        assert!(!w("bt:AA:BB:CC:DD:EE:FF") && !w("tcp:192.168.0.10:35000"));
+        assert!(!w("mongoose:/dev/obdlink") && !w("openport:/dev/rfcomm0"));
+        assert!(
+            !w("/dev/ttyUSB1"),
+            "a cable on another computer, attached over USB/IP"
+        );
+        // a vcan: a bridge (cannelloni, cangw) can carry its frames anywhere
+        assert!(!w("vcan0") && !w("can:vcan0"));
+        // what cannot be told: not there, not a CAN interface, not on USB
+        assert!(!w("/dev/ttyUSB9") && !w("/dev/nonsense") && !w("can7") && !w("can:.."));
+        assert!(
+            !w("/dev/ttyS0"),
+            "a built-in serial port is not known to be a cable"
+        );
+    }
+
+    /// A connected rfcomm port sits under the Bluetooth controller, which is on USB: where it sits refuses it, not only
+    /// its name.
+    #[test]
+    fn a_connected_bluetooth_port_is_not_on_usb_whatever_its_name() {
+        let pc = laptop();
+        let sys = pc.sys();
+        assert!(on_usb(&sys, Path::new("class/tty/ttyUSB0/device")));
+        assert!(!on_usb(&sys, Path::new("class/tty/rfcomm0/device")));
+        assert!(
+            !on_usb(&sys, Path::new("class/tty/ttyUSB1/device")),
+            "USB/IP"
+        );
+        // the same ports by their device numbers, as an open port is judged
+        assert!(usb_char(&sys, 188, 0) && usb_char(&sys, 166, 0));
+        assert!(!usb_char(&sys, 216, 0), "rfcomm0");
+        assert!(!usb_char(&sys, 188, 1), "USB/IP");
+        assert!(!usb_char(&sys, 4, 64), "the built-in serial port");
+        assert!(
+            !usb_char(&sys, 189, 1),
+            "a raw USB device node is not a tty"
+        );
+        assert!(!usb_char(&sys, 188, 9), "not there");
+    }
+
+    /// An open port is judged by the open file: whatever a path leads to later, a pipe (here standing in for anything that
+    /// is not a character device: a Bluetooth socket, a pty's other end) is never wired.
+    #[test]
+    fn an_open_port_that_is_not_a_character_device_is_not_wired() {
+        let pc = laptop();
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let port = FdPort(unsafe { OwnedFd::from_raw_fd(fds[0]) });
+        assert!(!port.wired_on(&pc));
+        unsafe { libc::close(fds[1]) };
+        assert!(!Silent.wired(), "a port that cannot tell is not wired");
+    }
+
+    /// A port that does not say whether it is a cable (`Port::wired`'s default).
+    struct Silent;
+
+    impl Port for Silent {
+        fn send(&mut self, _: &[u8]) -> io::Result<()> {
+            Ok(())
+        }
+        fn recv(&mut self, _: &mut [u8], _: Duration) -> io::Result<usize> {
+            Ok(0)
+        }
+    }
+
+    /// An slcan interface (here over Bluetooth, through rfcomm0) has no device in sysfs, so it is not wired even
+    /// named can0, or vcan0; and with no OpenPort plugged in, `openport` is not wired.
+    #[test]
+    fn a_can_interface_over_bluetooth_is_not_wired_whatever_its_name() {
+        let pc = Made::new("slcan");
+        let hci = format!("{HUB}/1-4/1-4:1.0/bluetooth/hci0/hci0:256");
+        pc.tty("rfcomm0", Some(&hci), &format!("{hci}/rfcomm0"));
+        pc.can("can0", None, "devices/virtual/net/can0");
+        pc.can("vcan0", None, "devices/virtual/net/vcan0");
+        let w = |s: &str| Target::parse(s).unwrap().wired_on(&pc);
+        assert!(!w("can0") && !w("can:can0") && !w("vcan0"));
+        assert!(!w("slcan:/dev/rfcomm0"));
+        assert!(!w("openport"));
+        assert!(w("sim"));
     }
 
     #[test]
@@ -546,7 +928,6 @@ mod tests {
         ] {
             assert_eq!(Target::parse(s).unwrap(), Target::Can(ifn.into()), "{s}");
         }
-        assert!(Target::parse("can0").unwrap().wired());
         assert!(
             Target::parse("can0").unwrap().open().is_err(),
             "not an ELM327"

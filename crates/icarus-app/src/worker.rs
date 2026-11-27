@@ -62,6 +62,8 @@ pub enum Cmd {
 
 pub struct Info {
     pub adapter: String,
+    /// The connection's port is a cable all the way (`Elm::wired`, judged by the open port): changing a setting needs one.
+    pub wired: bool,
     pub voltage: Option<f64>,
     pub protocol: String,
     pub vin: Option<String>,
@@ -210,7 +212,8 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
         repaint();
     };
     let mut elm: Option<Elm> = None;
-    // the connection's adapter (changing a setting needs a wired one) and its vehicle's VIN (where its logs go)
+    // the connection's adapter (named in messages) and its vehicle's VIN (where its logs go); whether it is wired is asked
+    // of the open port itself (`Elm::wired`), never of what the adapter's path leads to now
     let mut spec = String::new();
     let mut vin: Option<String> = None;
     let mut live: Vec<u8> = Vec::new();
@@ -450,7 +453,7 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
             Some(Cmd::Service(def)) => {
                 let Some(e) = elm.as_mut() else { continue };
                 live.clear();
-                let wired = Target::parse(&spec).map(|t| t.wired()).unwrap_or(false);
+                let wired = e.wired();
                 send(Event::Status(format!("Running {}...", def.name)));
                 send(Event::ServiceDone(
                     icarus_obd::service::run(e, &def, wired).map(|status| {
@@ -465,9 +468,9 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
             Some(Cmd::SettingChange { def, value }) => {
                 let Some(e) = elm.as_mut() else { continue };
                 live.clear();
-                let wired = Target::parse(&spec).map(|t| t.wired()).unwrap_or(false);
-                let result = if !wired {
-                    Err("changing a setting writes the module's memory: connect through a wired adapter (USB), not Bluetooth or Wi-Fi".to_string())
+                // the port opened at connect, judged by its own device: a symlink moved since cannot make it wired
+                let result = if !e.wired() {
+                    Err("changing a setting writes the module's memory: connect through a wired adapter (a USB cable); this connection is not one Linux puts on USB (Bluetooth, Wi-Fi and built-in serial ports are not)".to_string())
                 } else {
                     settings::log_for(vin.as_deref()).and_then(|log| match &value {
                         Some(v) => settings::change(e, &def, v, &log),
@@ -772,6 +775,7 @@ fn gather(elm: &mut Elm, profiles: &[Profile]) -> Result<Info, String> {
                 .map(|s| format!(" ({s})"))
                 .unwrap_or_default()
         ),
+        wired: elm.wired(),
         voltage: elm.voltage,
         protocol: elm.protocol.describe().to_string(),
         vin,

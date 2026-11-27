@@ -8,12 +8,13 @@
 //!   access, routines, programming and anything else are refused (`check`).
 //! - Airbag (SRS) and occupant-detection modules, immobiliser and key settings and odometer values are never changed, whatever
 //!   a definition says.
-//! - Conditions are checked first (by default: engine off, vehicle not moving) and the battery must be at 12 V or more.
+//! - Conditions are checked first (by default: engine off, vehicle not moving) and the battery must be measured at 12 V or
+//!   more: an adapter that cannot measure it is refused.
 //! - The value there before is read and written to the vehicle's change log *before* anything is written; after the write the
 //!   value is read back, and if it is not what was written, the old one is written back. `undo` restores the last change.
 //! - Every change goes to `~/.local/state/icarus/actions.log` (see `audit`).
 
-use crate::actuator::{conditions_hold, Condition, Protocol};
+use crate::actuator::{battery_holds, conditions_hold, Condition, Protocol};
 use crate::elm::Answer;
 use crate::link::Link;
 use serde::Deserialize;
@@ -296,18 +297,13 @@ pub fn last_change(log: &Path, s: &SettingDef) -> Option<Change> {
     })
 }
 
-/// Whether the setting can be changed now: the battery at 12 V or more and the setting's conditions (checked again by
-/// `change`).
+/// Whether the setting can be changed now: the battery measured at 12 V or more (an adapter that cannot measure it is
+/// refused) and the setting's conditions (checked again by `change`).
 pub fn ready(link: &mut dyn Link, s: &SettingDef) -> Result<(), String> {
     if let Some(why) = s.refused() {
         return Err(why);
     }
-    match link.voltage() {
-        Some(v) if v < MIN_VOLTS => {
-            return Err(format!("the battery is at {v:.1} V; changing a setting needs at least {MIN_VOLTS} V (connect a charger)"))
-        }
-        _ => {}
-    }
+    battery_holds(link, MIN_VOLTS, "changing a setting")?;
     conditions_hold(link, &s.conditions)
 }
 
@@ -532,6 +528,40 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(read(&mut link, &s).unwrap().1.as_deref(), Some("off"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A link that cannot measure the battery (a SocketCAN interface) is refused before anything is sent, and a
+    /// low reading is refused too; with the battery measured above 12 V the same change goes as before.
+    #[test]
+    fn a_setting_is_changed_only_with_the_battery_measured() {
+        use crate::canlink::{CanLink, SimBus};
+        crate::lock::switch_for_test(&[]);
+        let s = chime();
+        let dir = scratch("battery");
+        let log = log_path(&dir);
+        let on_bus = |volts: Option<f64>| {
+            let mut bus = SimBus::new(SimCar::engine_off());
+            bus.voltage = volts;
+            CanLink::connect(bus, "vcan0").unwrap()
+        };
+        let mut l = on_bus(None);
+        let sent = l.frames().sent.len();
+        let e = change(&mut l, &s, &s.values["off"], &log).unwrap_err();
+        assert!(
+            e.contains("cannot measure the battery") && e.contains("changing a setting"),
+            "{e}"
+        );
+        assert_eq!(l.frames().sent.len(), sent, "nothing was sent");
+        assert!(!log.exists(), "nothing was logged as changed");
+        let mut l = on_bus(Some(11.2));
+        let e = change(&mut l, &s, &s.values["off"], &log).unwrap_err();
+        assert!(e.contains("11.2 V") && e.contains("at least 12 V"), "{e}");
+        assert!(!log.exists());
+        let mut l = on_bus(Some(12.6));
+        let c = change(&mut l, &s, &s.values["off"], &log).unwrap().unwrap();
+        assert_eq!((c.before, c.after), (vec![0x01], vec![0x00]));
+        assert_eq!(read(&mut l, &s).unwrap().1.as_deref(), Some("off"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -240,6 +240,57 @@ mod tests {
         ));
     }
 
+    /// A raw write (2E write data, 31 routine control, 34 request download) to a switched vehicle, through every
+    /// public way onto the bus each kind of link has (`request` and `request_to`, the link boxed as the command line holds
+    /// it), is refused before it reaches the bus. None of them hands out what is under it to send on: what each one sent
+    /// is looked at through its read-only accessor.
+    #[test]
+    fn a_raw_write_never_reaches_a_switched_vehicle_through_any_link() {
+        use crate::canlink::{CanLink, SimBus};
+        use crate::elm::ObdError;
+        use crate::passthru::{PassThruLink, SimPassThru};
+        switched(&[crate::sim::VIN]);
+        let writes: [&[u8]; 3] = [
+            &[0x2E, 0xA0, 0x01, 0x00],
+            &[0x31, 0x01, 0xFF, 0x00],
+            &[0x34, 0x00, 0x44, 0x00, 0x01, 0x00, 0x00],
+        ];
+        let is_write = |d: &[u8]| matches!(d.first(), Some(0x2E | 0x31 | 0x34));
+        let refuses = |l: &mut dyn Link| {
+            for w in writes {
+                let to_all = l.request(w).unwrap_err();
+                let to_one = l.request_to(0x7E0, 0x7E8, w).unwrap_err();
+                for e in [to_all, to_one] {
+                    assert!(matches!(e, ObdError::ReadOnly(_)), "{w:02X?}: {e}");
+                }
+            }
+        };
+        let mut elm = Elm::connect(Box::new(SimCar::engine_off())).unwrap();
+        refuses(&mut elm);
+        let sent = elm.take_sent();
+        assert!(!sent.iter().any(|(_, _, d)| is_write(d)), "{sent:02X?}");
+        let mut can = CanLink::connect(SimBus::new(SimCar::engine_off()), "vcan0").unwrap();
+        refuses(&mut can);
+        // single frames: the length, then the request
+        let frames = &can.frames().sent;
+        assert!(!frames.iter().any(|f| is_write(&f.data[1..])), "{frames:?}");
+        let mut j2534 = PassThruLink::connect(SimPassThru::new(SimCar::engine_off())).unwrap();
+        refuses(&mut j2534);
+        let msgs = &j2534.device().sent;
+        assert!(!msgs.iter().any(|m| is_write(&m.data)), "{msgs:?}");
+        let mut boxed: Box<dyn Link> =
+            Box::new(CanLink::connect(SimBus::new(SimCar::engine_off()), "vcan0").unwrap());
+        refuses(&mut boxed);
+        // the switch off: the same write reaches the vehicle, and is seen through the accessor
+        switched(&[]);
+        let _ = can.request_to(0x7C0, 0x7C8, &[0x2E, 0xA0, 0x01, 0x00]);
+        assert!(can
+            .frames()
+            .sent
+            .iter()
+            .any(|f| f.id == 0x7C0 && is_write(&f.data[1..])));
+    }
+
     /// A vehicle switched to read-only, ignition on and engine off, which every write path would otherwise accept: each
     /// one refuses before it sends anything that changes the vehicle.
     #[test]

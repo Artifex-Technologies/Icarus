@@ -2861,7 +2861,8 @@ impl App {
             return;
         };
         let defs = info.settings.clone();
-        let wired = icarus_obd::port::Target::parse(self.adapter.trim()).is_ok_and(|t| t.wired());
+        // the connected port, as it was opened (not the adapter field, which may have been edited since)
+        let wired = info.wired;
         if !defs.is_empty() && !self.settings_asked {
             self.settings_asked = true;
             let _ = self.tx.send(Cmd::SettingsRead);
@@ -2871,7 +2872,7 @@ impl App {
             ui.label("A change writes the module's memory, so Icarus asks first, needs the conditions (by default engine off, parked) and a wired adapter, keeps the value there before in the vehicle's Logs folder, reads the new one back, and puts the old one back if the module did not take it. Never airbags, immobiliser, keys or odometer.");
         });
         if !wired {
-            ui.colored_label(pal.amber, "This adapter is wireless: settings can be read, but changing one needs a wired adapter (USB).");
+            ui.colored_label(pal.amber, "This adapter is not a USB cable (Bluetooth, Wi-Fi, or a port Linux does not put on USB): settings can be read, but changing one needs a wired adapter (USB).");
         }
         if defs.is_empty() {
             card(ui, pal, "No settings for this vehicle yet", |ui| {

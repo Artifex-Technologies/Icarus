@@ -1459,6 +1459,11 @@ impl Port for SimCar {
         }
         Ok(n)
     }
+
+    /// The simulation reaches no vehicle, so it counts as wired, as `Target::wired` says of `sim`.
+    fn wired(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

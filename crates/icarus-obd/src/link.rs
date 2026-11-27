@@ -154,13 +154,7 @@ impl Link for Elm {
         Ok(())
     }
     fn voltage(&mut self) -> Option<f64> {
-        self.command("ATRV", std::time::Duration::from_secs(2))
-            .ok()
-            .and_then(|r| {
-                r.first()
-                    .and_then(|v| v.trim().trim_end_matches('V').parse::<f64>().ok())
-            })
-            .or(self.voltage)
+        Elm::measure_voltage(self)
     }
     fn reach(&self) -> Reach {
         Elm::reach(self)

@@ -2,15 +2,19 @@
 //! starts over (the vehicle will not pass an emissions inspection until its drive cycles have run them again). So:
 //!
 //! - the engine must be off (ignition on), as the OBD-II standard expects;
+//! - the battery must be measured at 11.5 V or more, as for actuator tests: an adapter that cannot measure it is refused;
 //! - the caller saves a report first (`report`), so the codes and freeze frame are kept;
 //! - only the clearing requests go out: OBD-II service `04` (every emissions module), UDS `14 FF FF FF` and KWP2000
 //!   `14 FF 00` (one module, all its codes);
 //! - permanent codes are not cleared by any of these: they go when the monitor that set them passes again;
 //! - every clear is written to the action log.
 
-use crate::actuator::{conditions_hold, Condition};
+use crate::actuator::{battery_holds, conditions_hold, Condition};
 use crate::link::Link;
 use crate::uds::Dialect;
+
+/// The battery a clear needs, measured at the port: as for an actuator test (one short request, engine off).
+const MIN_VOLTS: f64 = 11.5;
 
 pub fn check(data: &[u8]) -> Result<(), String> {
     match data {
@@ -29,6 +33,7 @@ run them again. Permanent codes stay until their monitor passes. If the fault is
 /// OBD-II service 04 to every module: returns the modules that confirmed.
 pub fn clear_obd(elm: &mut dyn Link) -> Result<Vec<String>, String> {
     crate::lock::writes_allowed(elm)?;
+    battery_holds(elm, MIN_VOLTS, "clearing codes")?;
     conditions_hold(elm, &[Condition::EngineOff])?;
     let _awake = crate::power_guard::Inhibit::take("Clearing trouble codes").ok();
     check(&[0x04])?;
@@ -78,6 +83,7 @@ pub fn clear_module(elm: &mut dyn Link, tx: u16, rx: u16, dialect: Dialect) -> R
         return Err(why);
     }
     crate::lock::writes_allowed(elm)?;
+    battery_holds(elm, MIN_VOLTS, "clearing codes")?;
     conditions_hold(elm, &[Condition::EngineOff])?;
     let _awake = crate::power_guard::Inhibit::take("Clearing trouble codes").ok();
     let req: &[u8] = match dialect {
@@ -163,6 +169,37 @@ mod tests {
             refused(0x7A0, 0x788, "").unwrap().contains("788"),
             "names the ID that matched"
         );
+    }
+
+    /// A clear over a link that cannot measure the battery (a SocketCAN interface), or with the battery low, is refused
+    /// before anything is sent; measured above 11.5 V the same clears go as before.
+    #[test]
+    fn codes_are_cleared_only_with_the_battery_measured() {
+        use crate::canlink::{CanLink, SimBus};
+        crate::lock::switch_for_test(&[]);
+        let on_bus = |volts: Option<f64>| {
+            let mut bus = SimBus::new(SimCar::engine_off());
+            bus.voltage = volts;
+            CanLink::connect(bus, "vcan0").unwrap()
+        };
+        for (volts, why) in [
+            (None, "cannot measure the battery"),
+            (Some(f64::NAN), "cannot measure the battery"),
+            (Some(11.0), "at least 11.5 V"),
+        ] {
+            let mut l = on_bus(volts);
+            let sent = l.frames().sent.len();
+            for e in [
+                clear_obd(&mut l).unwrap_err(),
+                clear_module(&mut l, 0x7B0, 0x7B8, Dialect::Kwp).unwrap_err(),
+            ] {
+                assert!(e.contains(why) && e.contains("clearing codes"), "{e}");
+            }
+            assert_eq!(l.frames().sent.len(), sent, "nothing was sent");
+        }
+        let mut l = on_bus(Some(12.6));
+        assert!(clear_obd(&mut l).unwrap()[0].starts_with("engine"));
+        clear_module(&mut l, 0x7B0, 0x7B8, Dialect::Kwp).unwrap();
     }
 
     #[test]

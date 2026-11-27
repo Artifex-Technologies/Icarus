@@ -2,12 +2,12 @@
 //! angle), resets (oil life, battery registration), TPMS sensor IDs, injector coding. Each is a `[[service]]` entry in a
 //! vehicle profile, learned by watching another tool on my own vehicle (`bus`) or verified for it; never guessed into a real
 //! vehicle's profile, since an unverified routine ID could start anything. A routine changes the vehicle, so it runs under
-//! the write rules: the Read-Only switch (`lock`), the battery at 12 V or more, its conditions, never an airbag module, a
-//! cable for an entry marked `wired` (coding), every run in the action log. Only this module's requests go out: the
-//! session (10 01 / 10 03), tester present (3E 00), and routine control (31 01 start, 31 02 stop, 31 03 results) of its
-//! own routine with its own parameters (`check`).
+//! the write rules: the Read-Only switch (`lock`), the battery measured at 12 V or more (an adapter that cannot measure it
+//! is refused), its conditions, never an airbag module, a cable for an entry marked `wired` (coding), every run in the
+//! action log. Only this module's requests go out: the session (10 01 / 10 03), tester present (3E 00), and routine
+//! control (31 01 start, 31 02 stop, 31 03 results) of its own routine with its own parameters (`check`).
 
-use crate::actuator::{conditions_hold, is_airbag, not_one_module, Condition};
+use crate::actuator::{battery_holds, conditions_hold, is_airbag, not_one_module, Condition};
 use crate::elm::Answer;
 use crate::link::Link;
 use serde::Deserialize;
@@ -156,13 +156,7 @@ pub fn run(link: &mut dyn Link, s: &ServiceDef, wired: bool) -> Result<String, S
             s.name
         ));
     }
-    if let Some(v) = link.voltage() {
-        if v < MIN_VOLTS {
-            return Err(format!(
-                "the battery is at {v:.1} V; service routines need at least {MIN_VOLTS} V (connect a charger)"
-            ));
-        }
-    }
+    battery_holds(link, MIN_VOLTS, "a service routine")?;
     conditions_hold(link, &s.conditions)?;
     let _awake = crate::power_guard::Inhibit::take(&format!("Service: {}", s.name)).ok();
     if s.extended {
@@ -341,5 +335,39 @@ mod tests {
                 .unwrap();
             assert_eq!(&back, s);
         }
+    }
+
+    /// A routine over a link that cannot measure the battery (a SocketCAN interface) is refused before anything is
+    /// sent; with the battery measured above 12 V it runs as before.
+    #[test]
+    fn a_routine_runs_only_with_the_battery_measured() {
+        use crate::canlink::{CanLink, SimBus};
+        crate::lock::switch_for_test(&[]);
+        let all = crate::sim::services();
+        let reset = all.iter().find(|s| s.name.starts_with("Oil")).unwrap();
+        let on_bus = |volts: Option<f64>| {
+            let mut bus = SimBus::new(SimCar::engine_off());
+            bus.voltage = volts;
+            CanLink::connect(bus, "vcan0").unwrap()
+        };
+        let mut l = on_bus(None);
+        let sent = l.frames().sent.len();
+        let e = run(&mut l, reset, true).unwrap_err();
+        assert!(
+            e.contains("cannot measure the battery") && e.contains("a service routine"),
+            "{e}"
+        );
+        assert_eq!(l.frames().sent.len(), sent, "nothing was sent");
+        let e = run(&mut on_bus(Some(11.9)), reset, true).unwrap_err();
+        assert!(e.contains("11.9 V"), "{e}");
+        let mut l = on_bus(Some(12.6));
+        assert!(run(&mut l, reset, true).is_ok());
+        assert!(
+            l.frames()
+                .sent
+                .iter()
+                .any(|f| f.id == 0x7C0 && f.data[..5] == [0x04, 0x31, 0x01, 0x02, 0x03]),
+            "the routine was started"
+        );
     }
 }

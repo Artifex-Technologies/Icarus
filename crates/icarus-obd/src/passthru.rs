@@ -105,7 +105,6 @@ pub struct PassThruLink<D: PassThru> {
     dev: D,
     channel: u32,
     name: String,
-    voltage: Option<f64>,
     /// (tx, rx) pairs that have a flow-control filter.
     pairs: Vec<(u32, u32)>,
 }
@@ -120,7 +119,8 @@ impl<D: PassThru> PassThruLink<D> {
             dev.flow_control(channel, 0x7E0 + i, 0x7E8 + i)?;
             pairs.push((0x7E0 + i, 0x7E8 + i));
         }
-        let voltage = dev.battery_voltage()?;
+        // the battery asked once here, so a device that cannot answer fails to connect; a write asks again (`voltage`)
+        dev.battery_voltage()?;
         let name = [v.device, v.firmware]
             .into_iter()
             .filter(|s| !s.is_empty())
@@ -130,14 +130,37 @@ impl<D: PassThru> PassThruLink<D> {
             dev,
             channel,
             name,
-            voltage,
             pairs,
         })
     }
 
-    /// The device itself (to close it, or for device-specific things).
-    pub fn device(&mut self) -> &mut D {
-        &mut self.dev
+    /// The device itself, to look at (what a simulated one was sent). Read only: a message written to it past `request`
+    /// and `request_to` would skip the Read-Only switch's check (`lock`), so nothing outside this module gets the device
+    /// to write with. Dropping the link closes the device.
+    ///
+    /// ```
+    /// use icarus_obd::link::Link;
+    /// use icarus_obd::passthru::{PassThru, PassThruLink, SimPassThru};
+    /// use icarus_obd::sim::SimCar;
+    /// let mut l = PassThruLink::connect(SimPassThru::new(SimCar::new())).unwrap();
+    /// l.request(&[0x01, 0x00]).unwrap();
+    /// let m = l.device().sent[0].clone();
+    /// assert_eq!((m.id, m.data), (0x7DF, vec![0x01, 0x00]));
+    /// ```
+    ///
+    /// Writing to the device through it does not build:
+    ///
+    /// ```compile_fail,E0596
+    /// use icarus_obd::link::Link;
+    /// use icarus_obd::passthru::{PassThru, PassThruLink, SimPassThru};
+    /// use icarus_obd::sim::SimCar;
+    /// let mut l = PassThruLink::connect(SimPassThru::new(SimCar::new())).unwrap();
+    /// l.request(&[0x01, 0x00]).unwrap();
+    /// let m = l.device().sent[0].clone();
+    /// l.device().write(0, &m, std::time::Duration::from_secs(1)).unwrap();
+    /// ```
+    pub fn device(&self) -> &D {
+        &self.dev
     }
 
     /// Sends `data` to `to` and gathers the answers from IDs `from` accepts: a module that says "response pending"
@@ -229,8 +252,10 @@ impl<D: PassThru> Link for PassThruLink<D> {
         self.name.clone()
     }
 
+    /// The battery measured now (`atr 16` on the OpenPort); None when the device cannot answer this time. Never a reading
+    /// from when it connected: the write paths judge the battery by this.
     fn voltage(&mut self) -> Option<f64> {
-        self.dev.battery_voltage().ok().flatten().or(self.voltage)
+        self.dev.battery_voltage().ok().flatten()
     }
 }
 
@@ -243,6 +268,8 @@ pub struct SimPassThru {
     /// rx IDs with a filter.
     filters: Vec<u32>,
     inbox: std::collections::VecDeque<PassThruMsg>,
+    /// Every message written to the device, for the tests to look at.
+    pub sent: Vec<PassThruMsg>,
 }
 
 impl SimPassThru {
@@ -252,6 +279,7 @@ impl SimPassThru {
             channel: None,
             filters: Vec::new(),
             inbox: Default::default(),
+            sent: Vec::new(),
         }
     }
 
@@ -303,6 +331,7 @@ impl PassThru for SimPassThru {
         _timeout: Duration,
     ) -> Result<(), ObdError> {
         self.open(channel)?;
+        self.sent.push(msg.clone());
         let answers: Vec<(u32, Vec<u8>)> = if msg.id == OBD_FUNCTIONAL {
             self.car
                 .broadcast_answers(&msg.data)

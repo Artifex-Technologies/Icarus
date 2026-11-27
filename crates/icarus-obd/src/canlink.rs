@@ -22,6 +22,12 @@ pub trait Frames {
     fn send(&mut self, f: &Frame) -> io::Result<()>;
     /// The next frame from the bus, waiting up to `timeout`; None when none came in that time.
     fn recv(&mut self, timeout: Duration) -> io::Result<Option<Frame>>;
+    /// The voltage at the OBD port (the vehicle's battery) measured now, when the frame source can measure it: a raw-CAN
+    /// source on a cable that reads pin 16 (the OpenPort does) could. None by default: a SocketCAN interface and the
+    /// Mongoose driver measure nothing, and the write paths refuse a link whose battery is not known.
+    fn voltage(&mut self) -> Option<f64> {
+        None
+    }
 }
 
 /// ISO-TP's waits.
@@ -153,9 +159,29 @@ impl<F: Frames> CanLink<F> {
         self
     }
 
-    /// The frames underneath (the socket, or the simulated bus).
-    pub fn frames(&mut self) -> &mut F {
-        &mut self.bus
+    /// The frames underneath (the socket, or the simulated bus), to look at: what a simulated bus was sent. Read only: a
+    /// frame put on the bus past `request` and `request_to` would skip the Read-Only switch's check (`lock`), so nothing
+    /// outside this module gets the frames to send on.
+    ///
+    /// ```
+    /// use icarus_obd::canlink::{CanLink, Frames, SimBus};
+    /// use icarus_obd::sim::SimCar;
+    /// let mut l = CanLink::connect(SimBus::new(SimCar::new()), "vcan0").unwrap();
+    /// let f = l.frames().sent[0].clone();
+    /// assert_eq!(f.id, 0x7DF, "connecting asked every module");
+    /// ```
+    ///
+    /// Sending on the bus through it does not build:
+    ///
+    /// ```compile_fail,E0596
+    /// use icarus_obd::canlink::{CanLink, Frames, SimBus};
+    /// use icarus_obd::sim::SimCar;
+    /// let mut l = CanLink::connect(SimBus::new(SimCar::new()), "vcan0").unwrap();
+    /// let f = l.frames().sent[0].clone();
+    /// l.frames().send(&f).unwrap();
+    /// ```
+    pub fn frames(&self) -> &F {
+        &self.bus
     }
 
     /// The backstop under every write path, as on the ELM327 link: a request that would change the vehicle goes only when
@@ -504,9 +530,10 @@ impl<F: Frames> Link for CanLink<F> {
         }
     }
 
-    /// A CAN interface does not measure the battery.
+    /// Whatever the frames underneath measure (`Frames::voltage`): a SocketCAN interface measures nothing, so the write
+    /// paths refuse it.
     fn voltage(&mut self) -> Option<f64> {
-        None
+        self.bus.voltage()
     }
 
     fn set_ext(&mut self, ext: Option<u8>) -> Result<(), ObdError> {
@@ -558,6 +585,9 @@ pub struct SimBus {
     pub waits: u8,
     /// A module's long answers stop after their first frame (it went quiet in the middle of a message).
     pub stall: bool,
+    /// The battery voltage the bus says it measures (`Frames::voltage`): None, as on a SocketCAN interface, unless a test
+    /// stands in for a frame source that measures it.
+    pub voltage: Option<f64>,
 }
 
 impl SimBus {
@@ -571,6 +601,7 @@ impl SimBus {
             flow: (0, 0),
             waits: 0,
             stall: false,
+            voltage: None,
         }
     }
 
@@ -723,6 +754,10 @@ impl Frames for SimBus {
     fn recv(&mut self, _timeout: Duration) -> io::Result<Option<Frame>> {
         Ok(self.out.pop_front())
     }
+
+    fn voltage(&mut self) -> Option<f64> {
+        self.voltage
+    }
 }
 
 #[cfg(test)]
@@ -738,7 +773,7 @@ mod tests {
 
     /// The frames the tester sent since the last call, and forgotten.
     fn sent(l: &mut CanLink<SimBus>) -> Vec<Frame> {
-        std::mem::take(&mut l.frames().sent)
+        std::mem::take(&mut l.bus.sent)
     }
 
     #[test]
@@ -902,8 +937,8 @@ mod tests {
         );
         // a module that cannot take it: overflow is an error, not a wait
         let mut l = CanLink::connect(SimBus::new(SimCar::new()), "vcan0").unwrap();
-        l.frames().flow = (0, 0);
-        l.frames().waits = 11;
+        l.bus.flow = (0, 0);
+        l.bus.waits = 11;
         let e = l.request_to(0x7E0, 0x7E8, &req).unwrap_err().to_string();
         assert!(e.contains("wait"), "{e}");
         // a long request to every module is refused before anything is sent

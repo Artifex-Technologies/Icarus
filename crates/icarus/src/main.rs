@@ -1520,13 +1520,9 @@ fn obd_service(args: &Args) -> Result<(), String> {
                 .into(),
         );
     };
-    let spec = args
-        .opt("adapter")
-        .map(str::to_string)
-        .or_else(|| std::env::var("ICARUS_ADAPTER").ok())
-        .unwrap_or_default();
-    let wired = Target::parse(&spec).map(|t| t.wired()).unwrap_or(false);
+    // judged once the port is open, as for a setting
     let mut elm = connect(args)?;
+    let wired = adapter_target(args).is_ok_and(|(_, t)| t.wired());
     let list = vehicle_services(&mut elm)?;
     let s = list
         .iter()
@@ -1749,17 +1745,12 @@ fn obd_setting(args: &Args, undo: bool) -> Result<(), String> {
             .into())
         }
     };
-    let spec = args
-        .opt("adapter")
-        .map(str::to_string)
-        .or_else(|| std::env::var("ICARUS_ADAPTER").ok())
-        .unwrap_or_default();
-    if let Ok(t) = Target::parse(&spec) {
-        if !t.wired() {
-            return Err("changing a setting writes the module's memory: use a wired adapter (USB), not Bluetooth or Wi-Fi".into());
-        }
-    }
+    // the port opened first, so one that is not there (unplugged, or ttyUSB1 this time) says so; then it must be a cable
     let mut elm = connect(args)?;
+    let (spec, target) = adapter_target(args)?;
+    if !target.wired() {
+        return Err(format!("changing a setting writes the module's memory: use a wired adapter (a USB cable); {spec} is not one Linux puts on USB (Bluetooth, Wi-Fi and built-in serial ports are not)"));
+    }
     let (vin, list) = vehicle_settings(&mut elm)?;
     note_dropped(&mut elm);
     let n = name.to_lowercase();

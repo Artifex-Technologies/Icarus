@@ -258,6 +258,25 @@ impl Answer {
     }
 }
 
+/// An ELM327 or STN adapter, set up and on the vehicle's protocol. Requests go onto the bus only through `request` and
+/// `request_to`, which make the Read-Only switch's check first (`read_only_check`); the adapter's own command line, which
+/// sends a command of hex digits onto the bus as it is, is not handed out:
+///
+/// ```
+/// use icarus_obd::elm::Elm;
+/// use icarus_obd::sim::SimCar;
+/// let mut elm = Elm::connect(Box::new(SimCar::engine_off())).unwrap();
+/// assert!(elm.request(&[0x01, 0x00]).is_ok());
+/// ```
+///
+/// Saying a command to the adapter from outside this module does not build:
+///
+/// ```compile_fail,E0624
+/// use icarus_obd::elm::Elm;
+/// use icarus_obd::sim::SimCar;
+/// let mut elm = Elm::connect(Box::new(SimCar::engine_off())).unwrap();
+/// elm.command("2EA00100", std::time::Duration::from_secs(1)).unwrap();
+/// ```
 pub struct Elm {
     port: Box<dyn Port>,
     /// The adapter's own name (`ATI`), e.g. "ELM327 v1.5".
@@ -265,7 +284,8 @@ pub struct Elm {
     /// An STN chip's name (`STI`) when the adapter has one (OBDLink).
     pub stn: Option<String>,
     pub protocol: Protocol,
-    /// The voltage at the OBD port (`ATRV`): the vehicle's battery.
+    /// The voltage at the OBD port (`ATRV`, the vehicle's battery) as read when the adapter connected, for showing. A
+    /// write judges the battery measured now (`measure_voltage`), never this.
     pub voltage: Option<f64>,
     /// The one module requests go to (request ID, answer ID), or None: OBD's broadcast to every module (7DF, or 18DB33F1
     /// on 29-bit CAN).
@@ -406,7 +426,6 @@ impl Elm {
         Ok(elm)
     }
 
-    /// Sends one command and returns the answer's lines (without the echo, "SEARCHING..." and blank lines).
     /// Whatever is left from before (a late answer) goes before a command, for half a second at most: an adapter still in
     /// monitor mode streams until it is sent a character, and a port that never went quiet held Icarus up for good.
     fn drain_left_over(&mut self) -> Result<(), ObdError> {
@@ -416,7 +435,29 @@ impl Elm {
         Ok(())
     }
 
-    pub fn command(&mut self, cmd: &str, timeout: Duration) -> Result<Vec<String>, ObdError> {
+    /// The voltage at the OBD port measured now (`ATRV`: the adapter answers, nothing goes onto the bus); None when the
+    /// adapter does not answer with a number this time (it timed out, said `?`, or a line left from a bus watch came
+    /// first). Never the reading from when it connected (`voltage`, for showing): the write paths judge the battery by
+    /// this, and an hour-old 12.6 V says nothing about the battery now.
+    pub fn measure_voltage(&mut self) -> Option<f64> {
+        self.command("ATRV", Duration::from_secs(2))
+            .ok()
+            .and_then(|r| {
+                r.first()
+                    .and_then(|v| v.trim().trim_end_matches('V').parse::<f64>().ok())
+            })
+    }
+
+    /// Whether the port this adapter was opened on is a cable all the way (`Port::wired`). Judged by the open port
+    /// itself, so a symlink moved after connecting (udev giving `/dev/obdlink` to another adapter) does not change it.
+    pub fn wired(&self) -> bool {
+        self.port.wired()
+    }
+
+    /// Sends one command and returns the answer's lines (without the echo, "SEARCHING..." and blank lines). Private: a
+    /// command of hex digits, or an STN's STPX, goes onto the bus as it is, so only this module's own requests say one,
+    /// after the Read-Only switch's check (`read_only_check`).
+    fn command(&mut self, cmd: &str, timeout: Duration) -> Result<Vec<String>, ObdError> {
         self.drain_left_over()?;
         // a request (hex bytes, not an AT or ST command) goes onto the bus: kept for take_sent
         if !cmd.is_empty()
@@ -1284,6 +1325,16 @@ mod tests {
             self.reply.drain(..n);
             Ok(n)
         }
+    }
+
+    /// Whether an adapter is wired is asked of the port it was opened on (`Port::wired`), not of a path: the simulation
+    /// is; the same simulated adapter behind a port that cannot tell is not.
+    #[test]
+    fn wired_is_asked_of_the_open_port() {
+        assert!(Elm::connect(Box::new(crate::sim::SimCar::new()))
+            .unwrap()
+            .wired());
+        assert!(!Elm::connect(at_speed(true)).unwrap().wired());
     }
 
     #[test]
