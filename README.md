@@ -567,6 +567,8 @@ The adapter `A` is one of:
 | `tcp:192.168.0.10:35000` | a Wi-Fi adapter |
 | `can:can0` (or just `can0`, `vcan0`) | a Linux CAN interface (SocketCAN), such as a CANable set up with `ip link set can0 up type can bitrate 500000` |
 | `slcan:/dev/ttyACM0[@baud][#bitrate]` | an SLCAN adapter, for watching the bus only (listen-only; see The bus) |
+| `openport` (or `openport:/dev/ttyACM0`) | a Tactrix OpenPort 2.0 J2534 cable, through Icarus's own driver for it (docs/INTERFACES.md) |
+| `sim:j2534` | the simulated vehicle behind a simulated J2534 device |
 
 `ICARUS_ADAPTER` sets a default.
 
@@ -632,4 +634,5 @@ What Icarus is built to do, the rules every write follows, and its known limitat
 ## Licence
 
 MPL-2.0, like the rest of the ecosystem. The reference projects I looked at are GPL or proprietary: Icarus takes ideas and
-file formats from them, never code.
+file formats from them, never code. The OpenPort 2.0 driver learned the cable's command language from a BSD-licensed
+library; its notice is in [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md).

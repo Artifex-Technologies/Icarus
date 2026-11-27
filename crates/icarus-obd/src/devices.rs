@@ -150,11 +150,11 @@ pub const KNOWN: &[Known] = &[
     ),
     dev(
         0x0403,
-        0xcc4c,
+        0xcc4d,
         "Tactrix",
         "OpenPort 2.0",
-        Access::RawUsb,
-        "a J2534 cable; ID as others publish it, not yet seen here",
+        Access::Serial,
+        "a J2534 cable (Linux's cdc_acm makes it /dev/ttyACM*): icarus obd --adapter openport",
     ),
     dev(
         0x10c4,

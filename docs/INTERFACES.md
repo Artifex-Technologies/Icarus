@@ -42,13 +42,13 @@ The udev rule `packaging/70-icarus-tuners.rules` lets the person at the computer
 | HP Tuners CDV | `0403:d019` | FTDI, HP Tuners' ID | raw USB | same |
 | HP Tuners MPVI2, MPVI Pro, MPVI3, MPVI4 | not in the installers | named in VCM Suite / VCM Live | to read when one is plugged in | VCM Suite 2024, VCM Live beta |
 | VF Tuner WiFlash | `10c4:ea60` (generic CP210x) | ESP32 behind CP210x serial; Wi-Fi 192.168.4.1 | serial (`cp210x`) | VF Tuner 4.5 |
-| Tactrix OpenPort 2.0 | `0403:cc4c` | vendor bulk (J2534) | raw USB | as others publish it; not yet seen here |
+| Tactrix OpenPort 2.0 | `0403:cc4d` | CDC ACM serial, its own J2534 command language | serial (`cdc_acm`, `/dev/ttyACM*`) | the j2534 library for Linux (BSD); not yet seen here |
 | FTDI and CP210x cables (ELM327, OBDLink SX/EX) | `0403:6001`, `0403:6015`, `10c4:ea60` | serial | serial | standard IDs |
 
 `icarus devices` lists what of this is plugged in and whether this user may open it (the udev rule in
 `packaging/70-icarus-tuners.rules` gives the person at the seat each of these; the icarus-git package installs it, and
 `bash scripts/install-local.sh --udev` does for a checkout). It
-sends nothing to any device: Icarus does not speak these devices' own protocols yet.
+sends nothing to any device. Of these, Icarus speaks one device's own protocol so far: the OpenPort 2.0's (below).
 
 ## SCT X4 (7015) — Ford
 
@@ -88,8 +88,22 @@ program in a Limbo Windows guest. The recording and the device's files stay outs
 | Linux | the CP210x needs no driver (`cp210x`, `/dev/ttyUSB*`); what `esp32.dll` says over that serial line is to be learned by watching it with the device in hand |
 | Data | definitions, trouble codes and checksums are encrypted (`BinDefs.enc`, `DTCDefs.enc`, `Nsum.enc`): not opened. Bundled profiles: six Tundra calibrations (`89663-0CS..`). `Logger.ini` lists SAE J1979 PIDs by its own names |
 
-Because VF Tuner talks J2534, a J2534 layer in Icarus (the API on top of each device's own transport) would also reach the
-common J2534 cables (Tactrix OpenPort 2.0, Mongoose and the like).
+Because VF Tuner talks J2534, a J2534 layer in Icarus (the API on top of each device's own transport) also reaches the
+common J2534 cables. Icarus has that layer (`crates/icarus-obd/src/passthru.rs`), and the OpenPort 2.0 is the first cable
+with a driver of its own on it (below); the Mongoose is next.
+
+## Tactrix OpenPort 2.0 (J2534)
+
+| | |
+| --- | --- |
+| USB | `0403:cc4d` "Tactrix OpenPort 2.0": a CDC ACM device, so Linux's own `cdc_acm` driver makes it `/dev/ttyACM*` |
+| Language | short text commands (`ati`, `ata`, `ato6 0 500000 0`, `att6 ...`, `atf6 ...`, `atr 16`) answered with `ar...` lines, and binary `ar` packets for what it receives: the table is at the top of `crates/icarus-obd/src/openport.rs` |
+| Source | NikolaKozina's and Dale Schultz's j2534 library for Linux and macOS (github.com/NikolaKozina/j2534, BSD 3-Clause; [THIRD_PARTY.md](THIRD_PARTY.md)), read for the command words and the packet layout; the driver is Icarus's own code, over the serial port instead of libusb |
+| In Icarus | `--adapter openport` (the first one plugged in) or `openport:/dev/ttyACM0`: OBD-II and each module over ISO 15765 at 500 kbit/s, with the battery voltage at pin 16. The commands that ask the vehicle take it (`icarus obd`, `scan`, `module`, `live`); the window and bus watching do not yet |
+| Tried | against a stand-in cable in the tests, in front of the simulated car; not yet with a cable in hand |
+
+That library's notes say to take the SD card out of the cable before using it. `--adapter sim:j2534` is the simulated car
+behind a simulated J2534 device, to try the same path without a cable.
 
 ## Silicon Labs CP210x driver (`cp210.exe`)
 

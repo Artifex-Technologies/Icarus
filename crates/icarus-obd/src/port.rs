@@ -22,6 +22,8 @@ pub trait Port {
 ///   `can:can0`, or just `can0`/`vcan0`        a Linux CAN interface (SocketCAN: a CANable), spoken to directly
 ///   `slcan:/dev/ttyACM0[@baud][#bitrate]`     an SLCAN adapter on a serial port, for watching the bus listen-only
 ///                                             (115200 baud and 500 kbit/s unless given)
+///   `openport` or `openport:/dev/ttyACM0`     a Tactrix OpenPort 2.0 J2534 cable (the first one plugged in, or that port)
+///   `sim:j2534`                    the simulated car behind a simulated J2534 device
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
     /// The simulated vehicle: engine running (`sim`) or ignition on, engine off (`sim:off`); `sim:listen` is a second adapter
@@ -50,6 +52,17 @@ pub enum Target {
         /// The CAN bit rate, one of `slcan::BITRATES`.
         bitrate: u32,
     },
+    /// A J2534 device, reached through Icarus's own driver for it (`passthru::open_link`), not as an ELM327.
+    J2534(J2534Device),
+}
+
+/// The J2534 devices Icarus has a driver for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum J2534Device {
+    /// `sim:j2534`: the simulated car behind a simulated J2534 device.
+    Sim,
+    /// `openport` (the first one plugged in) or `openport:/dev/ttyACM0`: a Tactrix OpenPort 2.0 (`openport`).
+    OpenPort(Option<String>),
 }
 
 /// Whether `s` is a CAN interface's usual name: `can` or `vcan` and a number.
@@ -65,12 +78,28 @@ impl Target {
     pub fn wired(&self) -> bool {
         match self {
             Target::Sim { .. } | Target::Can(_) => true,
+            // a USB cable, or the simulation
+            Target::J2534(_) => true,
             Target::Serial { path, .. } | Target::Slcan { path, .. } => !path.contains("rfcomm"),
             Target::Bluetooth { .. } | Target::Tcp(_) => false,
         }
     }
 
     pub fn parse(s: &str) -> Result<Target, String> {
+        if s == "sim:j2534" {
+            return Ok(Target::J2534(J2534Device::Sim));
+        }
+        if s == "openport" {
+            return Ok(Target::J2534(J2534Device::OpenPort(None)));
+        }
+        if let Some(path) = s.strip_prefix("openport:") {
+            if !path.starts_with('/') {
+                return Err(
+                    "openport: needs the cable's serial port, e.g. openport:/dev/ttyACM0 (or just openport)".into(),
+                );
+            }
+            return Ok(Target::J2534(J2534Device::OpenPort(Some(path.to_string()))));
+        }
         if matches!(s, "sim" | "sim:off" | "sim:listen" | "sim:j1939") {
             return Ok(Target::Sim {
                 engine_on: s != "sim:off",
@@ -163,7 +192,7 @@ impl Target {
                 baud,
             });
         }
-        Err(format!("unknown adapter {s:?}: use sim, /dev/ttyUSB0[@baud], bt:AA:BB:CC:DD:EE:FF[#channel], tcp:host:port, can:can0 or slcan:/dev/ttyACM0"))
+        Err(format!("unknown adapter {s:?}: use sim, /dev/ttyUSB0[@baud], bt:AA:BB:CC:DD:EE:FF[#channel], tcp:host:port, can:can0, slcan:/dev/ttyACM0 or openport"))
     }
 
     /// The byte stream to an ELM327/STN adapter. A CAN interface is not one: it is reached frame by frame
@@ -181,6 +210,13 @@ impl Target {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!("{path} is an SLCAN adapter, opened listen-only for watching the bus (icarus bus watch, icarus learn); this needs an OBD adapter or a CAN interface"),
+                ))
+            }
+            // spoken to by its own driver, never as an ELM327
+            Target::J2534(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "a J2534 cable is reached through Icarus's own driver for it: the commands that ask the vehicle (icarus obd, scan, module, live...) take it; the window and bus watching need an ELM327 adapter or a CAN interface for now",
                 ))
             }
             Target::Sim { j1939: true, .. } => Box::new(crate::sim::SimCar::truck()),
@@ -421,6 +457,26 @@ mod tests {
         let w = |s: &str| Target::parse(s).unwrap().wired();
         assert!(w("sim") && w("/dev/ttyUSB0") && w("/dev/ttyACM0@115200"));
         assert!(!w("/dev/rfcomm0") && !w("bt:AA:BB:CC:DD:EE:FF") && !w("tcp:192.168.0.10:35000"));
+        assert!(w("openport") && w("openport:/dev/ttyACM0") && w("sim:j2534"));
+    }
+
+    #[test]
+    fn j2534_cables_from_the_command_line() {
+        assert_eq!(
+            Target::parse("openport").unwrap(),
+            Target::J2534(J2534Device::OpenPort(None))
+        );
+        assert_eq!(
+            Target::parse("openport:/dev/ttyACM1").unwrap(),
+            Target::J2534(J2534Device::OpenPort(Some("/dev/ttyACM1".into())))
+        );
+        assert!(Target::parse("openport:ttyACM0").is_err());
+        assert_eq!(
+            Target::parse("sim:j2534").unwrap(),
+            Target::J2534(J2534Device::Sim)
+        );
+        let e = Target::parse("openport").unwrap().open().err().unwrap();
+        assert!(e.to_string().contains("own driver"), "{e}");
     }
 
     #[test]

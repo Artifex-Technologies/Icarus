@@ -827,16 +827,20 @@ fn cmd_version(a: &[String]) -> Result<(), String> {
 /// The adapter `--adapter` (or ICARUS_ADAPTER) names, parsed.
 fn adapter_target(args: &Args) -> Result<(String, Target), String> {
     let spec = args.opt("adapter").map(str::to_string).or_else(|| std::env::var("ICARUS_ADAPTER").ok()).ok_or(
-        "which adapter? --adapter sim | /dev/ttyUSB0 | bt:AA:BB:CC:DD:EE:FF | tcp:host:port | can:can0 (or set ICARUS_ADAPTER)",
+        "which adapter? --adapter sim | /dev/ttyUSB0 | bt:AA:BB:CC:DD:EE:FF | tcp:host:port | can:can0 | openport (or set ICARUS_ADAPTER)",
     )?;
     let target = Target::parse(&spec)?;
     Ok((spec, target))
 }
 
-/// The link to the vehicle: an ELM327/STN adapter, or a Linux CAN interface (`can0`, spoken to over SocketCAN).
+/// The link to the vehicle: an ELM327/STN adapter, a Linux CAN interface (`can0`, spoken to over SocketCAN), or a J2534
+/// cable (`openport`) through Icarus's own driver for it.
 fn connect(args: &Args) -> Result<Box<dyn Link>, String> {
     let (spec, target) = adapter_target(args)?;
     eprintln!("connecting to {spec}...");
+    if let Target::J2534(dev) = &target {
+        return icarus_obd::passthru::open_link(dev).map_err(|e| format!("{spec}: {e}"));
+    }
     if let Target::Can(ifn) = &target {
         let sock = socketcan::open(ifn).map_err(|x| x.to_string())?;
         // the interface's bit rate from the kernel (ICA-68): shown, and 250 kbit/s named as such

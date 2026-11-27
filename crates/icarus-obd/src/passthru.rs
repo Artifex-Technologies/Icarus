@@ -4,13 +4,37 @@
 //! of them, `PassThruLink` is a `Link`: OBD-II and one-module requests over ISO 15765 (ISO-TP on CAN), with the device
 //! doing the segmentation and flow control, as J2534 devices do.
 //!
-//! Devices: `SimPassThru` (the simulated car, for tests and `--adapter sim-j2534`); the WiFlash (VF Tuner's ESP32 device)
-//! once its protocol has been learned by watching it (docs/INTERFACES.md).
+//! Devices: `SimPassThru` (the simulated car, for tests and `--adapter sim:j2534`); the Tactrix OpenPort 2.0 (`openport`,
+//! `--adapter openport`); the WiFlash (VF Tuner's ESP32 device) once its protocol has been learned by watching it
+//! (docs/INTERFACES.md). `open_link` opens the one an `--adapter` names.
 
 use crate::elm::{Answer, ObdError, Protocol};
 use crate::link::Link;
+use crate::port::J2534Device;
 use crate::sim::SimCar;
 use std::time::{Duration, Instant};
+
+/// The link to the vehicle through the J2534 device `dev` names (`--adapter openport`, `sim:j2534`): ISO 15765 at
+/// 500 kbit/s, as `PassThruLink::connect` opens it.
+pub fn open_link(dev: &J2534Device) -> Result<Box<dyn Link>, String> {
+    let e = |x: ObdError| x.to_string();
+    Ok(match dev {
+        J2534Device::Sim => {
+            Box::new(PassThruLink::connect(SimPassThru::new(SimCar::new())).map_err(e)?)
+        }
+        J2534Device::OpenPort(Some(path)) => {
+            Box::new(PassThruLink::connect(crate::openport::open_tty(path).map_err(e)?).map_err(e)?)
+        }
+        // the port found is named, as `--adapter` did not say it
+        J2534Device::OpenPort(None) => {
+            let path = crate::openport::find(std::path::Path::new("/sys/bus/usb/devices"))?;
+            let at = |x: ObdError| format!("{path}: {x}");
+            Box::new(
+                PassThruLink::connect(crate::openport::open_tty(&path).map_err(at)?).map_err(at)?,
+            )
+        }
+    })
+}
 
 /// The J2534 protocols Icarus uses. J1850 and Chrysler SCI are left out: none of the vehicles in view use them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
