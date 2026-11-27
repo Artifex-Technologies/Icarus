@@ -1,0 +1,201 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="1300" height="1468" viewBox="0 0 1300 1468" font-family="Arial, Helvetica, 'Liberation Sans', FreeSans, sans-serif" font-size="14" fill="#1a1a1a">
+<title>Bench OBD-II socket: J1962 face view</title>
+<desc>The female J1962 (OBD-II) socket on the bench, seen from the front as the OBDLink EX plugs in: pins 1-16 in the standard layout, with the pins the bench uses labeled. A smaller wire-side view shows the mirrored numbering on the back.</desc>
+<rect x="0" y="0" width="1300" height="1468" fill="#ffffff"/>
+<rect x="20.0" y="20.0" width="1260.0" height="86.0" fill="#ffffff" stroke="#1a1a1a" stroke-width="2"/>
+<text x="36.0" y="46.0" font-size="16" font-weight="bold">Bench OBD-II socket: female J1962, pins 1-16</text>
+<text x="36.0" y="70.0" font-size="15">2016-2017 Tacoma 3.5 L automatic, ECM 89661-04K50..04K54</text>
+<text x="483.1" y="70.0" font-size="15" fill="#d01818">(other years, the 6-speed manual 04K60-04K64 and the 2.7 L: not verified)</text>
+<text x="36.0" y="92.0" font-size="14" fill="#555555">drawn by Icarus, 2026-11-27, verify against Toyota TIS</text>
+<text x="1264.0" y="46.0" font-size="13" text-anchor="end" fill="#555555">Sheet 3 of 3: the socket</text>
+<text x="1264.0" y="66.0" font-size="13" text-anchor="end" fill="#555555">bench-wiring.svg: the whole bench</text>
+<text x="1264.0" y="86.0" font-size="13" text-anchor="end" fill="#555555">power.svg: the supply side</text>
+<text x="40.0" y="150.0" font-size="16" font-weight="bold">Face view: looking into the socket from the front, as the EX plugs in</text>
+<text x="40.0" y="172.0" font-size="14" fill="#555555">The standard J1962 layout: pins 1-8 on the wide top row, 9-16 below, each row numbered left to right.</text>
+<path d="M242,330 H858 V457.5 L808,585 H292 L242,457.5 Z" fill="#e9ecef" stroke="#1a1a1a" stroke-width="3" stroke-linejoin="round"/>
+<rect x="272" y="427.5" width="556" height="20" rx="4" fill="#adb5bd" stroke="none"/>
+<rect x="275.0" y="355.0" width="46" height="40" rx="5" fill="#f8f9fa" stroke="#adb5bd" stroke-width="2"/>
+<text x="298.0" y="381.0" font-size="16" font-weight="bold" text-anchor="middle" fill="#868e96">1</text>
+<rect x="275.0" y="480.0" width="46" height="40" rx="5" fill="#f8f9fa" stroke="#adb5bd" stroke-width="2"/>
+<text x="298.0" y="506.0" font-size="16" font-weight="bold" text-anchor="middle" fill="#868e96">9</text>
+<rect x="347.0" y="355.0" width="46" height="40" rx="5" fill="#f8f9fa" stroke="#adb5bd" stroke-width="2"/>
+<text x="370.0" y="381.0" font-size="16" font-weight="bold" text-anchor="middle" fill="#868e96">2</text>
+<rect x="347.0" y="480.0" width="46" height="40" rx="5" fill="#f8f9fa" stroke="#adb5bd" stroke-width="2"/>
+<text x="370.0" y="506.0" font-size="16" font-weight="bold" text-anchor="middle" fill="#868e96">10</text>
+<rect x="419.0" y="355.0" width="46" height="40" rx="5" fill="#f8f9fa" stroke="#adb5bd" stroke-width="2"/>
+<text x="442.0" y="381.0" font-size="16" font-weight="bold" text-anchor="middle" fill="#868e96">3</text>
+<rect x="419.0" y="480.0" width="46" height="40" rx="5" fill="#f8f9fa" stroke="#adb5bd" stroke-width="2"/>
+<text x="442.0" y="506.0" font-size="16" font-weight="bold" text-anchor="middle" fill="#868e96">11</text>
+<rect x="491.0" y="355.0" width="46" height="40" rx="5" fill="#1a1a1a" stroke="#1a1a1a" stroke-width="2"/>
+<text x="514.0" y="381.0" font-size="16" font-weight="bold" text-anchor="middle" fill="#ffffff">4</text>
+<rect x="491.0" y="480.0" width="46" height="40" rx="5" fill="#ffffff" stroke="#1a1a1a" stroke-width="2"/>
+<text x="514.0" y="506.0" font-size="16" font-weight="bold" text-anchor="middle">12</text>
+<rect x="563.0" y="355.0" width="46" height="40" rx="5" fill="#1a1a1a" stroke="#1a1a1a" stroke-width="2"/>
+<text x="586.0" y="381.0" font-size="16" font-weight="bold" text-anchor="middle" fill="#ffffff">5</text>
+<rect x="563.0" y="480.0" width="46" height="40" rx="5" fill="#f8f9fa" stroke="#adb5bd" stroke-width="2"/>
+<text x="586.0" y="506.0" font-size="16" font-weight="bold" text-anchor="middle" fill="#868e96">13</text>
+<rect x="635.0" y="355.0" width="46" height="40" rx="5" fill="#0f766e" stroke="#1a1a1a" stroke-width="2"/>
+<text x="658.0" y="381.0" font-size="16" font-weight="bold" text-anchor="middle" fill="#ffffff">6</text>
+<rect x="635.0" y="480.0" width="46" height="40" rx="5" fill="#0f766e" stroke="#1a1a1a" stroke-width="2"/>
+<text x="658.0" y="506.0" font-size="16" font-weight="bold" text-anchor="middle" fill="#ffffff">14</text>
+<rect x="707.0" y="355.0" width="46" height="40" rx="5" fill="#f8f9fa" stroke="#adb5bd" stroke-width="2"/>
+<text x="730.0" y="381.0" font-size="16" font-weight="bold" text-anchor="middle" fill="#868e96">7</text>
+<rect x="707.0" y="480.0" width="46" height="40" rx="5" fill="#ffffff" stroke="#1a1a1a" stroke-width="2"/>
+<text x="730.0" y="506.0" font-size="16" font-weight="bold" text-anchor="middle">15</text>
+<rect x="779.0" y="355.0" width="46" height="40" rx="5" fill="#f8f9fa" stroke="#adb5bd" stroke-width="2"/>
+<text x="802.0" y="381.0" font-size="16" font-weight="bold" text-anchor="middle" fill="#868e96">8</text>
+<rect x="779.0" y="480.0" width="46" height="40" rx="5" fill="#1d4ed8" stroke="#1a1a1a" stroke-width="2"/>
+<text x="802.0" y="506.0" font-size="16" font-weight="bold" text-anchor="middle" fill="#ffffff">16</text>
+<polyline points="658.0,355.0 658.0,300.0 930.0,300.0" fill="none" stroke="#444444" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="658.0" cy="355.0" r="3" fill="#444444"/>
+<text x="940.0" y="305.0" font-size="15" font-weight="bold">6  CAN-H</text>
+<rect x="940.0" y="314.0" width="292.8" height="26.0" rx="4" fill="#fff1f1" stroke="#d01818" stroke-width="2" stroke-dasharray="7 5"/>
+<text x="948.0" y="332.0" font-size="14" fill="#d01818">to the ECM's CAN-H: pin from TIS, CHECK</text>
+<polyline points="586.0,355.0 586.0,230.0 930.0,230.0" fill="none" stroke="#444444" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="586.0" cy="355.0" r="3" fill="#444444"/>
+<text x="940.0" y="235.0" font-size="15" font-weight="bold">5  signal ground</text>
+<text x="940.0" y="255.0" font-size="14" fill="#555555">to supply −</text>
+<polyline points="514.0,355.0 514.0,270.0 180.0,270.0" fill="none" stroke="#444444" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="514.0" cy="355.0" r="3" fill="#444444"/>
+<text x="170.0" y="275.0" font-size="15" font-weight="bold" text-anchor="end">chassis ground  4</text>
+<text x="170.0" y="295.0" font-size="14" text-anchor="end" fill="#555555">to supply −</text>
+<polyline points="802.0,520.0 802.0,600.0 930.0,600.0" fill="none" stroke="#444444" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="802.0" cy="520.0" r="3" fill="#444444"/>
+<text x="940.0" y="605.0" font-size="15" font-weight="bold">16  +12 V constant (F2)</text>
+<text x="940.0" y="625.0" font-size="14" fill="#555555">powers the EX; the voltage Icarus reads</text>
+<polyline points="730.0,520.0 730.0,662.0 930.0,662.0" fill="none" stroke="#444444" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="730.0" cy="520.0" r="3" fill="#444444"/>
+<text x="940.0" y="667.0" font-size="15" font-weight="bold">15  leave empty</text>
+<text x="940.0" y="687.0" font-size="14" fill="#555555">a PCMflash Powerbox uses 12 and 15</text>
+<polyline points="658.0,520.0 658.0,724.0 930.0,724.0" fill="none" stroke="#444444" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="658.0" cy="520.0" r="3" fill="#444444"/>
+<text x="940.0" y="729.0" font-size="15" font-weight="bold">14  CAN-L</text>
+<rect x="940.0" y="738.0" width="290.4" height="26.0" rx="4" fill="#fff1f1" stroke="#d01818" stroke-width="2" stroke-dasharray="7 5"/>
+<text x="948.0" y="756.0" font-size="14" fill="#d01818">to the ECM's CAN-L: pin from TIS, CHECK</text>
+<polyline points="514.0,520.0 514.0,640.0 180.0,640.0" fill="none" stroke="#444444" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="514.0" cy="520.0" r="3" fill="#444444"/>
+<text x="170.0" y="645.0" font-size="15" font-weight="bold" text-anchor="end">leave empty  12</text>
+<text x="170.0" y="665.0" font-size="14" text-anchor="end" fill="#555555">a Powerbox uses it</text>
+<text x="40.0" y="790.0" font-size="15" font-weight="bold">On the socket's back</text>
+<text x="40.0" y="814.0" font-size="14">•</text>
+<text x="56.0" y="814.0" font-size="14">R1, 120 Ω, between pins 6 and 14.</text>
+<text x="40.0" y="839.0" font-size="14">•</text>
+<text x="56.0" y="839.0" font-size="14">R2 (a second 120 Ω) only if the ECM has no terminator inside: measure first.</text>
+<text x="40.0" y="864.0" font-size="14">•</text>
+<text x="56.0" y="864.0" font-size="14">CAN as a twisted pair to the ECM.</text>
+<text x="40.0" y="889.0" font-size="14">•</text>
+<text x="56.0" y="889.0" font-size="14">Every pin not labeled here: nothing.</text>
+<text x="40.0" y="940.0" font-size="16" font-weight="bold">Wire side: the back of the socket, where you solder</text>
+<text x="40.0" y="962.0" font-size="14" fill="#555555">Left and right swap: pin 1 is top right here and pin 16 bottom left. Trust</text>
+<text x="40.0" y="981.0" font-size="14" fill="#555555">the numbers molded on your socket.</text>
+<path d="M68,1020 H492 V1092.0 L464,1164 H96 L68,1092.0 Z" fill="#e9ecef" stroke="#1a1a1a" stroke-width="2" stroke-linejoin="round"/>
+<rect x="98" y="1072.0" width="364" height="12" rx="4" fill="#adb5bd" stroke="none"/>
+<rect x="89.0" y="1032.0" width="32" height="28" rx="5" fill="#f8f9fa" stroke="#adb5bd" stroke-width="1.5"/>
+<text x="105.0" y="1051.0" font-size="13" font-weight="bold" text-anchor="middle" fill="#868e96">8</text>
+<rect x="89.0" y="1096.0" width="32" height="28" rx="5" fill="#1d4ed8" stroke="#1a1a1a" stroke-width="1.5"/>
+<text x="105.0" y="1115.0" font-size="13" font-weight="bold" text-anchor="middle" fill="#ffffff">16</text>
+<rect x="139.0" y="1032.0" width="32" height="28" rx="5" fill="#f8f9fa" stroke="#adb5bd" stroke-width="1.5"/>
+<text x="155.0" y="1051.0" font-size="13" font-weight="bold" text-anchor="middle" fill="#868e96">7</text>
+<rect x="139.0" y="1096.0" width="32" height="28" rx="5" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.5"/>
+<text x="155.0" y="1115.0" font-size="13" font-weight="bold" text-anchor="middle">15</text>
+<rect x="189.0" y="1032.0" width="32" height="28" rx="5" fill="#0f766e" stroke="#1a1a1a" stroke-width="1.5"/>
+<text x="205.0" y="1051.0" font-size="13" font-weight="bold" text-anchor="middle" fill="#ffffff">6</text>
+<rect x="189.0" y="1096.0" width="32" height="28" rx="5" fill="#0f766e" stroke="#1a1a1a" stroke-width="1.5"/>
+<text x="205.0" y="1115.0" font-size="13" font-weight="bold" text-anchor="middle" fill="#ffffff">14</text>
+<rect x="239.0" y="1032.0" width="32" height="28" rx="5" fill="#1a1a1a" stroke="#1a1a1a" stroke-width="1.5"/>
+<text x="255.0" y="1051.0" font-size="13" font-weight="bold" text-anchor="middle" fill="#ffffff">5</text>
+<rect x="239.0" y="1096.0" width="32" height="28" rx="5" fill="#f8f9fa" stroke="#adb5bd" stroke-width="1.5"/>
+<text x="255.0" y="1115.0" font-size="13" font-weight="bold" text-anchor="middle" fill="#868e96">13</text>
+<rect x="289.0" y="1032.0" width="32" height="28" rx="5" fill="#1a1a1a" stroke="#1a1a1a" stroke-width="1.5"/>
+<text x="305.0" y="1051.0" font-size="13" font-weight="bold" text-anchor="middle" fill="#ffffff">4</text>
+<rect x="289.0" y="1096.0" width="32" height="28" rx="5" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.5"/>
+<text x="305.0" y="1115.0" font-size="13" font-weight="bold" text-anchor="middle">12</text>
+<rect x="339.0" y="1032.0" width="32" height="28" rx="5" fill="#f8f9fa" stroke="#adb5bd" stroke-width="1.5"/>
+<text x="355.0" y="1051.0" font-size="13" font-weight="bold" text-anchor="middle" fill="#868e96">3</text>
+<rect x="339.0" y="1096.0" width="32" height="28" rx="5" fill="#f8f9fa" stroke="#adb5bd" stroke-width="1.5"/>
+<text x="355.0" y="1115.0" font-size="13" font-weight="bold" text-anchor="middle" fill="#868e96">11</text>
+<rect x="389.0" y="1032.0" width="32" height="28" rx="5" fill="#f8f9fa" stroke="#adb5bd" stroke-width="1.5"/>
+<text x="405.0" y="1051.0" font-size="13" font-weight="bold" text-anchor="middle" fill="#868e96">2</text>
+<rect x="389.0" y="1096.0" width="32" height="28" rx="5" fill="#f8f9fa" stroke="#adb5bd" stroke-width="1.5"/>
+<text x="405.0" y="1115.0" font-size="13" font-weight="bold" text-anchor="middle" fill="#868e96">10</text>
+<rect x="439.0" y="1032.0" width="32" height="28" rx="5" fill="#f8f9fa" stroke="#adb5bd" stroke-width="1.5"/>
+<text x="455.0" y="1051.0" font-size="13" font-weight="bold" text-anchor="middle" fill="#868e96">1</text>
+<rect x="439.0" y="1096.0" width="32" height="28" rx="5" fill="#f8f9fa" stroke="#adb5bd" stroke-width="1.5"/>
+<text x="455.0" y="1115.0" font-size="13" font-weight="bold" text-anchor="middle" fill="#868e96">9</text>
+<rect x="600.0" y="918.0" width="660.0" height="446.0" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.5"/>
+<text x="614.0" y="944.0" font-size="14" font-weight="bold">Pin</text>
+<text x="660.0" y="944.0" font-size="14" font-weight="bold">J1962 function</text>
+<text x="930.0" y="944.0" font-size="14" font-weight="bold">On this bench</text>
+<polyline points="600.0,956.0 1260.0,956.0" fill="none" stroke="#999999" stroke-width="1" stroke-linejoin="round" stroke-linecap="round"/>
+<text x="614.0" y="976.0" font-size="14" fill="#555555">1</text>
+<text x="660.0" y="976.0" font-size="14" fill="#555555">manufacturer's choice</text>
+<text x="930.0" y="976.0" font-size="14" fill="#555555">not used</text>
+<text x="614.0" y="1001.0" font-size="14" fill="#555555">2</text>
+<text x="660.0" y="1001.0" font-size="14" fill="#555555">J1850 bus +</text>
+<text x="930.0" y="1001.0" font-size="14" fill="#555555">not used</text>
+<text x="614.0" y="1026.0" font-size="14" fill="#555555">3</text>
+<text x="660.0" y="1026.0" font-size="14" fill="#555555">manufacturer's choice</text>
+<text x="930.0" y="1026.0" font-size="14" fill="#555555">not used</text>
+<text x="614.0" y="1051.0" font-size="14" font-weight="bold">4</text>
+<text x="660.0" y="1051.0" font-size="14">chassis ground</text>
+<text x="930.0" y="1051.0" font-size="14" font-weight="bold">supply −</text>
+<text x="614.0" y="1076.0" font-size="14" font-weight="bold">5</text>
+<text x="660.0" y="1076.0" font-size="14">signal ground</text>
+<text x="930.0" y="1076.0" font-size="14" font-weight="bold">supply −</text>
+<text x="614.0" y="1101.0" font-size="14" font-weight="bold">6</text>
+<text x="660.0" y="1101.0" font-size="14">CAN high (ISO 15765-4)</text>
+<text x="930.0" y="1101.0" font-size="14" font-weight="bold" fill="#d01818">ECM CAN-H: pin from TIS</text>
+<text x="614.0" y="1126.0" font-size="14" fill="#555555">7</text>
+<text x="660.0" y="1126.0" font-size="14" fill="#555555">K-line (ISO 9141-2, 14230-4)</text>
+<text x="930.0" y="1126.0" font-size="14" fill="#555555">not used</text>
+<text x="614.0" y="1151.0" font-size="14" fill="#555555">8</text>
+<text x="660.0" y="1151.0" font-size="14" fill="#555555">manufacturer's choice</text>
+<text x="930.0" y="1151.0" font-size="14" fill="#555555">not used</text>
+<text x="614.0" y="1176.0" font-size="14" fill="#555555">9</text>
+<text x="660.0" y="1176.0" font-size="14" fill="#555555">manufacturer's choice</text>
+<text x="930.0" y="1176.0" font-size="14" fill="#555555">not used</text>
+<text x="614.0" y="1201.0" font-size="14" fill="#555555">10</text>
+<text x="660.0" y="1201.0" font-size="14" fill="#555555">J1850 bus −</text>
+<text x="930.0" y="1201.0" font-size="14" fill="#555555">not used</text>
+<text x="614.0" y="1226.0" font-size="14" fill="#555555">11</text>
+<text x="660.0" y="1226.0" font-size="14" fill="#555555">manufacturer's choice</text>
+<text x="930.0" y="1226.0" font-size="14" fill="#555555">not used</text>
+<text x="614.0" y="1251.0" font-size="14" fill="#555555">12</text>
+<text x="660.0" y="1251.0" font-size="14" fill="#555555">manufacturer's choice</text>
+<text x="930.0" y="1251.0" font-size="14" fill="#555555">leave empty</text>
+<text x="614.0" y="1276.0" font-size="14" fill="#555555">13</text>
+<text x="660.0" y="1276.0" font-size="14" fill="#555555">manufacturer's choice</text>
+<text x="930.0" y="1276.0" font-size="14" fill="#555555">not used</text>
+<text x="614.0" y="1301.0" font-size="14" font-weight="bold">14</text>
+<text x="660.0" y="1301.0" font-size="14">CAN low (ISO 15765-4)</text>
+<text x="930.0" y="1301.0" font-size="14" font-weight="bold" fill="#d01818">ECM CAN-L: pin from TIS</text>
+<text x="614.0" y="1326.0" font-size="14" fill="#555555">15</text>
+<text x="660.0" y="1326.0" font-size="14" fill="#555555">L-line (ISO 9141-2, 14230-4)</text>
+<text x="930.0" y="1326.0" font-size="14" fill="#555555">leave empty</text>
+<text x="614.0" y="1351.0" font-size="14" font-weight="bold">16</text>
+<text x="660.0" y="1351.0" font-size="14">battery +12 V</text>
+<text x="930.0" y="1351.0" font-size="14" font-weight="bold">+12 V constant through F2</text>
+<text x="600.0" y="1386.0" font-size="13" fill="#555555">Functions: SAE J1962 as summarized by Wikipedia and obdtester.com.</text>
+<rect x="20.0" y="1194.0" width="520.0" height="254.0" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.5"/>
+<text x="34.0" y="1218.0" font-size="15" font-weight="bold">Legend</text>
+<rect x="36" y="1231" width="34" height="24" rx="4" fill="#1d4ed8" stroke="#1a1a1a" stroke-width="1.5"/>
+<text x="53.0" y="1248.0" font-size="13" font-weight="bold" text-anchor="middle" fill="#ffffff">n</text>
+<text x="84.0" y="1248.0" font-size="14">+12 V constant (confirmed)</text>
+<rect x="36" y="1261" width="34" height="24" rx="4" fill="#1a1a1a" stroke="#1a1a1a" stroke-width="1.5"/>
+<text x="53.0" y="1278.0" font-size="13" font-weight="bold" text-anchor="middle" fill="#ffffff">n</text>
+<text x="84.0" y="1278.0" font-size="14">ground (confirmed)</text>
+<rect x="36" y="1291" width="34" height="24" rx="4" fill="#0f766e" stroke="#1a1a1a" stroke-width="1.5"/>
+<text x="53.0" y="1308.0" font-size="13" font-weight="bold" text-anchor="middle" fill="#ffffff">n</text>
+<text x="84.0" y="1308.0" font-size="14">CAN: socket pin confirmed, the ECM end is not</text>
+<rect x="36" y="1321" width="34" height="24" rx="4" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.5"/>
+<text x="53.0" y="1338.0" font-size="13" font-weight="bold" text-anchor="middle">n</text>
+<text x="84.0" y="1338.0" font-size="14">used by tools later: leave empty</text>
+<rect x="36" y="1351" width="34" height="24" rx="4" fill="#f8f9fa" stroke="#adb5bd" stroke-width="1.5"/>
+<text x="53.0" y="1368.0" font-size="13" font-weight="bold" text-anchor="middle" fill="#868e96">n</text>
+<text x="84.0" y="1368.0" font-size="14">not used on this bench</text>
+<polyline points="36.0,1393.0 70.0,1393.0" fill="none" stroke="#444444" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round"/>
+<text x="84.0" y="1398.0" font-size="14">solid line: confirmed (on this sheet, a label leader)</text>
+<rect x="36.0" y="1411.0" width="34.0" height="24.0" rx="4" fill="#fff1f1" stroke="#d01818" stroke-width="2" stroke-dasharray="7 5"/>
+<text x="84.0" y="1428.0" font-size="14">CHECK IN TIS BEFORE WIRING (not verified)</text>
+</svg>

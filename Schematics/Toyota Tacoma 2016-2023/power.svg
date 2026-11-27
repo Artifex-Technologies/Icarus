@@ -1,0 +1,173 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="1500" height="1210" viewBox="0 0 1500 1210" font-family="Arial, Helvetica, 'Liberation Sans', FreeSans, sans-serif" font-size="14" fill="#1a1a1a">
+<title>Bench power: 2016-2017 Tacoma 3.5 L ECM</title>
+<desc>The bench supply side for a spare 2016-2017 Tacoma 3.5 L automatic ECM: two 5 A fuses, the IGN switch, the switched +B/+B2/IGSW rail, the constant feed to OBD pin 16, the ground return, and where BATT goes once Toyota TIS gives its pin.</desc>
+<rect x="0" y="0" width="1500" height="1210" fill="#ffffff"/>
+<rect x="20.0" y="20.0" width="1460.0" height="86.0" fill="#ffffff" stroke="#1a1a1a" stroke-width="2"/>
+<text x="36.0" y="46.0" font-size="16" font-weight="bold">Bench power: the supply, fuses, IGN switch and rails</text>
+<text x="36.0" y="70.0" font-size="15">2016-2017 Tacoma 3.5 L automatic, ECM 89661-04K50..04K54</text>
+<text x="483.1" y="70.0" font-size="15" fill="#d01818">(other years, the 6-speed manual 04K60-04K64 and the 2.7 L: not verified)</text>
+<text x="36.0" y="92.0" font-size="14" fill="#555555">drawn by Icarus, 2026-11-27, verify against Toyota TIS</text>
+<text x="1464.0" y="46.0" font-size="13" text-anchor="end" fill="#555555">Sheet 2 of 3: the supply side</text>
+<text x="1464.0" y="66.0" font-size="13" text-anchor="end" fill="#555555">bench-wiring.svg: the whole bench</text>
+<text x="1464.0" y="86.0" font-size="13" text-anchor="end" fill="#555555">obd-socket.svg: the socket face, pins 1-16</text>
+<rect x="720.0" y="270.0" width="400.0" height="564.0" rx="10" fill="#eef3f9" stroke="#7a8aa0" stroke-width="1.5"/>
+<text x="736.0" y="293.0" font-size="14" font-weight="bold">Spare ECM (harness-side pigtails)</text>
+<rect x="40.0" y="200.0" width="210.0" height="460.0" rx="6" fill="#f6f6f6" stroke="#1a1a1a" stroke-width="2"/>
+<text x="54.0" y="228.0" font-size="15" font-weight="bold">Bench supply</text>
+<text x="54.0" y="249.0" font-size="14">adjustable, with a</text>
+<text x="54.0" y="270.0" font-size="14">current limit you can</text>
+<text x="54.0" y="291.0" font-size="14">set, an isolated</text>
+<text x="54.0" y="312.0" font-size="14">output and a current</text>
+<text x="54.0" y="333.0" font-size="14">readout; 5 A or more</text>
+<text x="54.0" y="400.0" font-size="14" font-weight="bold">Set, output off:</text>
+<text x="54.0" y="421.0" font-size="14">13.5 V</text>
+<text x="54.0" y="442.0" font-size="14">limit about 2 A</text>
+<text x="54.0" y="463.0" font-size="14">(3-5 A if it folds</text>
+<text x="54.0" y="484.0" font-size="14">back at turn-on)</text>
+<text x="236.0" y="506.0" font-size="16" font-weight="bold" text-anchor="end">+</text>
+<text x="236.0" y="626.0" font-size="16" font-weight="bold" text-anchor="end">−</text>
+<circle cx="250.0" cy="500.0" r="4" fill="#ffffff" stroke="#1d4ed8" stroke-width="2"/>
+<circle cx="250.0" cy="620.0" r="4" fill="#ffffff" stroke="#111111" stroke-width="2"/>
+<polyline points="254.0,500.0 300.0,500.0 330.0,500.0" fill="none" stroke="#1d4ed8" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="300.0" cy="500.0" r="4" fill="#1d4ed8"/>
+<polyline points="330.0,500.0 340.0,500.0" fill="none" stroke="#1d4ed8" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<polyline points="380.0,500.0 390.0,500.0" fill="none" stroke="#1d4ed8" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<rect x="340" y="491" width="40" height="18" fill="#ffffff" stroke="#1a1a1a" stroke-width="2"/>
+<line x1="340" y1="500" x2="380" y2="500" stroke="#1a1a1a" stroke-width="1.5"/>
+<text x="360.0" y="484.0" font-size="14" font-weight="bold" text-anchor="middle">F1 5 A</text>
+<polyline points="390.0,500.0 430.0,500.0" fill="none" stroke="#1d4ed8" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<polyline points="430.0,500.0 445.0,500.0" fill="none" stroke="#1d4ed8" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<polyline points="485.0,500.0 500.0,500.0" fill="none" stroke="#d9480f" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="448.0" cy="500.0" r="4" fill="#ffffff" stroke="#1a1a1a" stroke-width="2"/>
+<circle cx="482.0" cy="500.0" r="4" fill="#ffffff" stroke="#1a1a1a" stroke-width="2"/>
+<line x1="451" y1="498" x2="482" y2="480" stroke="#1a1a1a" stroke-width="2.2" stroke-linecap="round"/>
+<text x="465.0" y="470.0" font-size="14" font-weight="bold" text-anchor="middle">S1 IGN</text>
+<text x="465.0" y="525.0" font-size="13" text-anchor="middle" fill="#555555">switch</text>
+<polyline points="500.0,500.0 690.0,500.0 740.0,500.0" fill="none" stroke="#d9480f" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<polyline points="690.0,500.0 690.0,570.0 740.0,570.0" fill="none" stroke="#d9480f" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<polyline points="690.0,535.0 740.0,535.0" fill="none" stroke="#d9480f" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="690.0" cy="500.0" r="4" fill="#d9480f"/>
+<circle cx="690.0" cy="535.0" r="4" fill="#d9480f"/>
+<text x="508.0" y="469.0" font-size="14" fill="#d9480f">switched +12 V, after S1:</text>
+<text x="508.0" y="488.0" font-size="14" fill="#d9480f">+B, +B2 and IGSW together</text>
+<text x="318.0" y="552.0" font-size="14" fill="#1d4ed8">live whenever the supply</text>
+<text x="318.0" y="571.0" font-size="14" fill="#1d4ed8">is on, S1 or not</text>
+<polyline points="300.0,500.0 300.0,250.0 330.0,250.0" fill="none" stroke="#1d4ed8" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<polyline points="330.0,250.0 340.0,250.0" fill="none" stroke="#1d4ed8" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<polyline points="380.0,250.0 390.0,250.0" fill="none" stroke="#1d4ed8" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<rect x="340" y="241" width="40" height="18" fill="#ffffff" stroke="#1a1a1a" stroke-width="2"/>
+<line x1="340" y1="250" x2="380" y2="250" stroke="#1a1a1a" stroke-width="1.5"/>
+<text x="360.0" y="234.0" font-size="14" font-weight="bold" text-anchor="middle">F2 5 A</text>
+<polyline points="390.0,250.0 1200.0,250.0" fill="none" stroke="#1d4ed8" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<text x="420.0" y="210.0" font-size="14" fill="#1d4ed8">constant +12 V (after F2): OBD pin 16, always on while the supply is</text>
+<text x="420.0" y="229.0" font-size="14" fill="#1d4ed8">on, so the EX keeps power while S1 cycles the ECM</text>
+<polyline points="254.0,620.0 280.0,620.0 280.0,880.0 1170.0,880.0 1170.0,790.0 1200.0,790.0" fill="none" stroke="#111111" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<polyline points="1170.0,825.0 1200.0,825.0" fill="none" stroke="#111111" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="1170.0" cy="825.0" r="4" fill="#1a1a1a"/>
+<text x="320.0" y="904.0" font-size="14">supply −: the ground return for every ECM ground and OBD pins 4 and 5</text>
+<rect x="740.0" y="312.0" width="360.0" height="124.0" rx="4" fill="#fff1f1" stroke="#d01818" stroke-width="2" stroke-dasharray="7 5"/>
+<text x="752.0" y="333.0" font-size="13" font-weight="bold">BATT, constant battery +12 V</text>
+<text x="752.0" y="352.0" font-size="13">connector and pin: unknown, cut off in every public</text>
+<text x="752.0" y="371.0" font-size="13">excerpt. Once TIS gives it: wire it from the constant</text>
+<text x="752.0" y="390.0" font-size="13">rail after F2, never the switched one (my inference:</text>
+<text x="752.0" y="409.0" font-size="13">it copies the truck).</text>
+<text x="752.0" y="428.0" font-size="13" font-weight="bold" fill="#d01818">CHECK IN TIS BEFORE WIRING</text>
+<polyline points="1060.0,250.0 1060.0,312.0" fill="none" stroke="#d01818" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="7 5"/>
+<circle cx="1060.0" cy="250.0" r="4" fill="#ffffff" stroke="#d01818" stroke-width="2"/>
+<rect x="740.0" y="446.0" width="360.0" height="214.0" rx="4" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.8"/>
+<text x="754.0" y="468.0" font-size="15" font-weight="bold">E14 · 31 pins</text>
+<text x="1088.0" y="468.0" font-size="13" text-anchor="end" fill="#555555">plug 90980-12525</text>
+<text x="752.0" y="505.0" font-size="14" font-weight="bold">3</text>
+<text x="780.0" y="505.0" font-size="14">+B</text>
+<text x="840.0" y="505.0" font-size="14" fill="#555555">main power</text>
+<text x="1088.0" y="505.0" font-size="14" text-anchor="end">black</text>
+<text x="752.0" y="540.0" font-size="14" font-weight="bold">4</text>
+<text x="780.0" y="540.0" font-size="14">+B2</text>
+<text x="840.0" y="540.0" font-size="14" fill="#555555">main power 2</text>
+<text x="1088.0" y="540.0" font-size="14" text-anchor="end">black</text>
+<text x="752.0" y="575.0" font-size="14" font-weight="bold">7</text>
+<text x="780.0" y="575.0" font-size="14">IGSW</text>
+<text x="840.0" y="575.0" font-size="14" fill="#555555">ignition wake</text>
+<text x="1088.0" y="575.0" font-size="14" text-anchor="end">pink</text>
+<rect x="746.0" y="592.0" width="348.0" height="58.0" rx="4" fill="#fff1f1" stroke="#d01818" stroke-width="2" stroke-dasharray="7 5"/>
+<text x="752.0" y="611.0" font-size="14" font-weight="bold" fill="#d01818">1</text>
+<text x="780.0" y="611.0" font-size="13" fill="#d01818">possible third power pin, function unknown</text>
+<text x="780.0" y="632.0" font-size="13" font-weight="bold" fill="#d01818">not wired.  CHECK IN TIS BEFORE WIRING</text>
+<rect x="740.0" y="672.0" width="360.0" height="128.0" rx="4" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.8"/>
+<text x="754.0" y="694.0" font-size="15" font-weight="bold">ECM grounds, all W-B</text>
+<text x="754.0" y="716.0" font-size="14">E11-1 (E1, main ground)</text>
+<text x="754.0" y="738.0" font-size="14">E14-18, E13-5, E13-6</text>
+<text x="754.0" y="760.0" font-size="14">E9-3, E10-3, E12-3 (optional pigtails)</text>
+<text x="754.0" y="782.0" font-size="14" fill="#555555">each its own wire to the ground bus</text>
+<polyline points="920.0,880.0 920.0,800.0" fill="none" stroke="#111111" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="920.0" cy="880.0" r="4" fill="#1a1a1a"/>
+<text x="1200.0" y="196.0" font-size="15" font-weight="bold">OBD-II socket</text>
+<text x="1200.0" y="214.0" font-size="13" fill="#555555">female J1962</text>
+<rect x="1200.0" y="226.0" width="260.0" height="620.0" rx="6" fill="#f6f6f6" stroke="#1a1a1a" stroke-width="2"/>
+<text x="1212.0" y="255.0" font-size="14" font-weight="bold">16</text>
+<text x="1244.0" y="255.0" font-size="14">+12 V constant</text>
+<text x="1244.0" y="278.0" font-size="13" fill="#555555">powers the EX; the voltage</text>
+<text x="1244.0" y="296.0" font-size="13" fill="#555555">Icarus reads is this pin:</text>
+<text x="1244.0" y="314.0" font-size="13" fill="#555555">on the bench, the supply</text>
+<text x="1214.0" y="480.0" font-size="13" fill="#555555">6, 14: CAN</text>
+<text x="1214.0" y="499.0" font-size="13" fill="#555555">(bench-wiring.svg)</text>
+<text x="1214.0" y="518.0" font-size="13" fill="#555555">12, 15: leave empty</text>
+<text x="1212.0" y="795.0" font-size="14" font-weight="bold">4</text>
+<text x="1244.0" y="795.0" font-size="14">chassis ground</text>
+<text x="1212.0" y="830.0" font-size="14" font-weight="bold">5</text>
+<text x="1244.0" y="830.0" font-size="14">signal ground</text>
+<rect x="20.0" y="930.0" width="480.0" height="240.0" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.5"/>
+<text x="34.0" y="954.0" font-size="15" font-weight="bold">Legend</text>
+<polyline points="36.0,977.0 86.0,977.0" fill="none" stroke="#1d4ed8" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<text x="100.0" y="982.0" font-size="14">+12 V live whenever the supply is on (confirmed)</text>
+<polyline points="36.0,1005.0 86.0,1005.0" fill="none" stroke="#d9480f" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<text x="100.0" y="1010.0" font-size="14">+12 V after S1 IGN only (confirmed)</text>
+<polyline points="36.0,1033.0 86.0,1033.0" fill="none" stroke="#111111" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<text x="100.0" y="1038.0" font-size="14">ground, supply − (confirmed)</text>
+<polyline points="36.0,1061.0 86.0,1061.0" fill="none" stroke="#1d4ed8" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<polyline points="61.0,1061.0 61.0,1074.0" fill="none" stroke="#d01818" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="4 3"/>
+<circle cx="61.0" cy="1061.0" r="4" fill="#ffffff" stroke="#d01818" stroke-width="2"/>
+<text x="100.0" y="1066.0" font-size="14">open circle: join only once settled</text>
+<polyline points="36.0,1089.0 86.0,1089.0" fill="none" stroke="#1a1a1a" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<polyline points="61.0,1089.0 61.0,1100.0" fill="none" stroke="#1a1a1a" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="61.0" cy="1089.0" r="4" fill="#1a1a1a"/>
+<text x="100.0" y="1094.0" font-size="14">joined</text>
+<rect x="36.0" y="1106.0" width="50.0" height="22.0" rx="4" fill="#fff1f1" stroke="#d01818" stroke-width="2" stroke-dasharray="7 5"/>
+<text x="100.0" y="1122.0" font-size="14">CHECK IN TIS BEFORE WIRING (not verified)</text>
+<polyline points="36.0,1145.0 86.0,1145.0" fill="none" stroke="#d01818" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="8 6"/>
+<text x="100.0" y="1150.0" font-size="14">not wired until TIS or a measurement settles it</text>
+<rect x="520.0" y="930.0" width="470.0" height="260.0" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.5"/>
+<text x="534.0" y="954.0" font-size="15" font-weight="bold">Bench, not truck</text>
+<text x="536.0" y="980.0" font-size="14">•</text>
+<text x="552.0" y="980.0" font-size="14">In the truck +B and +B2 share the 15 A EFI NO.4 fuse, and IGSW</text>
+<text x="552.0" y="999.0" font-size="14">comes from the 10 A INJ fuse through the ignition.</text>
+<text x="536.0" y="1024.0" font-size="14">•</text>
+<text x="552.0" y="1024.0" font-size="14">On the bench one 5 A fuse (F1) and one switch (S1) feed all</text>
+<text x="552.0" y="1043.0" font-size="14">three: the minimal layout PCMflash shows, which matches the</text>
+<text x="552.0" y="1062.0" font-size="14">factory pins.</text>
+<text x="536.0" y="1087.0" font-size="14">•</text>
+<text x="552.0" y="1087.0" font-size="14">F2 feeds the constant rail: pin 16 and, once TIS gives its pin,</text>
+<text x="552.0" y="1106.0" font-size="14">BATT. An optional EX switch goes on the pin-16 branch only,</text>
+<text x="552.0" y="1125.0" font-size="14">after the BATT tap, so BATT stays live whenever the supply is on.</text>
+<text x="536.0" y="1150.0" font-size="14">•</text>
+<text x="552.0" y="1150.0" font-size="14">Fuses sit right at supply +, before any switch. 5 A is my</text>
+<text x="552.0" y="1169.0" font-size="14">reasoning, not a sourced rating.</text>
+<rect x="1010.0" y="930.0" width="470.0" height="253.0" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.5"/>
+<text x="1024.0" y="954.0" font-size="15" font-weight="bold">Power up, power down</text>
+<text x="1026.0" y="980.0" font-size="14" font-weight="bold">1.</text>
+<text x="1048.0" y="980.0" font-size="14">Wire everything with the supply off. Meter checks first: grounds,</text>
+<text x="1048.0" y="999.0" font-size="14">the rail not near 0 Ω to ground.</text>
+<text x="1026.0" y="1024.0" font-size="14" font-weight="bold">2.</text>
+<text x="1048.0" y="1024.0" font-size="14">Output off: set 13.5 V and the limit to about 2 A.</text>
+<text x="1026.0" y="1049.0" font-size="14" font-weight="bold">3.</text>
+<text x="1048.0" y="1049.0" font-size="14">S1 IGN on, then the output; watch the current.</text>
+<text x="1026.0" y="1074.0" font-size="14" font-weight="bold">4.</text>
+<text x="1048.0" y="1074.0" font-size="14">Folds back at turn-on? Raise the limit in steps to 3-5 A. Note idle</text>
+<text x="1048.0" y="1093.0" font-size="14">and peak current.</text>
+<text x="1026.0" y="1118.0" font-size="14" font-weight="bold">5.</text>
+<text x="1048.0" y="1118.0" font-size="14">Down: S1 IGN off, then the supply.</text>
+<text x="1026.0" y="1143.0" font-size="14" font-weight="bold">6.</text>
+<text x="1048.0" y="1143.0" font-size="14">Later flash work: 13.5 V held, never below 11.8 V or above</text>
+<text x="1048.0" y="1162.0" font-size="14">16.0 V (T-SB-0134-16).</text>
+</svg>

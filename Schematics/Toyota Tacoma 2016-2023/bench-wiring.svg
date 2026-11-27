@@ -1,0 +1,328 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="1800" height="1552" viewBox="0 0 1800 1552" font-family="Arial, Helvetica, 'Liberation Sans', FreeSans, sans-serif" font-size="14" fill="#1a1a1a">
+<title>Bench wiring: 2016-2017 Tacoma 3.5 L ECM</title>
+<desc>A spare 2016-2017 Tacoma 3.5 L automatic ECM (89661-04K50..04K54) powered on a desk and read through an OBD-II socket by an OBDLink EX and Icarus. Only confirmed pins are drawn as connections; unverified ones are dashed red CHECK IN TIS boxes.</desc>
+<rect x="0" y="0" width="1800" height="1552" fill="#ffffff"/>
+<rect x="20.0" y="20.0" width="1760.0" height="86.0" fill="#ffffff" stroke="#1a1a1a" stroke-width="2"/>
+<text x="36.0" y="46.0" font-size="16" font-weight="bold">Bench wiring: a spare ECM on a desk, read by an OBDLink EX and Icarus</text>
+<text x="36.0" y="70.0" font-size="15">2016-2017 Tacoma 3.5 L automatic, ECM 89661-04K50..04K54</text>
+<text x="483.1" y="70.0" font-size="15" fill="#d01818">(other years, the 6-speed manual 04K60-04K64 and the 2.7 L: not verified)</text>
+<text x="36.0" y="92.0" font-size="14" fill="#555555">drawn by Icarus, 2026-11-27, verify against Toyota TIS</text>
+<text x="1764.0" y="46.0" font-size="13" text-anchor="end" fill="#555555">Sheet 1 of 3: the whole bench</text>
+<text x="1764.0" y="66.0" font-size="13" text-anchor="end" fill="#555555">power.svg: the supply side in detail</text>
+<text x="1764.0" y="86.0" font-size="13" text-anchor="end" fill="#555555">obd-socket.svg: the socket face, pins 1-16</text>
+<rect x="610.0" y="172.0" width="350.0" height="838.0" rx="10" fill="#eef3f9" stroke="#7a8aa0" stroke-width="1.5"/>
+<text x="626.0" y="196.0" font-size="14" font-weight="bold">Spare ECM, harness-side pigtails</text>
+<rect x="40.0" y="230.0" width="200.0" height="200.0" rx="6" fill="#f6f6f6" stroke="#1a1a1a" stroke-width="2"/>
+<text x="54.0" y="258.0" font-size="15" font-weight="bold">Bench supply</text>
+<text x="54.0" y="280.0" font-size="14">current-limited,</text>
+<text x="54.0" y="302.0" font-size="14">isolated output</text>
+<text x="54.0" y="324.0" font-size="14">set 13.5 V,</text>
+<text x="54.0" y="346.0" font-size="14">limit about 2 A</text>
+<text x="54.0" y="368.0" font-size="14">to start</text>
+<text x="228.0" y="291.0" font-size="16" font-weight="bold" text-anchor="end">+</text>
+<text x="228.0" y="401.0" font-size="16" font-weight="bold" text-anchor="end">−</text>
+<circle cx="240.0" cy="285.0" r="4" fill="#ffffff" stroke="#1d4ed8" stroke-width="2"/>
+<circle cx="240.0" cy="395.0" r="4" fill="#ffffff" stroke="#111111" stroke-width="2"/>
+<polyline points="244.0,285.0 290.0,285.0 320.0,285.0" fill="none" stroke="#1d4ed8" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="290.0" cy="285.0" r="4" fill="#1d4ed8"/>
+<polyline points="320.0,285.0 330.0,285.0" fill="none" stroke="#1d4ed8" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<polyline points="370.0,285.0 380.0,285.0" fill="none" stroke="#1d4ed8" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<rect x="330" y="276" width="40" height="18" fill="#ffffff" stroke="#1a1a1a" stroke-width="2"/>
+<line x1="330" y1="285" x2="370" y2="285" stroke="#1a1a1a" stroke-width="1.5"/>
+<text x="350.0" y="269.0" font-size="14" font-weight="bold" text-anchor="middle">F1 5 A</text>
+<polyline points="380.0,285.0 420.0,285.0" fill="none" stroke="#1d4ed8" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<polyline points="420.0,285.0 435.0,285.0" fill="none" stroke="#1d4ed8" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<polyline points="475.0,285.0 490.0,285.0" fill="none" stroke="#d9480f" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="438.0" cy="285.0" r="4" fill="#ffffff" stroke="#1a1a1a" stroke-width="2"/>
+<circle cx="472.0" cy="285.0" r="4" fill="#ffffff" stroke="#1a1a1a" stroke-width="2"/>
+<line x1="441" y1="283" x2="472" y2="265" stroke="#1a1a1a" stroke-width="2.2" stroke-linecap="round"/>
+<text x="455.0" y="255.0" font-size="14" font-weight="bold" text-anchor="middle">S1 IGN</text>
+<text x="455.0" y="310.0" font-size="13" text-anchor="middle" fill="#555555">switch</text>
+<polyline points="490.0,285.0 585.0,285.0 640.0,285.0" fill="none" stroke="#d9480f" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<text x="575.0" y="336.0" font-size="14" text-anchor="end" fill="#d9480f">switched +12 V</text>
+<text x="575.0" y="355.0" font-size="14" text-anchor="end" fill="#d9480f">after S1</text>
+<polyline points="290.0,285.0 290.0,150.0 320.0,150.0" fill="none" stroke="#1d4ed8" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<polyline points="320.0,150.0 330.0,150.0" fill="none" stroke="#1d4ed8" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<polyline points="370.0,150.0 380.0,150.0" fill="none" stroke="#1d4ed8" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<rect x="330" y="141" width="40" height="18" fill="#ffffff" stroke="#1a1a1a" stroke-width="2"/>
+<line x1="330" y1="150" x2="370" y2="150" stroke="#1a1a1a" stroke-width="1.5"/>
+<text x="350.0" y="134.0" font-size="14" font-weight="bold" text-anchor="middle">F2 5 A</text>
+<polyline points="380.0,150.0 1325.0,150.0 1325.0,480.0 1380.0,480.0" fill="none" stroke="#1d4ed8" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<text x="460.0" y="141.0" font-size="14" fill="#1d4ed8">constant +12 V (F2) → OBD pin 16: powers the EX, and is the voltage Icarus reads</text>
+<polyline points="244.0,395.0 270.0,395.0 270.0,1045.0 1350.0,1045.0 1350.0,760.0 1380.0,760.0" fill="none" stroke="#111111" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<polyline points="1350.0,800.0 1380.0,800.0" fill="none" stroke="#111111" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="1350.0" cy="800.0" r="4" fill="#1a1a1a"/>
+<text x="700.0" y="1069.0" font-size="14">ground: supply − to every ECM ground and to OBD pins 4 and 5</text>
+<rect x="640.0" y="212.0" width="300.0" height="263.0" rx="4" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.8"/>
+<text x="654.0" y="234.0" font-size="15" font-weight="bold">E14 · 31 pins</text>
+<text x="654.0" y="253.0" font-size="13" fill="#555555">harness plug 90980-12525</text>
+<text x="652.0" y="290.0" font-size="14" font-weight="bold">3</text>
+<text x="686.0" y="290.0" font-size="14">+B</text>
+<text x="744.0" y="290.0" font-size="14" fill="#555555">main power</text>
+<text x="928.0" y="290.0" font-size="14" text-anchor="end">black</text>
+<text x="652.0" y="320.0" font-size="14" font-weight="bold">4</text>
+<text x="686.0" y="320.0" font-size="14">+B2</text>
+<text x="744.0" y="320.0" font-size="14" fill="#555555">main power 2</text>
+<text x="928.0" y="320.0" font-size="14" text-anchor="end">black</text>
+<text x="652.0" y="350.0" font-size="14" font-weight="bold">7</text>
+<text x="686.0" y="350.0" font-size="14">IGSW</text>
+<text x="744.0" y="350.0" font-size="14" fill="#555555">ignition wake</text>
+<text x="928.0" y="350.0" font-size="14" text-anchor="end">pink</text>
+<text x="652.0" y="385.0" font-size="14" font-weight="bold">18</text>
+<text x="686.0" y="385.0" font-size="14">EC</text>
+<text x="744.0" y="385.0" font-size="14" fill="#555555">ground</text>
+<text x="928.0" y="385.0" font-size="14" text-anchor="end">W-B</text>
+<polyline points="585.0,285.0 585.0,345.0 640.0,345.0" fill="none" stroke="#d9480f" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<polyline points="585.0,315.0 640.0,315.0" fill="none" stroke="#d9480f" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="585.0" cy="285.0" r="4" fill="#d9480f"/>
+<circle cx="585.0" cy="315.0" r="4" fill="#d9480f"/>
+<rect x="646.0" y="400.0" width="288.0" height="28.0" rx="4" fill="#fff1f1" stroke="#d01818" stroke-width="2" stroke-dasharray="7 5"/>
+<text x="652.0" y="419.0" font-size="14" font-weight="bold" fill="#d01818">10</text>
+<text x="686.0" y="419.0" font-size="14" fill="#d01818">BOOT (likely)</text>
+<polyline points="934.0,414.0 972.0,414.0" fill="none" stroke="#d01818" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="7 5"/>
+<rect x="972" y="407" width="16" height="14" rx="4" fill="#555555" stroke="#1a1a1a" stroke-width="1.2"/>
+<rect x="1000.0" y="362.0" width="290.0" height="72.0" rx="4" fill="#fff1f1" stroke="#d01818" stroke-width="2" stroke-dasharray="7 5"/>
+<text x="1012.0" y="383.0" font-size="13" font-weight="bold">E14-10 BOOT (likely, PCMflash only)</text>
+<text x="1012.0" y="402.0" font-size="13">insulate it, leave it unconnected</text>
+<text x="1012.0" y="421.0" font-size="13" font-weight="bold" fill="#d01818">CHECK IN TIS BEFORE WIRING</text>
+<rect x="646.0" y="437.0" width="288.0" height="28.0" rx="4" fill="#fff1f1" stroke="#d01818" stroke-width="2" stroke-dasharray="7 5"/>
+<text x="652.0" y="456.0" font-size="14" font-weight="bold" fill="#d01818">1</text>
+<text x="686.0" y="456.0" font-size="14" fill="#d01818">? function unknown</text>
+<polyline points="934.0,451.0 1000.0,451.0" fill="none" stroke="#d01818" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="7 5"/>
+<rect x="1000.0" y="444.0" width="290.0" height="92.0" rx="4" fill="#fff1f1" stroke="#d01818" stroke-width="2" stroke-dasharray="7 5"/>
+<text x="1012.0" y="465.0" font-size="13" font-weight="bold">E14-1: a possible third power pin</text>
+<text x="1012.0" y="484.0" font-size="13">a 2018 owner's recovery bench powered it;</text>
+<text x="1012.0" y="503.0" font-size="13">function unknown. Not wired.</text>
+<text x="1012.0" y="522.0" font-size="13" font-weight="bold" fill="#d01818">CHECK IN TIS BEFORE WIRING</text>
+<rect x="1000.0" y="174.0" width="290.0" height="130.0" rx="4" fill="#fff1f1" stroke="#d01818" stroke-width="2" stroke-dasharray="7 5"/>
+<text x="1012.0" y="195.0" font-size="13" font-weight="bold">BATT, constant battery +12 V</text>
+<text x="1012.0" y="214.0" font-size="13">connector and pin: unknown (cut off</text>
+<text x="1012.0" y="233.0" font-size="13">in every public excerpt). Once TIS gives it,</text>
+<text x="1012.0" y="252.0" font-size="13">feed it from this constant rail (my</text>
+<text x="1012.0" y="271.0" font-size="13">inference: it copies the truck).</text>
+<text x="1012.0" y="290.0" font-size="13" font-weight="bold" fill="#d01818">CHECK IN TIS BEFORE WIRING</text>
+<polyline points="1140.0,150.0 1140.0,174.0" fill="none" stroke="#d01818" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="7 5"/>
+<circle cx="1140.0" cy="150.0" r="4" fill="#ffffff" stroke="#d01818" stroke-width="2"/>
+<polyline points="1000.0,236.0 960.0,236.0" fill="none" stroke="#d01818" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="7 5"/>
+<rect x="640.0" y="505.0" width="300.0" height="200.0" rx="4" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.8"/>
+<text x="654.0" y="527.0" font-size="15" font-weight="bold">E13 · 35 pins</text>
+<text x="654.0" y="546.0" font-size="13" fill="#555555">harness plug 90980-12529</text>
+<text x="652.0" y="585.0" font-size="14" font-weight="bold">5</text>
+<text x="686.0" y="585.0" font-size="14">E05</text>
+<text x="732.0" y="585.0" font-size="14">W-B</text>
+<text x="652.0" y="615.0" font-size="14" font-weight="bold">6</text>
+<text x="686.0" y="615.0" font-size="14">E04</text>
+<text x="732.0" y="615.0" font-size="14">W-B</text>
+<rect x="790.0" y="562.0" width="144.0" height="134.0" rx="4" fill="#fff1f1" stroke="#d01818" stroke-width="2" stroke-dasharray="7 5"/>
+<text x="800.0" y="582.0" font-size="14" font-weight="bold">E13-27, E13-35</text>
+<text x="800.0" y="601.0" font-size="13">likely the CAN pair;</text>
+<text x="800.0" y="620.0" font-size="13">which is CAN-H:</text>
+<text x="800.0" y="639.0" font-size="13">unverified</text>
+<text x="800.0" y="658.0" font-size="13" font-weight="bold" fill="#d01818">CHECK IN TIS</text>
+<text x="800.0" y="677.0" font-size="13" font-weight="bold" fill="#d01818">BEFORE WIRING</text>
+<polyline points="934.0,600.0 1320.0,600.0" fill="none" stroke="#d01818" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="9 6"/>
+<polyline points="1320.0,600.0 1380.0,600.0" fill="none" stroke="#0f766e" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<text x="990.0" y="591.0" font-size="14" font-weight="bold" fill="#d01818">CAN-H: ECM pin from TIS</text>
+<polyline points="934.0,680.0 1320.0,680.0" fill="none" stroke="#d01818" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="9 6"/>
+<polyline points="1320.0,680.0 1380.0,680.0" fill="none" stroke="#0f766e" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<text x="990.0" y="702.0" font-size="14" font-weight="bold" fill="#d01818">CAN-L: ECM pin from TIS</text>
+<text x="990.0" y="645.0" font-size="14" fill="#d01818">twisted pair</text>
+<polyline points="1320.0,600.0 1320.0,620.0" fill="none" stroke="#1a1a1a" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<polyline points="1320.0,660.0 1320.0,680.0" fill="none" stroke="#1a1a1a" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<polyline points="1320.0,620.0 1327.0,623.3 1313.0,630.0 1327.0,636.7 1313.0,643.3 1327.0,650.0 1313.0,656.7 1320.0,660.0" fill="none" stroke="#1a1a1a" stroke-width="2"/>
+<circle cx="1320.0" cy="600.0" r="4" fill="#1a1a1a"/>
+<circle cx="1320.0" cy="680.0" r="4" fill="#1a1a1a"/>
+<text x="1308.0" y="636.0" font-size="14" font-weight="bold" text-anchor="end">R1</text>
+<text x="1308.0" y="654.0" font-size="14" text-anchor="end">120 Ω</text>
+<rect x="1143.0" y="610.0" width="106.0" height="60.0" rx="4" fill="#fff1f1" stroke="#d01818" stroke-width="2" stroke-dasharray="7 5"/>
+<polyline points="1225.0,600.0 1225.0,620.0" fill="none" stroke="#d01818" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="5 4"/>
+<polyline points="1225.0,660.0 1225.0,680.0" fill="none" stroke="#d01818" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="5 4"/>
+<polyline points="1225.0,620.0 1232.0,623.3 1218.0,630.0 1232.0,636.7 1218.0,643.3 1232.0,650.0 1218.0,656.7 1225.0,660.0" fill="none" stroke="#d01818" stroke-width="2" stroke-dasharray="5 4"/>
+<circle cx="1225.0" cy="600.0" r="4" fill="#ffffff" stroke="#d01818" stroke-width="2"/>
+<circle cx="1225.0" cy="680.0" r="4" fill="#ffffff" stroke="#d01818" stroke-width="2"/>
+<text x="1207.0" y="636.0" font-size="14" font-weight="bold" text-anchor="end" fill="#d01818">R2</text>
+<text x="1207.0" y="654.0" font-size="14" text-anchor="end" fill="#d01818">120 Ω</text>
+<rect x="1000.0" y="712.0" width="290.0" height="131.0" rx="4" fill="#fff1f1" stroke="#d01818" stroke-width="2" stroke-dasharray="7 5"/>
+<text x="1012.0" y="733.0" font-size="13" font-weight="bold">120 Ω inside the ECM? MEASURE FIRST</text>
+<text x="1012.0" y="752.0" font-size="13" font-weight="bold" fill="#d01818">CHECK BEFORE WIRING</text>
+<text x="1012.0" y="771.0" font-size="13">Power off, ECM CAN-H to CAN-L. About</text>
+<text x="1012.0" y="790.0" font-size="13">120 Ω: it has one, fit R1 only. Open or</text>
+<text x="1012.0" y="809.0" font-size="13">kilohms: none, fit R1 and R2. Across socket</text>
+<text x="1012.0" y="828.0" font-size="13">pins 6 and 14 you then read about 60 Ω.</text>
+<rect x="640.0" y="735.0" width="300.0" height="90.0" rx="4" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.8"/>
+<text x="654.0" y="757.0" font-size="15" font-weight="bold">E11 · 32 pins</text>
+<text x="654.0" y="776.0" font-size="13" fill="#555555">harness plug 90980-12526</text>
+<text x="652.0" y="810.0" font-size="14" font-weight="bold">1</text>
+<text x="686.0" y="810.0" font-size="14">E1</text>
+<text x="744.0" y="810.0" font-size="14" fill="#555555">main ground</text>
+<text x="928.0" y="810.0" font-size="14" text-anchor="end">W-B</text>
+<rect x="640.0" y="855.0" width="300.0" height="135.0" rx="4" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.8"/>
+<text x="654.0" y="877.0" font-size="15" font-weight="bold">E9, E10, E12: optional pigtails</text>
+<text x="652.0" y="915.0" font-size="14" font-weight="bold">E9-3</text>
+<text x="712.0" y="915.0" font-size="14">E01</text>
+<text x="764.0" y="915.0" font-size="14" fill="#555555">ground</text>
+<text x="928.0" y="915.0" font-size="14" text-anchor="end">W-B</text>
+<text x="652.0" y="945.0" font-size="14" font-weight="bold">E10-3</text>
+<text x="712.0" y="945.0" font-size="14">E02</text>
+<text x="764.0" y="945.0" font-size="14" fill="#555555">ground</text>
+<text x="928.0" y="945.0" font-size="14" text-anchor="end">W-B</text>
+<text x="652.0" y="975.0" font-size="14" font-weight="bold">E12-3</text>
+<text x="712.0" y="975.0" font-size="14">ME01</text>
+<text x="764.0" y="975.0" font-size="14" fill="#555555">ground</text>
+<text x="928.0" y="975.0" font-size="14" text-anchor="end">W-B</text>
+<polyline points="545.0,1045.0 545.0,380.0 640.0,380.0" fill="none" stroke="#111111" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<polyline points="545.0,580.0 640.0,580.0" fill="none" stroke="#111111" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="545.0" cy="580.0" r="4" fill="#1a1a1a"/>
+<polyline points="545.0,610.0 640.0,610.0" fill="none" stroke="#111111" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="545.0" cy="610.0" r="4" fill="#1a1a1a"/>
+<polyline points="545.0,805.0 640.0,805.0" fill="none" stroke="#111111" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="545.0" cy="805.0" r="4" fill="#1a1a1a"/>
+<polyline points="545.0,910.0 640.0,910.0" fill="none" stroke="#111111" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="545.0" cy="910.0" r="4" fill="#1a1a1a"/>
+<polyline points="545.0,940.0 640.0,940.0" fill="none" stroke="#111111" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="545.0" cy="940.0" r="4" fill="#1a1a1a"/>
+<polyline points="545.0,970.0 640.0,970.0" fill="none" stroke="#111111" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="545.0" cy="970.0" r="4" fill="#1a1a1a"/>
+<circle cx="545.0" cy="1045.0" r="4" fill="#1a1a1a"/>
+<text x="1380.0" y="412.0" font-size="15" font-weight="bold">OBD-II socket</text>
+<text x="1380.0" y="430.0" font-size="13" fill="#555555">female J1962, wired on its back</text>
+<rect x="1380.0" y="442.0" width="170.0" height="462.0" rx="6" fill="#f6f6f6" stroke="#1a1a1a" stroke-width="2"/>
+<text x="1392.0" y="485.0" font-size="14" font-weight="bold">16</text>
+<text x="1422.0" y="485.0" font-size="14">+12 V constant</text>
+<text x="1392.0" y="605.0" font-size="14" font-weight="bold">6</text>
+<text x="1422.0" y="605.0" font-size="14">CAN-H</text>
+<text x="1392.0" y="685.0" font-size="14" font-weight="bold">14</text>
+<text x="1422.0" y="685.0" font-size="14">CAN-L</text>
+<text x="1392.0" y="765.0" font-size="14" font-weight="bold">4</text>
+<text x="1422.0" y="765.0" font-size="14">chassis ground</text>
+<text x="1392.0" y="805.0" font-size="14" font-weight="bold">5</text>
+<text x="1422.0" y="805.0" font-size="14">signal ground</text>
+<text x="1392.0" y="850.0" font-size="14" font-weight="bold">12</text>
+<text x="1422.0" y="850.0" font-size="14" fill="#555555">leave empty</text>
+<text x="1392.0" y="885.0" font-size="14" font-weight="bold">15</text>
+<text x="1422.0" y="885.0" font-size="14" fill="#555555">leave empty</text>
+<path d="M1373,838 L1387,852 M1373,852 L1387,838" stroke="#1a1a1a" stroke-width="2.2"/>
+<path d="M1373,873 L1387,887 M1373,887 L1387,873" stroke="#1a1a1a" stroke-width="2.2"/>
+<rect x="1600.0" y="560.0" width="180.0" height="160.0" rx="6" fill="#f6f6f6" stroke="#1a1a1a" stroke-width="2"/>
+<text x="1612.0" y="585.0" font-size="15" font-weight="bold">OBDLink EX</text>
+<text x="1612.0" y="605.0" font-size="13">plugs into the socket</text>
+<text x="1612.0" y="625.0" font-size="13">USB, FT231X serial</text>
+<text x="1612.0" y="645.0" font-size="13">LED yellow, then</text>
+<text x="1612.0" y="665.0" font-size="13">green once pin 16</text>
+<text x="1612.0" y="685.0" font-size="13">has power</text>
+<rect x="1550" y="628" width="50" height="24" fill="#9aa3ad" stroke="#1a1a1a" stroke-width="1.5"/>
+<text x="1700.0" y="845.0" font-size="14" font-weight="bold" fill="#6b7280">USB</text>
+<polyline points="1690.0,720.0 1690.0,930.0" fill="none" stroke="#6b7280" stroke-width="4" stroke-linejoin="round" stroke-linecap="round"/>
+<rect x="1390.0" y="930.0" width="390.0" height="224.0" rx="6" fill="#f6f6f6" stroke="#1a1a1a" stroke-width="2"/>
+<text x="1404.0" y="954.0" font-size="15" font-weight="bold">Laptop: Icarus, command line</text>
+<text x="1404.0" y="978.0" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace">ls /dev/serial/by-id/</text>
+<text x="1404.0" y="997.0" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace">unset ICARUS_ADAPTER</text>
+<text x="1404.0" y="1016.0" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace">icarus devices</text>
+<text x="1404.0" y="1035.0" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace">EX=/dev/serial/by-id/usb-XXXX@115200</text>
+<text x="1404.0" y="1054.0" font-size="13" fill="#555555" font-family="Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace"># usb-XXXX: the name ls printed</text>
+<text x="1404.0" y="1073.0" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace">icarus obd info  --adapter $EX</text>
+<text x="1404.0" y="1092.0" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace">icarus obd codes --adapter $EX</text>
+<text x="1404.0" y="1111.0" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace">icarus obd live  --adapter $EX 0C 0D 42</text>
+<text x="1404.0" y="1130.0" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace">icarus obd module 7E0 --adapter $EX</text>
+<rect x="20.0" y="462.0" width="236.0" height="278.0" rx="6" fill="#ffffff" stroke="#d01818" stroke-width="2.5"/>
+<text x="32.0" y="486.0" font-size="15" font-weight="bold" fill="#d01818">MIRROR VIEWS</text>
+<text x="32.0" y="506.0" font-size="13">ECM-face drawings and</text>
+<text x="32.0" y="525.0" font-size="13">harness-plug drawings are mirror</text>
+<text x="32.0" y="544.0" font-size="13">images. Identify every wire by its</text>
+<text x="32.0" y="563.0" font-size="13">color on the pigtail before you trust</text>
+<text x="32.0" y="582.0" font-size="13">a cavity number:</text>
+<text x="32.0" y="605.0" font-size="13">E14-3, E14-4: black</text>
+<text x="32.0" y="624.0" font-size="13">E14-7: pink</text>
+<text x="32.0" y="643.0" font-size="13">E11-1 and every ground:</text>
+<text x="32.0" y="662.0" font-size="13">white with black stripe (W-B)</text>
+<text x="32.0" y="685.0" font-size="13" font-weight="bold">Colors don't match: stop. Even</text>
+<text x="32.0" y="704.0" font-size="13" font-weight="bold">confirmed pins: check TIS for</text>
+<text x="32.0" y="723.0" font-size="13" font-weight="bold">this ECM's build date.</text>
+<rect x="20.0" y="760.0" width="236.0" height="237.0" rx="6" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.5"/>
+<text x="32.0" y="784.0" font-size="15" font-weight="bold">Power-up order</text>
+<text x="32.0" y="808.0" font-size="13" font-weight="bold">1.</text>
+<text x="54.0" y="808.0" font-size="13">Wire with the power off; meter</text>
+<text x="54.0" y="826.0" font-size="13">checks pass.</text>
+<text x="32.0" y="849.0" font-size="13" font-weight="bold">2.</text>
+<text x="54.0" y="849.0" font-size="13">Output off: set 13.5 V, limit</text>
+<text x="54.0" y="867.0" font-size="13">about 2 A.</text>
+<text x="32.0" y="890.0" font-size="13" font-weight="bold">3.</text>
+<text x="54.0" y="890.0" font-size="13">IGN on, then the output; watch</text>
+<text x="54.0" y="908.0" font-size="13">the current.</text>
+<text x="32.0" y="931.0" font-size="13" font-weight="bold">4.</text>
+<text x="54.0" y="931.0" font-size="13">Folds back? Raise the limit in</text>
+<text x="54.0" y="949.0" font-size="13">steps to 3-5 A.</text>
+<text x="32.0" y="972.0" font-size="13" font-weight="bold">5.</text>
+<text x="54.0" y="972.0" font-size="13">Down: IGN off, then the supply.</text>
+<rect x="20.0" y="1180.0" width="500.0" height="352.0" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.5"/>
+<text x="34.0" y="1204.0" font-size="15" font-weight="bold">Legend</text>
+<polyline points="36.0,1227.0 86.0,1227.0" fill="none" stroke="#1d4ed8" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<text x="100.0" y="1232.0" font-size="14">+12 V live whenever the supply is on (confirmed)</text>
+<polyline points="36.0,1255.0 86.0,1255.0" fill="none" stroke="#d9480f" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<text x="100.0" y="1260.0" font-size="14">+12 V after S1 IGN only (confirmed)</text>
+<polyline points="36.0,1283.0 86.0,1283.0" fill="none" stroke="#111111" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<text x="100.0" y="1288.0" font-size="14">ground, supply − (confirmed)</text>
+<polyline points="36.0,1311.0 86.0,1311.0" fill="none" stroke="#0f766e" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<text x="100.0" y="1316.0" font-size="14">CAN at the socket: pins 6, 14 and R1 (confirmed)</text>
+<polyline points="36.0,1339.0 86.0,1339.0" fill="none" stroke="#6b7280" stroke-width="4" stroke-linejoin="round" stroke-linecap="round"/>
+<text x="100.0" y="1344.0" font-size="14">USB cable</text>
+<path d="M54,1360 L68,1374 M54,1374 L68,1360" stroke="#1a1a1a" stroke-width="2.2"/>
+<text x="100.0" y="1372.0" font-size="14">leave empty</text>
+<polyline points="36.0,1395.0 68.0,1395.0" fill="none" stroke="#1a1a1a" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<rect x="68" y="1388" width="16" height="14" rx="4" fill="#555555" stroke="#1a1a1a" stroke-width="1.2"/>
+<text x="100.0" y="1400.0" font-size="14">insulated end, not connected</text>
+<polyline points="36.0,1423.0 86.0,1423.0" fill="none" stroke="#1a1a1a" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<polyline points="61.0,1423.0 61.0,1434.0" fill="none" stroke="#1a1a1a" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="61.0" cy="1423.0" r="4" fill="#1a1a1a"/>
+<text x="100.0" y="1428.0" font-size="14">joined</text>
+<polyline points="36.0,1451.0 86.0,1451.0" fill="none" stroke="#1d4ed8" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<polyline points="61.0,1451.0 61.0,1464.0" fill="none" stroke="#d01818" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="4 3"/>
+<circle cx="61.0" cy="1451.0" r="4" fill="#ffffff" stroke="#d01818" stroke-width="2"/>
+<text x="100.0" y="1456.0" font-size="14">open circle: join only once settled</text>
+<rect x="36.0" y="1468.0" width="50.0" height="22.0" rx="4" fill="#fff1f1" stroke="#d01818" stroke-width="2" stroke-dasharray="7 5"/>
+<text x="100.0" y="1484.0" font-size="14">CHECK IN TIS BEFORE WIRING (not verified)</text>
+<polyline points="36.0,1507.0 86.0,1507.0" fill="none" stroke="#d01818" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="8 6"/>
+<text x="100.0" y="1512.0" font-size="14">not wired until TIS or a measurement settles it</text>
+<rect x="540.0" y="1180.0" width="600.0" height="352.0" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.5"/>
+<text x="554.0" y="1204.0" font-size="15" font-weight="bold">Safety</text>
+<text x="556.0" y="1230.0" font-size="14">•</text>
+<text x="572.0" y="1230.0" font-size="14">A bench supply with a current limit you can set and an isolated output: 13.5 V, the limit</text>
+<text x="572.0" y="1249.0" font-size="14">about 2 A to start (my reasoning, not a sourced figure).</text>
+<text x="556.0" y="1274.0" font-size="14">•</text>
+<text x="572.0" y="1274.0" font-size="14">Fuses first: F1 and F2 (5 A each) sit right at supply +, before the IGN switch.</text>
+<text x="556.0" y="1299.0" font-size="14">•</text>
+<text x="572.0" y="1299.0" font-size="14">Never a truck battery, a jump pack or a supply without a settable limit: they push tens</text>
+<text x="572.0" y="1318.0" font-size="14">of amps into a miswired pin.</text>
+<text x="556.0" y="1343.0" font-size="14">•</text>
+<text x="572.0" y="1343.0" font-size="14">Power off (IGN off, output off) whenever you wire or rewire.</text>
+<text x="556.0" y="1368.0" font-size="14">•</text>
+<text x="572.0" y="1368.0" font-size="14">CAN as a twisted pair. R1 (120 Ω) at the socket always; R2 only when the ECM has</text>
+<text x="572.0" y="1387.0" font-size="14">no terminator inside.</text>
+<text x="556.0" y="1412.0" font-size="14">•</text>
+<text x="572.0" y="1412.0" font-size="14">BOOT stays insulated. Never connect the bench to the truck or power it from the truck;</text>
+<text x="572.0" y="1431.0" font-size="14">keep other adapters off.</text>
+<text x="556.0" y="1456.0" font-size="14">•</text>
+<text x="572.0" y="1456.0" font-size="14">Later flash work: hold 13.5 V, never below 11.8 V or above 16.0 V (T-SB-0134-16).</text>
+<rect x="1160.0" y="1180.0" width="620.0" height="352.0" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.5"/>
+<text x="1174.0" y="1204.0" font-size="15" font-weight="bold">Before power (meter, power off)</text>
+<text x="1176.0" y="1230.0" font-size="14">•</text>
+<text x="1192.0" y="1230.0" font-size="14">Every ground pin to supply −: continuity.</text>
+<text x="1176.0" y="1255.0" font-size="14">•</text>
+<text x="1192.0" y="1255.0" font-size="14">The +B / +B2 / IGSW rail to ground: not near 0 Ω.</text>
+<text x="1176.0" y="1280.0" font-size="14">•</text>
+<text x="1192.0" y="1280.0" font-size="14">Socket pins 6 to 14: about 60 Ω (R1 with the ECM's own terminator, or R1 with R2).</text>
+<text x="1174.0" y="1315.0" font-size="15" font-weight="bold">Not drawn, on purpose</text>
+<text x="1176.0" y="1341.0" font-size="14">•</text>
+<text x="1192.0" y="1341.0" font-size="14">Every other cavity and socket pin: leave empty.</text>
+<text x="1176.0" y="1366.0" font-size="14">•</text>
+<text x="1192.0" y="1366.0" font-size="14">Never wire from PCMflash's six-connector pin table or its connector D row 3 and 4</text>
+<text x="1192.0" y="1385.0" font-size="14">numbers, any 2.7 L (2TR-FE) pinout, PCMflash's two-connector or 2GR-FXS/8GR-FXS</text>
+<text x="1192.0" y="1404.0" font-size="14">layouts, or the Lexus IS pins.</text>
+<text x="1176.0" y="1429.0" font-size="14">•</text>
+<text x="1192.0" y="1429.0" font-size="14">6-speed manual (04K60-04K64) and 2018+ ECMs: their pins weren't compared with this</text>
+<text x="1192.0" y="1448.0" font-size="14">ECM's (for 2018+, only MREL was), so this drawing isn't verified for them.</text>
+<text x="1176.0" y="1473.0" font-size="14">•</text>
+<text x="1192.0" y="1473.0" font-size="14">Nothing answers? EX LED green, about 60 Ω across 6 and 14, the grounds, the CAN</text>
+<text x="1192.0" y="1492.0" font-size="14">pins against TIS. Never tie BOOT to make it answer.</text>
+</svg>
