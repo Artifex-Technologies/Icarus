@@ -23,6 +23,7 @@ pub trait Port {
 ///   `slcan:/dev/ttyACM0[@baud][#bitrate]`     an SLCAN adapter on a serial port, for watching the bus listen-only
 ///                                             (115200 baud and 500 kbit/s unless given)
 ///   `openport` or `openport:/dev/ttyACM0`     a Tactrix OpenPort 2.0 J2534 cable (the first one plugged in, or that port)
+///   `mongoose:/dev/ttyACM0`        a Drewtech Mongoose Pro J2534 cable on that port (raw CAN at 500 kbit/s, Icarus's ISO-TP)
 ///   `sim:j2534`                    the simulated car behind a simulated J2534 device
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
@@ -63,6 +64,8 @@ pub enum J2534Device {
     Sim,
     /// `openport` (the first one plugged in) or `openport:/dev/ttyACM0`: a Tactrix OpenPort 2.0 (`openport`).
     OpenPort(Option<String>),
+    /// `mongoose:/dev/ttyACM0`: a Drewtech Mongoose Pro on that serial port (`mongoose`).
+    Mongoose(String),
 }
 
 /// Whether `s` is a CAN interface's usual name: `can` or `vcan` and a number.
@@ -91,6 +94,14 @@ impl Target {
         }
         if s == "openport" {
             return Ok(Target::J2534(J2534Device::OpenPort(None)));
+        }
+        if let Some(path) = s.strip_prefix("mongoose:") {
+            if !path.starts_with('/') {
+                return Err(
+                    "mongoose: needs the cable's serial port, e.g. mongoose:/dev/ttyACM0".into(),
+                );
+            }
+            return Ok(Target::J2534(J2534Device::Mongoose(path.to_string())));
         }
         if let Some(path) = s.strip_prefix("openport:") {
             if !path.starts_with('/') {
@@ -192,7 +203,7 @@ impl Target {
                 baud,
             });
         }
-        Err(format!("unknown adapter {s:?}: use sim, /dev/ttyUSB0[@baud], bt:AA:BB:CC:DD:EE:FF[#channel], tcp:host:port, can:can0, slcan:/dev/ttyACM0 or openport"))
+        Err(format!("unknown adapter {s:?}: use sim, /dev/ttyUSB0[@baud], bt:AA:BB:CC:DD:EE:FF[#channel], tcp:host:port, can:can0, slcan:/dev/ttyACM0, openport or mongoose:/dev/ttyACM0"))
     }
 
     /// The byte stream to an ELM327/STN adapter. A CAN interface is not one: it is reached frame by frame
@@ -471,6 +482,11 @@ mod tests {
             Target::J2534(J2534Device::OpenPort(Some("/dev/ttyACM1".into())))
         );
         assert!(Target::parse("openport:ttyACM0").is_err());
+        assert_eq!(
+            Target::parse("mongoose:/dev/ttyACM0").unwrap(),
+            Target::J2534(J2534Device::Mongoose("/dev/ttyACM0".into()))
+        );
+        assert!(Target::parse("mongoose").is_err() && Target::parse("mongoose:ttyACM0").is_err());
         assert_eq!(
             Target::parse("sim:j2534").unwrap(),
             Target::J2534(J2534Device::Sim)

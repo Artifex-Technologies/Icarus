@@ -89,8 +89,8 @@ program in a Limbo Windows guest. The recording and the device's files stay outs
 | Data | definitions, trouble codes and checksums are encrypted (`BinDefs.enc`, `DTCDefs.enc`, `Nsum.enc`): not opened. Bundled profiles: six Tundra calibrations (`89663-0CS..`). `Logger.ini` lists SAE J1979 PIDs by its own names |
 
 Because VF Tuner talks J2534, a J2534 layer in Icarus (the API on top of each device's own transport) also reaches the
-common J2534 cables. Icarus has that layer (`crates/icarus-obd/src/passthru.rs`), and the OpenPort 2.0 is the first cable
-with a driver of its own on it (below); the Mongoose is next.
+common J2534 cables. Icarus has that layer (`crates/icarus-obd/src/passthru.rs`), and two cables have drivers of their own
+(below): the Tactrix OpenPort 2.0 and the Drewtech Mongoose Pro.
 
 ## Tactrix OpenPort 2.0 (J2534)
 
@@ -104,6 +104,16 @@ with a driver of its own on it (below); the Mongoose is next.
 
 That library's notes say to take the SD card out of the cable before using it. `--adapter sim:j2534` is the simulated car
 behind a simulated J2534 device, to try the same path without a cable.
+
+## Drewtech Mongoose Pro (J2534)
+
+| | |
+| --- | --- |
+| USB | a virtual serial port at 115200 baud; its USB IDs are to be read when one is plugged in, so `icarus devices` does not list it yet |
+| Language | framed binary packets (a length, the length XOR 0x51E6, the command, a sequence number the reply carries back): the layout is at the top of `crates/icarus-obd/src/mongoose.rs`. On that protocol the cable is a raw CAN device: frames go out one at a time and what it receives is pushed, once a pass filter is set |
+| Source | roffe/gocan's native driver for the Mongoose Pro GM II (github.com/roffe/gocan, MIT; [THIRD_PARTY.md](THIRD_PARTY.md)), which decoded the protocol from the cable's Windows library; Icarus's driver is its own code |
+| In Icarus | `--adapter mongoose:/dev/ttyACM0` (the port Linux made for it): Icarus's own ISO-TP over the cable's raw CAN at 500 kbit/s (`canlink::CanLink`, as for a SocketCAN interface), so OBD-II and each module are reached the same way. 11-bit CAN only: how the cable marks a 29-bit frame is not learned yet. It does not measure the battery for Icarus, but refuses to open without voltage on pin 16 |
+| Tried | against a stand-in cable in the tests, in front of the simulated car frame by frame; not with a cable in hand. Only the GM II is known to speak this; the Toyota Mongoose that Techstream uses (and the Ford and Honda ones) are expected to, unchecked |
 
 ## Silicon Labs CP210x driver (`cp210.exe`)
 

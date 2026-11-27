@@ -94,6 +94,8 @@ pub struct CanLink<F: Frames> {
     seen: BTreeSet<(String, String)>,
     /// The interface's bit rate when known (`with_bitrate`; SocketCAN: `socketcan::bitrate`).
     bitrate: Option<u32>,
+    /// What the frames go through, when it is not a SocketCAN interface (`named`: a Mongoose cable).
+    label: Option<String>,
 }
 
 impl<F: Frames> CanLink<F> {
@@ -115,6 +117,7 @@ impl<F: Frames> CanLink<F> {
             unseen: Vec::new(),
             seen: BTreeSet::new(),
             bitrate: None,
+            label: None,
         };
         for p in [Protocol::Can11At500, Protocol::Can29At500] {
             link.protocol = p;
@@ -128,6 +131,12 @@ impl<F: Frames> CanLink<F> {
             "nothing answered OBD-II on {name}, on 11-bit or 29-bit CAN (is the interface up, at the vehicle's bit rate, \
              usually 500 kbit/s?)"
         )))
+    }
+
+    /// What the adapter is called, for a `Frames` that is not a SocketCAN interface ("Drewtech Mongoose 1.2.4.0").
+    pub fn named(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
     }
 
     /// The interface's real bit rate (ICA-68): at 250 kbit/s the protocol is ISO 15765-4's 250 kbit/s one; any rate is named
@@ -484,12 +493,14 @@ impl<F: Frames> Link for CanLink<F> {
     }
 
     fn adapter(&self) -> String {
+        let what = self
+            .label
+            .clone()
+            .unwrap_or_else(|| format!("SocketCAN {}", self.name));
         match self.bitrate {
-            Some(r) if r.is_multiple_of(1000) => {
-                format!("SocketCAN {} ({} kbit/s)", self.name, r / 1000)
-            }
-            Some(r) => format!("SocketCAN {} ({r} bit/s)", self.name),
-            None => format!("SocketCAN {}", self.name),
+            Some(r) if r.is_multiple_of(1000) => format!("{what} ({} kbit/s)", r / 1000),
+            Some(r) => format!("{what} ({r} bit/s)"),
+            None => what,
         }
     }
 

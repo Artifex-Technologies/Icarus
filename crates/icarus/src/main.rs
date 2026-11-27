@@ -827,7 +827,7 @@ fn cmd_version(a: &[String]) -> Result<(), String> {
 /// The adapter `--adapter` (or ICARUS_ADAPTER) names, parsed.
 fn adapter_target(args: &Args) -> Result<(String, Target), String> {
     let spec = args.opt("adapter").map(str::to_string).or_else(|| std::env::var("ICARUS_ADAPTER").ok()).ok_or(
-        "which adapter? --adapter sim | /dev/ttyUSB0 | bt:AA:BB:CC:DD:EE:FF | tcp:host:port | can:can0 | openport (or set ICARUS_ADAPTER)",
+        "which adapter? --adapter sim | /dev/ttyUSB0 | bt:AA:BB:CC:DD:EE:FF | tcp:host:port | can:can0 | openport | mongoose:/dev/ttyACM0 (or set ICARUS_ADAPTER)",
     )?;
     let target = Target::parse(&spec)?;
     Ok((spec, target))

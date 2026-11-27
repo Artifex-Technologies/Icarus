@@ -5,7 +5,8 @@
 //! doing the segmentation and flow control, as J2534 devices do.
 //!
 //! Devices: `SimPassThru` (the simulated car, for tests and `--adapter sim:j2534`); the Tactrix OpenPort 2.0 (`openport`,
-//! `--adapter openport`); the WiFlash (VF Tuner's ESP32 device) once its protocol has been learned by watching it
+//! `--adapter openport`); the Drewtech Mongoose Pro (`mongoose`, a raw-CAN cable, so `open_link` puts `canlink::CanLink`
+//! over it rather than `PassThruLink`); the WiFlash (VF Tuner's ESP32 device) once its protocol has been learned by watching it
 //! (docs/INTERFACES.md). `open_link` opens the one an `--adapter` names.
 
 use crate::elm::{Answer, ObdError, Protocol};
@@ -24,6 +25,17 @@ pub fn open_link(dev: &J2534Device) -> Result<Box<dyn Link>, String> {
         }
         J2534Device::OpenPort(Some(path)) => {
             Box::new(PassThruLink::connect(crate::openport::open_tty(path).map_err(e)?).map_err(e)?)
+        }
+        // a raw-CAN cable: Icarus's own ISO-TP over it, at OBD-II's 500 kbit/s
+        J2534Device::Mongoose(path) => {
+            let cable = crate::mongoose::open_tty(path, 500_000).map_err(e)?;
+            let label = cable.label();
+            Box::new(
+                crate::canlink::CanLink::connect(cable, path)
+                    .map_err(e)?
+                    .named(label)
+                    .with_bitrate(Some(500_000)),
+            )
         }
         // the port found is named, as `--adapter` did not say it
         J2534Device::OpenPort(None) => {
