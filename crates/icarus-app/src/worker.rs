@@ -206,7 +206,14 @@ const PRUNE_AFTER_S: f64 = icarus_obd::prune::WATCH_S;
 #[cfg(test)]
 const PRUNE_AFTER_S: f64 = 2.0;
 
-pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'static) {
+/// The worker: commands from `rx`, what it found to `tx`. `fence` gives the key modules' fence when a bus watch starts
+/// (`icarus_obd::fence::current`; a test gives its own, so no test reads the home folder through it).
+pub fn run(
+    rx: Receiver<Cmd>,
+    tx: Sender<Event>,
+    fence: fn() -> icarus_obd::fence::Fence,
+    repaint: impl Fn() + Send + 'static,
+) {
     let send = |e: Event| {
         let _ = tx.send(e);
         repaint();
@@ -496,7 +503,7 @@ pub fn run(rx: Receiver<Cmd>, tx: Sender<Event>, repaint: impl Fn() + Send + 'st
             Some(Cmd::BusMark(_)) => {}
             Some(Cmd::BusStart(source, learning)) => {
                 live.clear();
-                let mut a = icarus_obd::bus::Analyzer::watching(icarus_obd::fence::current());
+                let mut a = icarus_obd::bus::Analyzer::watching(fence());
                 let t0 = Instant::now();
                 let mut last_view = Instant::now();
                 let mut pending: Option<Cmd> = None;
@@ -894,7 +901,7 @@ mod tests {
         std::env::set_var("XDG_STATE_HOME", &state);
         let (ctx, crx) = mpsc::channel();
         let (etx, erx) = mpsc::channel();
-        std::thread::spawn(move || run(crx, etx, || {}));
+        std::thread::spawn(move || run(crx, etx, icarus_obd::fence::Fence::default, || {}));
         ctx.send(Cmd::Connect("sim".into())).unwrap();
         let until = |what: &str, ok: &mut dyn FnMut(&Event) -> bool| {
             let end = Instant::now() + Duration::from_secs(30);

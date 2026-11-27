@@ -655,6 +655,65 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// ICA-102: the read-back and the put-back of a setting with a mask look at and touch only its bits. The simulated
+    /// cluster takes a write to A002 but keeps it with some bits flipped: a bit outside the auto door lock's (the module's
+    /// own business) leaves the change done, with nothing written back; its own bit as well makes the change fail, and
+    /// what is written back is (the value the module kept AND NOT the mask) OR (the value before AND the mask), so the
+    /// other bits stay as the module left them.
+    #[test]
+    fn the_read_back_and_the_put_back_of_a_masked_setting_touch_only_its_bits() {
+        crate::lock::switch_for_test(&[]);
+        let lock = crate::sim::settings()
+            .into_iter()
+            .find(|s| s.name.contains("auto door lock"))
+            .unwrap();
+        assert_eq!(lock.mask, Some(vec![0x01]));
+        let dir = scratch("putback");
+        let log = log_path(&dir);
+        let writes = |sent: Vec<(std::time::Instant, u32, Vec<u8>)>| -> Vec<Vec<u8>> {
+            sent.into_iter()
+                .map(|(_, _, d)| d)
+                .filter(|d| d.first() == Some(&0x2E))
+                .collect()
+        };
+        // bit 1 flipped (no setting's): 05 to 04 is kept as 06, the lock's bit took
+        let mut elm =
+            Elm::connect(Box::new(SimCar::engine_off().keeping_a002_flipped(0x02))).unwrap();
+        elm.take_sent();
+        let c = change(&mut elm, &lock, &lock.values["off"], &log)
+            .unwrap()
+            .unwrap();
+        assert_eq!((c.before, c.after), (vec![0x05], vec![0x04]));
+        assert_eq!(
+            read(&mut elm, &lock).unwrap(),
+            (vec![0x06], Some("off".into()))
+        );
+        assert_eq!(
+            writes(elm.take_sent()),
+            [vec![0x2E, 0xA0, 0x02, 0x04]],
+            "one write, nothing put back"
+        );
+        // bits 0 and 1 flipped: 05 to 04 is kept as 07, the lock's bit did not take
+        let mut elm =
+            Elm::connect(Box::new(SimCar::engine_off().keeping_a002_flipped(0x03))).unwrap();
+        elm.take_sent();
+        let e = change(&mut elm, &lock, &lock.values["off"], &log).unwrap_err();
+        // put back: (07 AND NOT 01) OR (05 AND 01) = 07 (a whole-value put-back would have written 05)
+        assert!(
+            e.contains("kept 07 instead of 04") && e.contains("07 written back"),
+            "{e}"
+        );
+        assert_eq!(
+            writes(elm.take_sent()),
+            [vec![0x2E, 0xA0, 0x02, 0x04], vec![0x2E, 0xA0, 0x02, 0x07]]
+        );
+        assert_eq!(
+            read(&mut elm, &lock).unwrap(),
+            (vec![0x07], Some("on".into()))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn kwp_settings_and_the_conditions() {
         let s = crate::sim::settings()

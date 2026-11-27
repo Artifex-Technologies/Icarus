@@ -228,7 +228,7 @@ fn main() -> ExitCode {
         Some("dtc") => cmd_dtc(&args[1..]),
         Some("garage") => cmd_garage(&args[1..]),
         Some("bus") => cmd_bus(&args[1..]),
-        Some("learn") => cmd_learn(&args[1..]),
+        Some("learn") => cmd_learn(&args[1..], icarus_obd::fence::current()),
         Some("tires") => cmd_tires(&args[1..]),
         Some("gps") => gps::cmd_gps(&args[1..]),
         Some("recalls") => cmd_recalls(&args[1..]),
@@ -1156,7 +1156,9 @@ fn obd_asbuilt(elm: &mut dyn Link, args: &Args) -> Result<(), String> {
     // and the module-data set chosen for the vehicle as `obd data` chooses it: a chassis or driver-assist module is read
     // only by the identifiers its file there lists (ICA-100)
     let set = asbuilt_set(args, &all, vin.as_deref(), make.as_deref())?;
-    let b = icarus_obd::asbuilt::read(elm, tx, rx, &all, make.as_deref(), set.as_ref())?;
+    // the key modules' fence as it stands: the profiles' and the module-data sets' (a key module only a set names too)
+    let fence = icarus_obd::fence::current();
+    let b = icarus_obd::asbuilt::read(elm, tx, rx, &all, make.as_deref(), set.as_ref(), &fence)?;
     for (did, bytes) in &b {
         let hex: Vec<String> = bytes.iter().map(|x| format!("{x:02X}")).collect();
         println!("{did:04X}  {}", hex.join(" "));
@@ -2037,7 +2039,7 @@ fn cmd_dtc(a: &[String]) -> Result<(), String> {
 }
 
 fn cmd_bus(a: &[String]) -> Result<(), String> {
-    bus_watch(a, &serial_port).map(|_| ())
+    bus_watch(a, &serial_port, icarus_obd::fence::current()).map(|_| ())
 }
 
 /// A serial port, raw (an SLCAN adapter's).
@@ -2088,8 +2090,13 @@ fn watch_slcan(
     Ok(ended)
 }
 
-/// `icarus bus watch`: an SLCAN adapter's serial port is opened with `serial` (the tests give a recorded session).
-fn bus_watch(a: &[String], serial: &OpenSerial<'_>) -> Result<bus::Analyzer, String> {
+/// `icarus bus watch`: an SLCAN adapter's serial port is opened with `serial` (the tests give a recorded session), and
+/// nothing to or from a key module of `fence` (`fence::current`; the tests give their own) is learned or written down.
+fn bus_watch(
+    a: &[String],
+    serial: &OpenSerial<'_>,
+    fence: icarus_obd::fence::Fence,
+) -> Result<bus::Analyzer, String> {
     if a.first().map(String::as_str) != Some("watch") {
         return Err(
             "usage: icarus bus watch (--adapter A [--protocol N] | --can can0 | --adapter slcan:/dev/ttyACM0) [--seconds N] [--raw] [--diagnostic] [--j1939] [--dbc FILE]"
@@ -2129,7 +2136,7 @@ fn bus_watch(a: &[String], serial: &OpenSerial<'_>) -> Result<bus::Analyzer, Str
         .transpose()?
         .unwrap_or(10.0);
     actuator::catch_interrupt();
-    let mut an = bus::Analyzer::watching(icarus_obd::fence::current());
+    let mut an = bus::Analyzer::watching(fence);
     if j1939 {
         an.j1939 = Some(Default::default());
     }
@@ -2286,7 +2293,8 @@ fn bus_watch(a: &[String], serial: &OpenSerial<'_>) -> Result<bus::Analyzer, Str
     Ok(an)
 }
 
-fn cmd_learn(a: &[String]) -> Result<(), String> {
+/// `icarus learn`: nothing to or from a key module of `fence` (`fence::current`) is learned or written down.
+fn cmd_learn(a: &[String], fence: icarus_obd::fence::Fence) -> Result<(), String> {
     let args = parse_args(
         &a.iter()
             .filter(|x| *x != "--ask-sarina")
@@ -2313,7 +2321,7 @@ fn cmd_learn(a: &[String]) -> Result<(), String> {
         }
     });
     actuator::catch_interrupt();
-    let mut an = bus::Analyzer::watching(icarus_obd::fence::current());
+    let mut an = bus::Analyzer::watching(fence);
     let start = std::time::Instant::now();
     let mut printed = 0u64;
     let mut step = |an: &mut bus::Analyzer, f: Option<bus::Frame>| {
@@ -3042,10 +3050,15 @@ mod tests {
         ]
         .map(String::from)
         .to_vec();
-        let an = bus_watch(&a, &|path, baud| {
-            assert_eq!((path, baud), ("/dev/ttyACM0", 115_200));
-            Ok(Box::new(session.borrow_mut().take().unwrap()))
-        })
+        // an empty fence: the test reads no profile or module-data set from the home folder
+        let an = bus_watch(
+            &a,
+            &|path, baud| {
+                assert_eq!((path, baud), ("/dev/ttyACM0", 115_200));
+                Ok(Box::new(session.borrow_mut().take().unwrap()))
+            },
+            icarus_obd::fence::Fence::default(),
+        )
         .unwrap();
         assert_eq!(an.frames, 5, "every data frame, the remote one passed over");
         for id in [0x2C4, 0x3B7, 0x610, 0x18DA_F110] {

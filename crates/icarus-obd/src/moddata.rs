@@ -20,7 +20,7 @@
 //!    Stellantis, BMW... today), or is not known, a module whose kind is not known (no `kind`, not in the profile) gets
 //!    none either: it could be the airbag module;
 //!    immobilizer, smart-key and certification modules (`fence`: by their file's kind or name, or an address any vehicle
-//!    profile gives one of those kinds; 29-bit IDs too): identity only, as the airbag module;
+//!    profile or another set's file gives one of those kinds; 29-bit IDs too): identity only, as the airbag module;
 //!    one request ID is one module: a second module file on the same ID gets no data requests;
 //!    a sweep (reads of identifiers no file lists: the as-built block, discovery later) passes `Gates::sweep` besides
 //!    (ICA-100): chassis and driver-assist modules (ABS and stability control, brakes, steering, radar, cameras, cruise,
@@ -75,6 +75,8 @@ impl Loaded {
     pub fn on_vehicle(&self, profiles: &[Profile], vehicle: Option<&str>) -> Loaded {
         let mut s = self.clone();
         s.gates = Gates::for_vehicle(profiles, &s.modules, &s.set.make, vehicle);
+        // the key modules other sets' files name (`load_all`) stay fenced
+        s.gates.fence_also(&self.gates.fence);
         let refused = gate(&mut s.modules, &s.gates);
         s.refused.extend(refused);
         s
@@ -110,7 +112,8 @@ pub struct Gates {
     /// Addresses (request ID, extended address) the vehicle's profile names as a chassis or driver-assist module (with
     /// the make unknown, every profile's): (the profile's id, the name it gives, what kind of module that is).
     chassis_at: BTreeMap<(u16, Option<u8>), (String, String, &'static str)>,
-    /// The immobilizer, smart-key and certification modules every vehicle profile names (`fence`).
+    /// The immobilizer, smart-key and certification modules every vehicle profile names (`fence`), and those other sets'
+    /// files name (`load_all`) or the caller knows of (`fence_also`).
     fence: crate::fence::Fence,
 }
 
@@ -465,8 +468,14 @@ impl Gates {
             || (h.ext.is_none() && small(h.rx()).is_some_and(|r| self.airbag_rx.contains(&r)))
     }
 
+    /// Adds the key modules of `fence` to the ones the profiles name: another set's files' (`load_all`), or the whole
+    /// fence as it stands (`fence::current`, for the as-built sweep).
+    pub fn fence_also(&mut self, fence: &crate::fence::Fence) {
+        self.fence.extend(fence);
+    }
+
     /// The kind of key module `h` is, if it is one (`fence`): by its own file's kind or name, or at an address a vehicle
-    /// profile gives one of those kinds. Any kind of ID: 29-bit addresses are matched whole.
+    /// profile, or another set's file, gives one of those kinds. Any kind of ID: 29-bit addresses are matched whole.
     pub fn key_module(&self, h: &ModuleHead) -> Option<crate::fence::Kind> {
         crate::fence::Kind::of(&h.kind, &h.name)
             .or_else(|| self.fence.at(h.tx, h.ext, h.rx()).map(|f| f.kind))
@@ -774,13 +783,25 @@ pub fn load_set(name: &str, user: Option<&Path>, profiles: &[Profile]) -> Result
     Ok(loaded(read, "built in".into(), profiles))
 }
 
-/// Every set (problems reading one are listed, not fatal).
+/// Every set (problems reading one are listed, not fatal). A module one set's file gives a key kind or name is a key
+/// module in every set: another set's file on its address gets no data request either.
 pub fn load_all(user: Option<&Path>, profiles: &[Profile]) -> (Vec<Loaded>, Vec<String>) {
     let (mut sets, mut problems) = (Vec::new(), Vec::new());
     for (n, _) in set_names(user) {
         match load_set(&n, user, profiles) {
             Ok(s) => sets.push(s),
             Err(e) => problems.push(e),
+        }
+    }
+    let mut keys = crate::fence::Fence::default();
+    for s in &sets {
+        keys.add_modules(s.modules.iter().map(|m| &m.module));
+    }
+    if !keys.is_empty() {
+        for s in &mut sets {
+            s.gates.fence_also(&keys);
+            let refused = gate(&mut s.modules, &s.gates);
+            s.refused.extend(refused);
         }
     }
     (sets, problems)
@@ -2039,10 +2060,105 @@ mod tests {
             o,
             Outcome::Skipped("smart-key module: identity only".into())
         );
-        let e = crate::asbuilt::read(&mut elm, 0x7D5, 0x7DD, &profiles, Some("toyota"), None)
-            .unwrap_err();
+        let open = crate::fence::Fence::default();
+        let e = crate::asbuilt::read(
+            &mut elm,
+            0x7D5,
+            0x7DD,
+            &profiles,
+            Some("toyota"),
+            None,
+            &open,
+        )
+        .unwrap_err();
         assert!(e.contains("smart-key module: identity only"), "{e}");
         assert!(sent(&log.lock().unwrap()).is_empty(), "nothing was sent");
+    }
+
+    /// A key module that only a module-data file names (no profile does): the as-built sweep sends it nothing when the
+    /// fence (as `fence::current` builds it, from the sets too) has it, and another set whose file names the same address
+    /// innocently gets no data request there either.
+    #[test]
+    fn a_key_module_only_a_set_names_is_fenced_in_every_set_and_from_the_sweep() {
+        use crate::sim::recording::Recorder;
+        let profiles = crate::vehicles::builtin();
+        let dir = std::env::temp_dir().join(format!("icarus-moddata-keys-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let request = "[[request]]\nservice = 0x22\nident = 0x1F21\n\
+                       [[request.value]]\nid = \"X\"\nname = \"x\"\nbyte = 0\nbits = 8\n";
+        for (set, kind) in [("keys", "smart-key"), ("body", "body")] {
+            let d = dir.join(set);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(
+                d.join("set.toml"),
+                format!(
+                    "format = 1\nname = \"{set}\"\nmake = \"toyota\"\n[source]\nfrom = \"hand\"\n"
+                ),
+            )
+            .unwrap();
+            std::fs::write(
+                d.join("7D5.toml"),
+                format!(
+                    "format = 1\n[module]\nname = \"module\"\ntx = 0x7D5\nkind = \"{kind}\"\n{request}"
+                ),
+            )
+            .unwrap();
+        }
+        // alone, the body set's file is a body module, and would be read
+        let alone = load_set("body", Some(&dir), &profiles).unwrap();
+        assert_eq!(alone.modules[0].requests.len(), 1);
+        let (sets, problems) = load_all(Some(&dir), &profiles);
+        assert!(problems.is_empty(), "{problems:?}");
+        let body = sets.iter().find(|s| s.set.name == "body").unwrap();
+        assert!(body.modules[0].requests.is_empty(), "{:?}", body.refused);
+        assert!(
+            body.refused
+                .iter()
+                .any(|(_, why)| why == "smart-key module: identity only"),
+            "{:?}",
+            body.refused
+        );
+        // and still on the vehicle (the gates rebuilt for its make)
+        let on = body.on_vehicle(&profiles, Some("toyota"));
+        assert_eq!(
+            on.gates.module_refused(&on.modules[0]).as_deref(),
+            Some("smart-key module: identity only")
+        );
+        // the as-built sweep: the fence from the sets has it, so nothing is sent
+        let mut fence = crate::fence::Fence::default();
+        for s in &sets {
+            fence.add_modules(s.modules.iter().map(|m| &m.module));
+        }
+        let (port, log) = Recorder::new(SimCar::new());
+        let mut elm = Elm::connect(Box::new(port)).unwrap();
+        log.lock().unwrap().clear();
+        let e = crate::asbuilt::read(
+            &mut elm,
+            0x7D5,
+            0x7DD,
+            &profiles,
+            Some("toyota"),
+            None,
+            &fence,
+        )
+        .unwrap_err();
+        assert!(e.contains("smart-key module: identity only"), "{e}");
+        assert!(sent(&log.lock().unwrap()).is_empty(), "nothing was sent");
+        // without it, the sweep would go (the simulated vehicle has no 7D5, so it is not answered)
+        let open = crate::fence::Fence::default();
+        let e = crate::asbuilt::read(
+            &mut elm,
+            0x7D5,
+            0x7DD,
+            &profiles,
+            Some("toyota"),
+            None,
+            &open,
+        )
+        .unwrap_err();
+        assert!(!e.contains("identity only"), "{e}");
+        assert!(!sent(&log.lock().unwrap()).is_empty(), "DE00 was asked");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

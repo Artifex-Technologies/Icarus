@@ -230,6 +230,9 @@ pub struct SimCar {
     stm_filtered: bool,
     /// Module settings (`sim::settings`): (module, identifier) -> value.
     settings: std::collections::HashMap<(u32, u16), Vec<u8>>,
+    /// The cluster takes the next write to A002 (6E) but keeps it with these bits flipped: a module that does not keep
+    /// what it is sent (`keeping_a002_flipped`).
+    a002_flip: Option<u8>,
     /// Service routines started (module, routine), whose results are then ready (`sim::services`).
     routines: std::collections::HashSet<(u32, u16)>,
     /// CAN auto-formatting (ATCAF, on by default): requests get ISO-TP's length byte added, and in monitor mode a frame whose
@@ -318,6 +321,7 @@ impl SimCar {
             ]
             .into_iter()
             .collect(),
+            a002_flip: None,
             caf: true,
             csm: true,
             stn: false,
@@ -556,6 +560,15 @@ impl SimCar {
         SimCar {
             engine_on: false,
             ..SimCar::new()
+        }
+    }
+
+    /// The cluster answers the next write to A002 as taken (6E), but keeps the value with `flip`'s bits flipped; later
+    /// writes are kept as sent.
+    pub fn keeping_a002_flipped(self, flip: u8) -> SimCar {
+        SimCar {
+            a002_flip: Some(flip),
+            ..self
         }
     }
 
@@ -1126,7 +1139,12 @@ impl SimCar {
                 if v.len() != 1 || (id == 0xA001 && v[0] > 1) {
                     return refuse(if v.len() != 1 { 0x13 } else { 0x31 });
                 }
-                self.settings.insert((tx, id), v.to_vec());
+                let flip = if id == 0xA002 {
+                    self.a002_flip.take().unwrap_or(0)
+                } else {
+                    0
+                };
+                self.settings.insert((tx, id), vec![v[0] ^ flip]);
                 Some(vec![0x6E, *hi, *lo])
             }
             ([0x21, 0x20], false) if tx == 0x7B0 => {

@@ -1,13 +1,15 @@
 //! The key modules' fence (ICA-101): immobilizer, smart-key and key-certification modules. They hold what lets the vehicle
 //! start, so Icarus writes nothing to them, runs no test or routine in them, clears none of their codes, and learns nothing
 //! from them: a dealer tool's key registration watched on the bus never becomes a setting, a test or a service entry. They
-//! get the identity reads Icarus already makes and nothing else (module data and the as-built sweep send them nothing), and
-//! nothing from them goes to an assistant (`icarus mcp`) or into a learning session.
+//! get the identity reads Icarus already makes and nothing else (module data and the as-built sweep send them nothing,
+//! whichever file names them: a key module one set's file names is fenced in every set, and the sweep asks `current`),
+//! and nothing from them goes to an assistant (`icarus mcp`) or into a learning session.
 //!
 //! They are fenced by address, whatever a definition calls itself: a vehicle profile's `[[module]]` or a module-data file's
 //! `[module]` gives the kind (`kind = "immobilizer"`, `"smart-key"` or `"certification"`; a name in those words counts too),
-//! and every write path (`actuator`, `settings`, `service`, `clear`), the bus learner (`bus`) and the module-data gates
-//! (`moddata::Gates`) look the address up here. IDs are u32 from the start, so a 29-bit module fits beside an 11-bit one.
+//! and every write path (`actuator`, `settings`, `service`, `clear`), the bus learner (`bus`), the module-data gates
+//! (`moddata::Gates`, with the other sets' key modules added by `moddata::load_all`) and the as-built sweep (`asbuilt`)
+//! look the address up here. IDs are u32 from the start, so a 29-bit module fits beside an 11-bit one.
 //! A module behind a gateway shares the gateway's CAN IDs, so where Icarus cannot tell the modules behind it apart (a write
 //! path, the bus learner) the whole gateway ID is fenced.
 //!
@@ -156,6 +158,13 @@ impl Fence {
         }
     }
 
+    /// Adds every module of `other`.
+    pub fn extend(&mut self, other: &Fence) {
+        for f in &other.modules {
+            self.push(f.clone());
+        }
+    }
+
     pub fn modules(&self) -> &[Fenced] {
         &self.modules
     }
@@ -191,9 +200,23 @@ impl Fence {
     }
 }
 
-/// The fence as it stands: the profiles (built in and `~/.config/icarus/vehicles`) and the module-data sets in
-/// `~/.config/icarus/data`, read again when the last reading is more than a few seconds old (a settings page reads each
-/// setting in turn). A file that cannot be read is left out, as when it is loaded for anything else.
+/// The fence the profiles in `vehicles` and the module-data sets in `data` give, with the built-in ones: every profile's
+/// key modules, and every set's module file of a key kind or name (`add_modules`). `current` reads it from the home
+/// folder's; tests give folders of their own. A file that cannot be read is left out, as when it is loaded for anything
+/// else.
+pub fn current_in(vehicles: Option<&std::path::Path>, data: Option<&std::path::Path>) -> Fence {
+    let profiles = crate::vehicles::load(vehicles).0;
+    let mut f = Fence::of(&profiles);
+    for set in crate::moddata::load_all(data, &profiles).0 {
+        f.add_modules(set.modules.iter().map(|m| &m.module));
+    }
+    f
+}
+
+/// The fence as it stands: `current_in` the home folder's profiles (`~/.config/icarus/vehicles`) and module-data sets
+/// (`~/.config/icarus/data`), read again when the last reading is more than a few seconds old (a settings page reads each
+/// setting in turn). The bus watch, `icarus learn` and the window's worker take their fence as a parameter, so their tests
+/// give one of their own; this crate's tests get theirs below. Neither reads the home folder.
 #[cfg(not(test))]
 pub fn current() -> Fence {
     use std::sync::Mutex;
@@ -205,11 +228,10 @@ pub fn current() -> Fence {
             return f.clone();
         }
     }
-    let profiles = crate::vehicles::load(crate::vehicles::user_dir().as_deref()).0;
-    let mut f = Fence::of(&profiles);
-    for set in crate::moddata::load_all(crate::moddata::user_dir().as_deref(), &profiles).0 {
-        f.add_modules(set.modules.iter().map(|m| &m.module));
-    }
+    let f = current_in(
+        crate::vehicles::user_dir().as_deref(),
+        crate::moddata::user_dir().as_deref(),
+    );
     *last = Some((Instant::now(), f.clone()));
     f
 }
@@ -335,7 +357,8 @@ mod tests {
 
     /// ICA-101: a setting, a service routine and an actuator test aimed at a module of each key kind are refused by its
     /// address, whatever they are called (the simulated cluster's chime and oil life reset, the engine's throttle test),
-    /// and nothing is sent; with the module not fenced the same ones go through.
+    /// and nothing is sent. Undo too: the chime was changed while its module was not fenced, so the log holds its way back
+    /// and undo gets as far as the fence. With the module not fenced the same ones go through.
     #[test]
     fn writes_to_a_key_module_are_refused_by_address() {
         use crate::elm::Elm;
@@ -361,6 +384,17 @@ mod tests {
             e.take_sent();
             e
         };
+        // changed before its module was classified: the log has a line for the chime
+        fence_for_test(Some(Fence::default()));
+        let mut changed = connect();
+        assert!(
+            crate::settings::change(&mut changed, &chime, &chime.values["off"], &log)
+                .unwrap()
+                .is_some()
+        );
+        changed.take_sent();
+        let logged = std::fs::read_to_string(&log).unwrap();
+        assert!(crate::settings::last_change(&log, &chime).is_some());
         for kind in Kind::ALL {
             let refused = |e: &mut Elm, r: Result<(), String>, what: &str| {
                 let why = r.unwrap_err();
@@ -376,8 +410,8 @@ mod tests {
             refused(&mut e, r, "a setting");
             let r = crate::settings::read(&mut e, &chime).map(|_| ());
             refused(&mut e, r, "reading a setting");
-            let r = crate::settings::undo(&mut e, &chime, &log).map(|_| ());
-            assert!(r.is_err() && e.take_sent().is_empty(), "undo: {r:?}");
+            let r = crate::settings::undo(&mut changed, &chime, &log).map(|_| ());
+            refused(&mut changed, r, "undoing a setting");
             let r = crate::service::run(&mut e, &oil, true).map(|_| ());
             refused(&mut e, r, "a service routine");
             let r = crate::clear::clear_module(&mut e, 0x7C0, 0x7C8, crate::uds::Dialect::Uds);
@@ -386,10 +420,18 @@ mod tests {
             let mut e = connect();
             let r = crate::actuator::start(&mut e, &throttle, 30.0).map(|_| ());
             refused(&mut e, r, "an actuator test");
-            assert!(!log.exists(), "nothing was logged as changed");
+            assert_eq!(
+                std::fs::read_to_string(&log).unwrap(),
+                logged,
+                "nothing more was logged as changed"
+            );
         }
         // the same, not fenced
         fence_for_test(Some(Fence::default()));
+        let u = crate::settings::undo(&mut changed, &chime, &log)
+            .unwrap()
+            .unwrap();
+        assert_eq!((u.before, u.after), (vec![0x00], vec![0x01]), "undone");
         let mut e = connect();
         assert!(
             crate::settings::change(&mut e, &chime, &chime.values["off"], &log)
@@ -401,6 +443,81 @@ mod tests {
         crate::actuator::stop(&mut e, &mut run, "test").unwrap();
         fence_for_test(None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A key module that only a module-data file names (no profile does) is fenced for the write paths too: the fence
+    /// built from the folders, as `current` builds it from the home folder's, refuses a setting, a routine and clearing at
+    /// its address, and nothing is sent. The same file without the key kind fences nothing.
+    #[test]
+    fn a_key_module_named_only_in_module_data_is_fenced() {
+        use crate::elm::Elm;
+        use crate::sim::SimCar;
+        crate::lock::switch_for_test(&[]);
+        let root =
+            std::env::temp_dir().join(format!("icarus-fence-moddata-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (vehicles, data) = (root.join("vehicles"), root.join("data"));
+        let write = |kind: &str| {
+            let set = data.join("keys");
+            std::fs::create_dir_all(&set).unwrap();
+            std::fs::create_dir_all(&vehicles).unwrap();
+            std::fs::write(
+                set.join("set.toml"),
+                "format = 1\nname = \"keys\"\nmake = \"toyota\"\n[source]\nfrom = \"hand\"\n",
+            )
+            .unwrap();
+            std::fs::write(
+                set.join("7C0.toml"),
+                format!("format = 1\n[module]\nname = \"cluster\"\ntx = 0x7C0\n{kind}\n"),
+            )
+            .unwrap();
+        };
+        write("kind = \"smart-key\"");
+        let f = current_in(Some(vehicles.as_path()), Some(data.as_path()));
+        assert!(Fence::builtin().is_empty(), "no profile names it");
+        assert_eq!(
+            f.modules()
+                .iter()
+                .map(|m| (m.tx, m.kind))
+                .collect::<Vec<_>>(),
+            [(0x7C0, Kind::SmartKey)]
+        );
+        let chime = crate::sim::settings().remove(0);
+        let oil = crate::sim::services()
+            .into_iter()
+            .find(|s| s.name.starts_with("Oil"))
+            .unwrap();
+        fence_for_test(Some(f));
+        let mut e = Elm::connect(Box::new(SimCar::engine_off())).unwrap();
+        e.take_sent();
+        let log = crate::settings::log_path(&root);
+        for (what, r) in [
+            (
+                "a setting",
+                crate::settings::change(&mut e, &chime, &chime.values["off"], &log).map(|_| ()),
+            ),
+            (
+                "a service routine",
+                crate::service::run(&mut e, &oil, true).map(|_| ()),
+            ),
+            (
+                "clearing its codes",
+                crate::clear::clear_module(&mut e, 0x7C0, 0x7C8, crate::uds::Dialect::Uds),
+            ),
+        ] {
+            let why = r.unwrap_err();
+            assert!(
+                why.contains("7C0 (the smart-key module) is fenced"),
+                "{what}: {why}"
+            );
+        }
+        assert!(e.take_sent().is_empty(), "nothing sent");
+        assert!(!log.exists(), "nothing logged as changed");
+        // the same set, its module of no key kind
+        write("kind = \"body\"");
+        assert!(current_in(Some(vehicles.as_path()), Some(data.as_path())).is_empty());
+        fence_for_test(None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Profiles with the key kinds load; a test, setting or routine another file aims at one of them is left out when the

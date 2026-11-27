@@ -206,6 +206,9 @@ pub struct Analyzer {
     pub fence: crate::fence::Fence,
     /// Modules (by request ID) the other tool sent security access (27) to, until they are back in their default session.
     unlocked: HashSet<u16>,
+    /// Learned settings (by their place in `settings`) whose first write changed nothing the read before it showed, so
+    /// their mask is not known yet: the next write on them that changes known bits gives them theirs (ICA-102).
+    unmasked: HashSet<usize>,
 }
 
 impl Analyzer {
@@ -410,12 +413,23 @@ impl Analyzer {
                 && s.protocol == protocol
                 && s.values.values().next().map_or(0, Vec::len) == value.len()
         };
-        if let Some(s) = self.settings.iter_mut().find(|s| same_id(s) && overlaps(s)) {
+        if let Some(i) = self.settings.iter().position(|s| same_id(s) && overlaps(s)) {
+            // a setting first learned from a write that changed nothing takes the bits of the first write that does
+            let first_bits = self.unmasked.contains(&i) && changed.is_some();
+            if first_bits {
+                self.unmasked.remove(&i);
+            }
+            let s = &mut self.settings[i];
             s.extended |= extended;
-            if let (Some(m), Some(c)) = (&mut s.mask, &changed) {
-                for (m, c) in m.iter_mut().zip(c) {
-                    *m |= c;
+            match (&mut s.mask, &changed) {
+                (Some(m), Some(c)) => {
+                    for (m, c) in m.iter_mut().zip(c) {
+                        *m |= c;
+                    }
                 }
+                (None, Some(c)) if first_bits => s.mask = Some(c.clone()),
+                // without a read before its first write, which bits it covers is not known: the whole value
+                _ => {}
             }
             if s.name_of(&value).is_none() {
                 let n = (2..)
@@ -426,6 +440,7 @@ impl Analyzer {
             return;
         }
         let beside = self.settings.iter().any(same_id);
+        let nothing_changed = before.as_ref() == Some(&value);
         let mut values = BTreeMap::new();
         if let Some(b) = before.filter(|b| *b != value) {
             values.insert("was".to_string(), b);
@@ -465,6 +480,9 @@ impl Analyzer {
                         s.name
                     ));
                 }
+                if nothing_changed {
+                    self.unmasked.insert(self.settings.len());
+                }
                 self.settings.push(s);
             }
             Some(why) => self.note(format!("{tx:03X} {did:X}: {why}")),
@@ -478,6 +496,9 @@ impl Analyzer {
     fn after_unlock(&mut self, tx: u16, msg: &[u8]) -> bool {
         match msg {
             [0x27, level, ..] => {
+                // a write sent before the unlock and still waiting for its answer is not learned from an answer that
+                // comes after it (that answer could be to a write sent unlocked)
+                self.pending_writes.retain(|k, _| k.0 != tx);
                 if self.unlocked.insert(tx) {
                     self.note(format!(
                         "{tx:03X}: security access (level {level:02X}): the tool unlocked the module. Icarus never does \
@@ -497,10 +518,24 @@ impl Analyzer {
                 }
                 return false;
             }
+            // the module's answer to a write the tool sent it unlocked: nothing to learn from either (the write was noted)
+            [0x6E | 0x7B, ..] if self.unlocked.contains(&tx.wrapping_sub(8)) => return true,
             _ => {}
         }
         if !self.unlocked.contains(&tx) {
             return false;
+        }
+        // what an unlocked write leaves in the module is not known (it may or may not have taken): no later write is
+        // learned with the value read before the unlock as its "was"
+        match msg {
+            [0x2E, hi, lo, ..] => {
+                self.read_values
+                    .remove(&(tx, u16::from_be_bytes([*hi, *lo]), false));
+            }
+            [0x3B, lid, ..] => {
+                self.read_values.remove(&(tx, *lid as u16, true));
+            }
+            _ => {}
         }
         let what = match msg {
             [0x2E, hi, lo, ..] => format!("a write to {hi:02X}{lo:02X}"),
@@ -1009,6 +1044,104 @@ mod tests {
             let p = crate::vehicles::parse("x", "test", &format!("name = \"x\"\n{entry}")).unwrap();
             assert_eq!(&p.settings[0], s, "{entry}");
         }
+    }
+
+    /// A write sent before the unlock whose answer never came (the refusal dropped by the monitor, or the module silent),
+    /// then security access and the same write again: the module's answer to the unlocked write learns nothing, and
+    /// neither does a later answer while the module is unlocked. Once it is back in its default session a write is learned
+    /// again, but not with the value read before the unlock as its "was": what the unlocked write left is not known.
+    #[test]
+    fn a_write_waiting_before_an_unlock_is_not_learned_from_after_it() {
+        let mut a = Analyzer::default();
+        watch(
+            &mut a,
+            &[
+                (0x7C0, vec![0x03, 0x22, 0xA0, 0x01]),
+                (0x7C8, vec![0x04, 0x62, 0xA0, 0x01, 0x01]),
+                // its answer (7F 2E 33) is not seen
+                (0x7C0, vec![0x04, 0x2E, 0xA0, 0x01, 0x00]),
+                (0x7C0, vec![0x02, 0x27, 0x01]),
+                (0x7C8, vec![0x04, 0x67, 0x01, 0x12, 0x34]),
+                (0x7C0, vec![0x04, 0x27, 0x02, 0x56, 0x78]),
+                (0x7C8, vec![0x02, 0x67, 0x02]),
+                (0x7C0, vec![0x04, 0x2E, 0xA0, 0x01, 0x00]),
+                (0x7C8, vec![0x03, 0x6E, 0xA0, 0x01]),
+                (0x7C8, vec![0x03, 0x6E, 0xA0, 0x01]),
+            ],
+            0.0,
+        );
+        assert!(a.settings.is_empty(), "{:?} {:?}", a.settings, a.notes);
+        assert!(
+            a.notes
+                .iter()
+                .any(|n| n.contains("7C0: a write to A001 after security access")),
+            "{:?}",
+            a.notes
+        );
+        // locked again: a write is learned again, with no "was" (nothing was read since the unlocked write)
+        watch(
+            &mut a,
+            &[
+                (0x7C0, vec![0x02, 0x10, 0x01]),
+                (0x7C8, vec![0x02, 0x50, 0x01]),
+                (0x7C0, vec![0x04, 0x2E, 0xA0, 0x01, 0x01]),
+                (0x7C8, vec![0x03, 0x6E, 0xA0, 0x01]),
+            ],
+            20.0,
+        );
+        assert_eq!(a.settings.len(), 1, "{:?}", a.notes);
+        let s = &a.settings[0];
+        assert!(
+            !s.values.contains_key("was") && s.mask.is_none(),
+            "no read since the unlocked write: the value before is not known ({s:?})"
+        );
+    }
+
+    /// ICA-102: a first write that changes nothing (the tool wrote the value the module had) gives no mask yet; the next
+    /// write that changes known bits gives the setting those bits, so it never writes the whole value. A setting whose
+    /// first write had no read before it stays a whole-value one: which bits that write changed is not known.
+    #[test]
+    fn a_setting_first_written_unchanged_takes_the_bits_of_the_next_write() {
+        let mut a = Analyzer::default();
+        watch(
+            &mut a,
+            &[
+                (0x7C0, vec![0x03, 0x22, 0xA0, 0x02]),
+                (0x7C8, vec![0x04, 0x62, 0xA0, 0x02, 0x05]),
+                // written as it was
+                (0x7C0, vec![0x04, 0x2E, 0xA0, 0x02, 0x05]),
+                (0x7C8, vec![0x03, 0x6E, 0xA0, 0x02]),
+                // bit 0
+                (0x7C0, vec![0x04, 0x2E, 0xA0, 0x02, 0x04]),
+                (0x7C8, vec![0x03, 0x6E, 0xA0, 0x02]),
+                // bits 2 and 3: another setting beside it
+                (0x7C0, vec![0x04, 0x2E, 0xA0, 0x02, 0x08]),
+                (0x7C8, vec![0x03, 0x6E, 0xA0, 0x02]),
+            ],
+            0.0,
+        );
+        assert_eq!(a.settings.len(), 2, "{:?}", a.settings);
+        let (lock, fade) = (&a.settings[0], &a.settings[1]);
+        assert_eq!(lock.mask, Some(vec![0x01]), "{lock:?}");
+        assert_eq!(
+            lock.values.values().cloned().collect::<Vec<_>>(),
+            [vec![0x05], vec![0x04]]
+        );
+        assert_eq!(fade.mask, Some(vec![0x0C]), "{fade:?}");
+        // no read before the first write: the whole value, whatever later writes change
+        let mut b = Analyzer::default();
+        watch(
+            &mut b,
+            &[
+                (0x7C0, vec![0x04, 0x2E, 0xA0, 0x02, 0x04]),
+                (0x7C8, vec![0x03, 0x6E, 0xA0, 0x02]),
+                (0x7C0, vec![0x04, 0x2E, 0xA0, 0x02, 0x05]),
+                (0x7C8, vec![0x03, 0x6E, 0xA0, 0x02]),
+            ],
+            0.0,
+        );
+        assert_eq!(b.settings.len(), 1, "{:?}", b.settings);
+        assert_eq!(b.settings[0].mask, None);
     }
 
     #[test]

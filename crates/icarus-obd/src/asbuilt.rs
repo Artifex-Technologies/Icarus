@@ -6,8 +6,9 @@
 //!
 //! A sweep of up to 256 identifiers no file lists, so it passes module data's sweep gate (`moddata::Gates::sweep`) before
 //! anything is sent:
-//! - an airbag or occupant module (by its ID, its name, or as any vehicle profile names it) is never swept, nor a module of
-//!   unknown kind where the vehicle's make names no airbag module;
+//! - an airbag or occupant module (by its ID, its name, or as any vehicle profile names it) is never swept, nor an
+//!   immobilizer, smart-key or certification module (by an address the fence has: a vehicle profile's or a module-data
+//!   file's, `fence::current`), nor a module of unknown kind where the vehicle's make names no airbag module;
 //! - a chassis or driver-assist module (ABS and stability control, brakes, steering, radar, cameras, cruise, lane and
 //!   parking assistance; by its kind or name in its module-data file, or the vehicle profile's name for its address: ICA-100)
 //!   gets identity only, unless its file in the module-data set chosen for the vehicle lists identifiers DE00-DEFF, which
@@ -29,14 +30,16 @@ pub type Block = Vec<(u16, Vec<u8>)>;
 
 /// What of the block of the module at `tx`/`rx` may be read on a vehicle of `make` (a profile's id; None: not known), with
 /// `set`, the module-data set chosen for the vehicle (`Loaded::on_vehicle`), when there is one: its file for this module
-/// is what a chassis or driver-assist module may be read by. Every identifier from DE00 on, only those the file lists, or
-/// why nothing.
+/// is what a chassis or driver-assist module may be read by. `fence` is the key modules' fence as it stands
+/// (`fence::current`: the profiles' and the module-data sets'), so a key module only a module-data file names is not swept
+/// either. Every identifier from DE00 on, only those the file lists, or why nothing.
 pub fn plan(
     profiles: &[Profile],
     make: Option<&str>,
     tx: u32,
     rx: u32,
     set: Option<&Loaded>,
+    fence: &crate::fence::Fence,
 ) -> Result<Sweep, String> {
     let file = set
         .and_then(|s| s.module(tx))
@@ -68,7 +71,7 @@ pub fn plan(
         },
         requests: Vec::new(),
     };
-    let gates = match set {
+    let mut gates = match set {
         Some(s) => Gates::for_vehicle(profiles, &s.modules, &s.set.make, make),
         None => Gates::for_vehicle(
             profiles,
@@ -77,6 +80,7 @@ pub fn plan(
             make,
         ),
     };
+    gates.fence_also(fence);
     gates.sweep(file.unwrap_or(&bare), 0x22, FIRST..=LAST)
 }
 
@@ -90,8 +94,9 @@ pub fn read(
     profiles: &[Profile],
     make: Option<&str>,
     set: Option<&Loaded>,
+    fence: &crate::fence::Fence,
 ) -> Result<Block, String> {
-    match plan(profiles, make, tx, rx, set) {
+    match plan(profiles, make, tx, rx, set, fence) {
         Err(why) => Err(format!(
             "{tx:03X}'s as-built block is not read ({why}); nothing was sent to it"
         )),
@@ -258,16 +263,41 @@ mod tests {
     fn the_airbag_module_is_never_swept() {
         let profiles = crate::vehicles::builtin();
         let (mut elm, sent) = recorded(SimCar::new());
-        let e = read(&mut elm, 0x780, 0x788, &profiles, Some("toyota"), None).unwrap_err();
+        let e = read(
+            &mut elm,
+            0x780,
+            0x788,
+            &profiles,
+            Some("toyota"),
+            None,
+            &crate::fence::Fence::default(),
+        )
+        .unwrap_err();
         assert!(
             e.contains("airbag") && e.contains("nothing was sent"),
             "{e}"
         );
-        let e = read(&mut elm, 0x7C0, 0x7C8, &profiles, None, None).unwrap_err();
+        let e = read(
+            &mut elm,
+            0x7C0,
+            0x7C8,
+            &profiles,
+            None,
+            None,
+            &crate::fence::Fence::default(),
+        )
+        .unwrap_err();
         assert!(e.contains("could be the airbag module"), "{e}");
         assert!(sent.lock().unwrap().is_empty(), "no request went out");
         assert_eq!(
-            plan(&profiles, Some("toyota"), 0x7C0, 0x7C8, None),
+            plan(
+                &profiles,
+                Some("toyota"),
+                0x7C0,
+                0x7C8,
+                None,
+                &crate::fence::Fence::default()
+            ),
             Ok(Sweep::Whole)
         );
     }
@@ -280,7 +310,16 @@ mod tests {
         let profiles = crate::vehicles::builtin();
         let (mut elm, sent) = recorded(SimCar::new().with_block(0x7B0, 0x1F));
         for (tx, words) in [(0x7B0, "ABS / VSC / TRC"), (0x7A1, "power steering")] {
-            let e = read(&mut elm, tx, tx + 8, &profiles, Some("toyota"), None).unwrap_err();
+            let e = read(
+                &mut elm,
+                tx,
+                tx + 8,
+                &profiles,
+                Some("toyota"),
+                None,
+                &crate::fence::Fence::default(),
+            )
+            .unwrap_err();
             assert!(
                 e.contains("chassis and driver-assist")
                     && e.contains(words)
@@ -289,7 +328,16 @@ mod tests {
                 "{e}"
             );
         }
-        let e = read(&mut elm, 0x780, 0x788, &profiles, Some("toyota"), None).unwrap_err();
+        let e = read(
+            &mut elm,
+            0x780,
+            0x788,
+            &profiles,
+            Some("toyota"),
+            None,
+            &crate::fence::Fence::default(),
+        )
+        .unwrap_err();
         assert!(e.contains("airbag"), "{e}");
         assert!(
             sent.lock().unwrap().is_empty(),
@@ -305,6 +353,7 @@ mod tests {
             &profiles,
             Some("toyota"),
             Some(&set),
+            &crate::fence::Fence::default(),
         )
         .unwrap_err();
         assert!(e.contains("none of 22 DE00-DEFF is listed"), "{e}");
@@ -316,6 +365,7 @@ mod tests {
             &profiles,
             Some("toyota"),
             Some(&set),
+            &crate::fence::Fence::default(),
         )
         .unwrap();
         assert_eq!(b.len(), 3, "the cluster is no chassis module: {b:?}");
@@ -349,6 +399,7 @@ mod tests {
             &profiles,
             Some("toyota"),
             Some(&set),
+            &crate::fence::Fence::default(),
         )
         .unwrap_err();
         assert!(
@@ -376,7 +427,14 @@ mod tests {
             .collect();
         let set = set_with_abs(&listed);
         assert_eq!(
-            plan(&profiles, Some("toyota"), 0x7B0, 0x7B8, Some(&set)),
+            plan(
+                &profiles,
+                Some("toyota"),
+                0x7B0,
+                0x7B8,
+                Some(&set),
+                &crate::fence::Fence::default()
+            ),
             Ok(Sweep::Listed((FIRST..=FIRST + 0x0F).collect()))
         );
         let (mut elm, sent) = recorded(SimCar::new().with_block(0x7B0, 0x1F));
@@ -387,6 +445,7 @@ mod tests {
             &profiles,
             Some("toyota"),
             Some(&set),
+            &crate::fence::Fence::default(),
         )
         .unwrap();
         assert_eq!(
@@ -409,6 +468,7 @@ mod tests {
             &profiles,
             Some("toyota"),
             Some(&set),
+            &crate::fence::Fence::default(),
         )
         .unwrap_err();
         assert!(e.contains("answering from 7B8, not 7B9"), "{e}");
@@ -419,7 +479,16 @@ mod tests {
     fn a_block_read_saved_and_read_back() {
         let mut elm = Elm::connect(Box::new(SimCar::new())).unwrap();
         let profiles = crate::vehicles::builtin();
-        let b = read(&mut elm, 0x7C0, 0x7C8, &profiles, Some("toyota"), None).unwrap();
+        let b = read(
+            &mut elm,
+            0x7C0,
+            0x7C8,
+            &profiles,
+            Some("toyota"),
+            None,
+            &crate::fence::Fence::default(),
+        )
+        .unwrap();
         assert_eq!(
             b.iter().map(|x| x.0).collect::<Vec<_>>(),
             [0xDE00, 0xDE01, 0xDE02],
@@ -431,11 +500,17 @@ mod tests {
         let p2 = save_in(&dir, 0x7C0, "2026-11-21 20:00", &b).unwrap();
         assert_ne!(p1, p2, "never over an earlier backup");
         assert_eq!(parse(&std::fs::read_to_string(&p1).unwrap()), b);
-        assert!(
-            read(&mut elm, 0x7E1, 0x7E9, &profiles, Some("toyota"), None)
-                .unwrap_err()
-                .contains("no as-built block")
-        );
+        assert!(read(
+            &mut elm,
+            0x7E1,
+            0x7E9,
+            &profiles,
+            Some("toyota"),
+            None,
+            &crate::fence::Fence::default()
+        )
+        .unwrap_err()
+        .contains("no as-built block"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

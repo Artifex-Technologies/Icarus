@@ -45,7 +45,7 @@ bidirectional shop scanner, a tuning suite and a bus analyser: on Linux, for man
 | Learn a test from another tool: watch the bus (adapter monitor mode, a Y-cable) while a shop tool runs it, decode its 2F/30 requests into a `[[test]]` entry | done 2026-11-07 (Bus page, icarus bus watch); one button adds it to the vehicle's file |
 | Learning from another tool, as a step of its own | done 2026-11-08: the Learning page and `icarus learn`: marks name what is learned next, settings, tests and routines are named and added there, what is not learned (security access, refused writes) is noted, each session saved in the vehicle's Logs; Sarina (optional) reads a session and suggests what each thing is (`labyrinth-ask-sarina`, read-only; `learning_sessions` in `icarus mcp`). Since 2026-11-27 (ICA-101): nothing is learned from an immobilizer, smart-key or certification module (fenced by the frame's ID; its messages are not even written into the session), and on any module a write, routine or output test sent after security access (`27`) is noted, never learned, until the module is back in its default session |
 | Settings in the window | done 2026-11-08: the Settings page (value now, change with a yes, undo) |
-| Customizations: a setting a module keeps (Toyota's customizations, FORScan's feature switches) | done 2026-11-08, tested on the simulated vehicle: settings.rs (`22`/`2E`, `21`/`3B` only; value before kept in the vehicle's Logs first, read back, put back if not taken, undo; wired, 12 V, parked, engine off; never airbag, immobilizer, key or odometer), `[[setting]]` profile entries, learned from the bus like tests (`icarus obd settings / setting / setting-undo`). Since 2026-11-27 (ICA-102): settings that share one identifier each have a `mask`; a change writes the value read just before with only its bits replaced, and the read-back, the put-back and undo touch only them, so one setting never undoes another; the learner gives a learned setting the bits the other tool changed. |
+| Customizations: a setting a module keeps (Toyota's customizations, FORScan's feature switches) | done 2026-11-08, tested on the simulated vehicle: settings.rs (`22`/`2E`, `21`/`3B` only; value before kept in the vehicle's Logs first, read back, put back if not taken, undo; wired, 12 V, parked, engine off; never airbag, immobilizer, key or odometer), `[[setting]]` profile entries, learned from the bus like tests (`icarus obd settings / setting / setting-undo`). Since 2026-11-27 (ICA-102): settings that share one identifier each have a `mask`; a change writes the value read just before with only its bits replaced, and the read-back, the put-back and undo touch only them, so one setting never undoes another; the learner gives a learned setting the bits the other tool changed (a first write that changed nothing takes the bits of the next one that does; one with no read before it stays a whole-value setting, since its bits are not known). |
 
 The smaller writes (clearing codes, actuator tests, settings, service routines) each have their own module and allow-list,
 keep what was there first and have a way back; flashing and coding open only when the conditions below are built.
@@ -54,9 +54,12 @@ keep what was there first and have a way back; flashing and coding open only whe
 modules are fenced by address, whatever a definition calls itself: a profile's `[[module]]` or a module-data file's
 `[module]` gives the kind (`kind = "immobilizer"`, `"smart-key"`, `"certification"`; IDs are u32, so 29-bit modules fit).
 Actuator tests, settings (reading them too), service routines and clearing codes refuse such a module before anything is
-sent; an entry aimed at one is left out when the profiles load; module data and the as-built sweep give it identity only;
-the bus learner learns nothing from it and does not write its messages into a session; `icarus mcp` does not ask it. No
-maker's addresses are built in: my truck's go in from its own identity reads once I have confirmed them.
+sent; an entry aimed at one is left out when the profiles load; module data and the as-built sweep give it identity only,
+whichever file names it (a key module one set's file names gets no data request from another set's file on its address
+either, and the sweep asks the whole fence, profiles and sets); the bus learner learns nothing from it and does not write
+its messages into a session; `icarus mcp` does not ask it. On any module, a write the tool sent before a `27` unlock and
+whose answer had not come is dropped at the unlock, so no answer after it teaches anything. No maker's addresses are built
+in: my truck's go in from its own identity reads once I have confirmed them.
 
 ## Editing (files only)
 

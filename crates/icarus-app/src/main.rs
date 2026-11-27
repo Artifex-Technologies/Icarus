@@ -492,7 +492,11 @@ impl App {
         let (tx, wrx) = channel();
         let (wtx, rx) = channel();
         let c = ctx.clone();
-        std::thread::spawn(move || worker::run(wrx, wtx, move || c.request_repaint()));
+        std::thread::spawn(move || {
+            worker::run(wrx, wtx, icarus_obd::fence::current, move || {
+                c.request_repaint()
+            })
+        });
         let c2 = ctx.clone();
         let repaint: std::sync::Arc<dyn Fn() + Send + Sync> =
             std::sync::Arc::new(move || c2.request_repaint());
@@ -5610,7 +5614,8 @@ mod bus_dbc {
         );
         let (ctx, crx) = std::sync::mpsc::channel();
         let (etx, erx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || worker::run(crx, etx, || {}));
+        // an empty fence: the test reads no profile or module-data set from the home folder for its bus watch
+        std::thread::spawn(move || worker::run(crx, etx, icarus_obd::fence::Fence::default, || {}));
         ctx.send(Cmd::Connect("sim".into())).unwrap();
         let end = Instant::now() + Duration::from_secs(30);
         let mut connected = false;

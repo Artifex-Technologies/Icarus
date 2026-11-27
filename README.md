@@ -196,8 +196,9 @@ Or the **Learning** page: Start learning, type what you are about to do and pres
 - **What is learned.** A write the module accepted (UDS `2E` answered `6E`, KWP2000 `3B` answered `7B`) becomes a
   `[[setting]]`, with the value the tool read just before (`22`/`21`) as "was" and the written one as "set", the bits
   the write changed as its `mask` (so a setting packed into an identifier with others is changed alone; a later write of
-  other bits of the same identifier is learned as a setting of its own), and whether the tool opened the extended session
-  first. An output-control request (UDS `2F ... 03`, KWP2000 `30 .. 07`) becomes a `[[test]]`, and a routine the tool
+  other bits of the same identifier is learned as a setting of its own; a first write that changed nothing takes the bits
+  of the next write that does, and one with no read before it stays a whole-value setting), and whether the tool opened
+  the extended session first. An output-control request (UDS `2F ... 03`, KWP2000 `30 .. 07`) becomes a `[[test]]`, and a routine the tool
   starts (`31 01`) a `[[service]]`. A mark names the next one learned; one change per mark works best. All are unchecked,
   with the most cautious conditions; the airbag modules and immobilizer, key and odometer settings are never learned.
 - **What is never learned from: the key modules, and anything after security access.** Nothing to or from an
@@ -205,7 +206,8 @@ Or the **Learning** page: Start learning, type what you are about to do and pres
   `"certification"`: fenced by address, whatever the tool or a mark calls it) is learned, and its messages are not written
   into the session. On any module, a write, routine or output test the tool sends after unlocking the module with
   security access (`27`) is noted and never learned, since it may need access Icarus never uses, until the module says it
-  is back in its default session.
+  is back in its default session; so is the module's answer to it, and a write sent before the unlock whose answer had not
+  come yet is dropped at the unlock.
 - **What is not learned, but noted.** Security access (the tool unlocking a module), a routine's stop and results, writes
   too long for a setting, memory writes and programming, and writes the module refused, each in words.
 - **The session** is saved in the vehicle's `Logs` folder as `learning-DATE-TIME.md`: the module names from Icarus's
@@ -354,8 +356,8 @@ The fence is in code (`crates/icarus-obd/src/moddata.rs`), checked when a set is
 services 21 and 22 only, built by Icarus from the identifier (files carry no raw bytes; a file may also name `1A`,
 identification, which is kept for a later build and never sent today); never on 7DF or any answer ID; airbag and occupant
 modules identity only, and so immobilizer, smart-key and certification modules (by their file's `kind` or name, or an
-address a vehicle profile gives that kind, 29-bit IDs included), and on a make whose profile names no airbag module, a
-module of unknown kind gets nothing either;
+address a vehicle profile or another set's file gives that kind, 29-bit IDs included), and on a make whose profile names
+no airbag module, a module of unknown kind gets nothing either;
 nothing that needs a diagnostic session is sent (Icarus opens none); at least 50 ms between any two sends, a busy module
 slowed, a refused request, one that keeps failing or a silent module dropped. Modules behind a gateway that answer
 with their own address byte first (Toyota's 750: tire pressure 2A, as OBDb's Tacoma set has it) are read through the
@@ -549,7 +551,8 @@ reached with the adapter's extended addressing (`ATCEA`): their identity and cod
 adapter that shows the address byte in answers and one that strips it are both read.
 `asbuilt` reads a module's whole as-built configuration block (FORScan's name for Ford's identifiers DE00 on: `22` reads
 only, until the first one the module does not have) and saves it in the vehicle's `Definitions` folder, never over an
-earlier one: the way back before any configuration change. It never sweeps an airbag or occupant module, and a chassis or
+earlier one: the way back before any configuration change. It never sweeps an airbag or occupant module, nor an
+immobilizer, smart-key or certification module that a vehicle profile or a module-data file names, and a chassis or
 driver-assist module (ABS and stability control, brakes, steering, radar, cameras, cruise, lane and parking assistance:
 by its kind or name in its module-data file, the common abbreviations such as MDPS, SCC, ACC or SAS and names run
 together such as ParkAssist included, or by the name the vehicle's profile gives its address, such as Toyota's 7B0 and
