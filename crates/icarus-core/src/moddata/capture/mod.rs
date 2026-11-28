@@ -4,8 +4,8 @@
 //! gives a transcript (to match against a screen recording of the app) and a module-data set: every identifier a module
 //! answered on a data read (21, 22; a 22 read of several identifiers at once counts as a read of each; K-line and J1850
 //! modules are known by their address) becomes a request with one placeholder value covering its answer's bytes, unnamed
-//! and not verified, with the answers seen kept as samples. Identity reads (1A) are listed as seen, not imported (a
-//! module's identity is read in a later build).
+//! and not verified, with the answers seen kept as samples. Identity reads (1A, and the VIN's and the serial number's
+//! 22 F190 and 22 F18C) are listed as seen, not imported (a module's identity is read in a later build).
 //!
 //! **Privacy.** A Bluetooth capture holds everything the phone sent and received over Bluetooth. Only the diagnostic
 //! conversation is kept: the readers never read Bluetooth addresses, device names or link keys (HCI commands and events
@@ -434,6 +434,81 @@ pub fn mask_vins(ex: &mut [Exchange]) -> usize {
     n
 }
 
+/// The UDS identifiers whose value tells one vehicle or one module from every other, with what each is: the VIN (F190) and
+/// the ECU serial number (F18C), as `vin_fields` and `serial_fields` take them. They are identity, never module data: a
+/// capture's set leaves them out (`build`), and module data never reads them (`icarus-obd`'s gates).
+pub const IDENTIFYING: [(u16, &str); 2] =
+    [(0xF190, "the VIN"), (0xF18C, "the module's serial number")];
+
+/// What `mask_message` hid in a message.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Hidden {
+    pub vin: bool,
+    pub serial: bool,
+}
+
+/// One diagnostic message seen on its own, as the bus view sees it (a request, or an answer whose request is not at
+/// hand), with its VIN and module serial number masked (`*`, 2A) by the rules of a capture (`mask_vins`,
+/// `mask_serials`). An answer is taken as the answer to a read of its own identifier (`62 F1 8C` to `22 F1 8C`, `5A 89`
+/// to `1A 89`, `49 02` to `09 02`), and a `62` answer that echoes F190 or F18C after its first identifier as the answer to
+/// a read of several with it among them, so a value that happens to hold those two bytes is hidden from there on: more
+/// is hidden rather than less. Returns the message, masked, and what was hidden.
+pub fn mask_message(msg: &[u8]) -> (Vec<u8>, Hidden) {
+    let Some(&sid) = msg.first() else {
+        return (Vec::new(), Hidden::default());
+    };
+    let answer = (0x40..0x80).contains(&sid);
+    let mut e = Exchange {
+        at: 0.0,
+        clock: None,
+        ids: Ids::Can11,
+        tx: None,
+        ext: None,
+        rx: None,
+        request: msg.to_vec(),
+        replies: Vec::new(),
+        problem: None,
+        masked: false,
+        serial_masked: false,
+        kline: None,
+    };
+    if answer {
+        let mut asked = vec![sid - 0x40];
+        if sid == 0x62 {
+            asked.extend_from_slice(&msg[1..msg.len().min(3)]);
+            for (did, _) in IDENTIFYING {
+                let [hi, lo] = did.to_be_bytes();
+                if msg.len() > 3
+                    && msg[1..3] != [hi, lo]
+                    && msg[3..].windows(2).any(|w| w == [hi, lo])
+                {
+                    asked.extend_from_slice(&[hi, lo]);
+                }
+            }
+        } else {
+            asked.extend_from_slice(&msg[1..msg.len().min(2)]);
+        }
+        e.request = asked;
+        e.replies.push(Reply {
+            from: None,
+            data: msg.to_vec(),
+        });
+    }
+    let one = std::slice::from_mut(&mut e);
+    mask_vins(one);
+    mask_serials(one);
+    let hidden = Hidden {
+        vin: e.masked,
+        serial: e.serial_masked,
+    };
+    let shown = if answer {
+        e.replies.remove(0).data
+    } else {
+        e.request
+    };
+    (shown, hidden)
+}
+
 /// Masks every module serial number (ICA-106; each byte becomes `*`, 2A) in the requests and the replies: the whole field
 /// of a serial number's own identifier (`serial_fields`) whatever it holds. A serial number is no use to a set's values,
 /// and tells one module (and so one vehicle) from every other. Returns how many exchanges had one.
@@ -755,8 +830,9 @@ struct Answered {
 
 /// The set a capture's exchanges give: every module that answered a data read (21, 22), one request per identifier it
 /// answered (a 22 read of several identifiers at once split into one per identifier, `split_reads`), each with one
-/// placeholder value covering the answer's bytes. Everything else seen (1A identity reads among it) is listed in
-/// `left_out` with why. The caller applies the vehicle gates (`icarus-obd`'s `moddata::gate_imported`) before writing it.
+/// placeholder value covering the answer's bytes. Everything else seen (1A identity reads among it, and the VIN and the
+/// serial number, `IDENTIFYING`) is listed in `left_out` with why. The caller applies the vehicle gates (`icarus-obd`'s
+/// `moddata::gate_imported`) before writing it.
 pub fn build(ex: &[Exchange], o: &Options) -> Result<Imported, String> {
     let mut out = Imported::default();
     let mut left: Vec<(String, String)> = Vec::new();
@@ -837,6 +913,15 @@ pub fn build(ex: &[Exchange], o: &Options) -> Result<Imported, String> {
             let ident = e.request[1..n]
                 .iter()
                 .fold(0u16, |a, b| (a << 8) | u16::from(*b));
+            // the VIN and a module's serial number are identity, not data: a set that read them would hand them whole
+            // to whatever reads the module's data (`icarus mcp`'s module_data among them), masked samples or not
+            if let Some((_, what_it_is)) = IDENTIFYING
+                .iter()
+                .find(|(did, _)| sid == 0x22 && *did == ident)
+            {
+                leave(what, format!("{what_it_is} (identity): seen, not imported"));
+                continue;
+            }
             let key = (e.ids as u8, tx, e.ext, sid, ident);
             let positive: Vec<&Reply> = e
                 .replies
@@ -1345,10 +1430,9 @@ mod tests {
             !csv.contains("4A 54") && csv.contains("[VIN masked]"),
             "{csv}"
         );
+        // the VIN's read is identity: left out of the set (`the_vins_read_is_left_out_of_the_set`)
         let imp = build(&list, &opts()).unwrap();
-        let r = &imp.modules[0].requests[0];
-        assert!(r.sample.as_deref().unwrap().ends_with("2A 2A"));
-        assert!(r.values[0].note.contains("VIN masked"));
+        assert!(imp.modules.is_empty(), "{:?}", imp.modules);
         // a short run (a part number) is not a VIN
         let mut short = vec![ex(0x7E0, &[0x1A, 0x87], &[(0x7E8, b"\x5A\x8789661-04A10")])];
         assert_eq!(mask_vins(&mut short), 0);
@@ -1426,8 +1510,9 @@ mod tests {
         assert_no_vin(&list);
     }
 
-    /// ICA-106: a module's serial number (UDS 22 F18C, KWP2000's 1A 89) is masked in the transcript and the set whatever it
-    /// holds, in a read of several identifiers too; what is not one is left as it is.
+    /// ICA-106: a module's serial number (UDS 22 F18C, KWP2000's 1A 89, and a 2E F18C write of it) is masked in the
+    /// transcript and the set whatever it holds, in a read of several identifiers too; what is not one is left as it is.
+    /// The set leaves the serial number's read out (identity, not data), so nothing reads it on the vehicle later.
     #[test]
     fn serial_numbers_are_masked() {
         // made up, and not VIN-like (too short)
@@ -1451,9 +1536,15 @@ mod tests {
                 &[0x22, 0x12, 0x34],
                 &[(0x7E8, &[0x62, 0x12, 0x34, 0x01, 0x02])],
             ),
+            // a tool writing it
+            ex(
+                0x7E0,
+                &with(&[0x2E, 0xF1, 0x8C]),
+                &[(0x7E8, &[0x6E, 0xF1, 0x8C])],
+            ),
         ];
         assert_eq!(mask_vins(&mut list), 0, "no VIN");
-        assert_eq!(mask_serials(&mut list), 3);
+        assert_eq!(mask_serials(&mut list), 4);
         assert_eq!(&list[0].replies[0].data[3..], &[b'*'; 12]);
         assert_eq!(&list[1].replies[0].data[2..], &[b'*'; 12]);
         assert_eq!(
@@ -1463,6 +1554,10 @@ mod tests {
         );
         assert!(!list[3].serial_masked);
         assert_eq!(list[3].replies[0].data, [0x62, 0x12, 0x34, 0x01, 0x02]);
+        assert!(list[4].serial_masked);
+        assert_eq!(&list[4].request[..3], &[0x2E, 0xF1, 0x8C]);
+        assert_eq!(&list[4].request[3..], &[b'*'; 12], "the write's value");
+        assert_eq!(list[4].replies[0].data, [0x6E, 0xF1, 0x8C]);
         let hidden = |text: &str| {
             let serial = hex(SERIAL);
             let bytes: Vec<&str> = serial.split(' ').collect();
@@ -1472,7 +1567,7 @@ mod tests {
         };
         let csv = transcript_csv(&list, &|_| String::new());
         hidden(&csv);
-        assert_eq!(csv.matches("[serial number masked]").count(), 3, "{csv}");
+        assert_eq!(csv.matches("[serial number masked]").count(), 4, "{csv}");
         assert!(!csv.contains("[VIN masked]"), "{csv}");
         let imp = build(&list, &opts()).unwrap();
         let mut all = String::new();
@@ -1480,18 +1575,153 @@ mod tests {
             all += &format!("{name}\n{text}\n");
         }
         hidden(&all);
-        let read = imp.modules[0]
-            .requests
-            .iter()
-            .find(|r| r.label() == "22 F18C")
-            .expect("the read is kept, its answer masked");
-        assert!(
-            read.sample.as_deref().unwrap().ends_with("2A 2A"),
-            "{read:?}"
+        let labels: Vec<String> = imp.modules[0].requests.iter().map(|r| r.label()).collect();
+        assert_eq!(
+            labels,
+            ["22 F187", "22 1234"],
+            "no read of the serial number"
         );
-        assert!(read.values[0].note.contains("serial number masked"));
+        assert!(
+            imp.left_out.iter().any(|(w, y)| w == "7E0 22 F1 8C"
+                && y == "the module's serial number (identity): seen, not imported"),
+            "{:?}",
+            imp.left_out
+        );
+        for (w, y) in &imp.left_out {
+            hidden(&format!("{w} {y}"));
+        }
         // run again, nothing more to mask, and the count says what is masked
-        assert_eq!(mask_serials(&mut list), 3);
+        assert_eq!(mask_serials(&mut list), 4);
+    }
+
+    /// ICA-106: the VIN's read is identity too, left out of the set (its answer masked in the transcript or not).
+    #[test]
+    fn the_vins_read_is_left_out_of_the_set() {
+        let vin = VIN;
+        for keep in [false, true] {
+            let mut list = vec![
+                ex(
+                    0x7E0,
+                    &[0x22, 0xF1, 0x90],
+                    &[(0x7E8, &[&[0x62, 0xF1, 0x90][..], vin].concat())],
+                ),
+                ex(
+                    0x7E0,
+                    &[0x22, 0x12, 0x34],
+                    &[(0x7E8, &[0x62, 0x12, 0x34, 0x01, 0x02])],
+                ),
+            ];
+            if !keep {
+                assert_eq!(mask_vins(&mut list), 1);
+            }
+            let imp = build(&list, &opts()).unwrap();
+            let labels: Vec<String> = imp.modules[0].requests.iter().map(|r| r.label()).collect();
+            assert_eq!(labels, ["22 1234"]);
+            assert!(
+                imp.left_out
+                    .iter()
+                    .any(|(w, y)| w == "7E0 22 F1 90"
+                        && y == "the VIN (identity): seen, not imported")
+            );
+        }
+    }
+
+    /// ICA-106: one message on its own, as the bus view sees it (no request at hand): the VIN and a serial number hidden by
+    /// the capture's rules, in answers and in writes; other messages as they are.
+    #[test]
+    fn a_message_on_its_own_is_masked() {
+        let vin = VIN;
+        let serial = b"SN0123456789";
+        let masked = |n: usize| vec![b'*'; n];
+        let cases: Vec<(Vec<u8>, Vec<u8>, Hidden)> = vec![
+            // 09 02's answer on CAN
+            (
+                [&[0x49, 0x02, 0x01][..], vin].concat(),
+                [vec![0x49, 0x02, 0x01], masked(17)].concat(),
+                Hidden {
+                    vin: true,
+                    serial: false,
+                },
+            ),
+            // 22 F190's and 22 F18C's answers
+            (
+                [&[0x62, 0xF1, 0x90][..], vin].concat(),
+                [vec![0x62, 0xF1, 0x90], masked(17)].concat(),
+                Hidden {
+                    vin: true,
+                    serial: false,
+                },
+            ),
+            (
+                [&[0x62, 0xF1, 0x8C][..], serial].concat(),
+                [vec![0x62, 0xF1, 0x8C], masked(12)].concat(),
+                Hidden {
+                    vin: false,
+                    serial: true,
+                },
+            ),
+            // KWP2000's 1A 89 answer
+            (
+                [&[0x5A, 0x89][..], serial].concat(),
+                [vec![0x5A, 0x89], masked(12)].concat(),
+                Hidden {
+                    vin: false,
+                    serial: true,
+                },
+            ),
+            // the answer to a read of several: F187 kept, everything after F18C's echo hidden
+            (
+                [&[0x62, 0xF1, 0x87, b'P', b'N', 0xF1, 0x8C][..], serial].concat(),
+                [vec![0x62, 0xF1, 0x87, b'P', b'N', 0xF1, 0x8C], masked(12)].concat(),
+                Hidden {
+                    vin: false,
+                    serial: true,
+                },
+            ),
+            // writes of the VIN (UDS and KWP2000) and of the serial number
+            (
+                [&[0x2E, 0xF1, 0x90][..], vin].concat(),
+                [vec![0x2E, 0xF1, 0x90], masked(17)].concat(),
+                Hidden {
+                    vin: true,
+                    serial: false,
+                },
+            ),
+            (
+                [&[0x3B, 0x90][..], vin].concat(),
+                [vec![0x3B, 0x90], masked(17)].concat(),
+                Hidden {
+                    vin: true,
+                    serial: false,
+                },
+            ),
+            (
+                [&[0x2E, 0xF1, 0x8C][..], serial].concat(),
+                [vec![0x2E, 0xF1, 0x8C], masked(12)].concat(),
+                Hidden {
+                    vin: false,
+                    serial: true,
+                },
+            ),
+        ];
+        for (msg, want, hidden) in cases {
+            assert_eq!(mask_message(&msg), (want, hidden), "{}", hex(&msg));
+        }
+        for plain in [
+            &[0x22, 0xF1, 0x90][..],
+            &[0x62, 0x12, 0x34, 0x01, 0x02],
+            &[0x7F, 0x22, 0x31],
+            &[0x6E, 0xF1, 0x8C],
+            &[0x2E, 0x12, 0x34, 0x01],
+        ] {
+            assert_eq!(
+                mask_message(plain),
+                (plain.to_vec(), Hidden::default()),
+                "{}",
+                hex(plain)
+            );
+        }
+        assert_eq!(mask_message(&[]), (vec![], Hidden::default()));
     }
 
     #[test]

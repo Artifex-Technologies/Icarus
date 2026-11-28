@@ -41,7 +41,7 @@ bidirectional shop scanner, a tuning suite and a bus analyser: on Linux, for man
 | Code descriptions, where to start, parts usually involved, look-up and parts links, freeze frame, saved reports | done 2026-11-07 (standard codes in Icarus's words; maker codes per profile `[codes]`) |
 | Clear codes | done 2026-11-07: asks first, engine off, a report saved before; OBD-II 04, UDS/KWP 14 per module; logged |
 | Actuator tests (run the fan, open the throttle, cycle the ABS pump, click a relay) | done 2026-11-07: the engine (actuator.rs: allow-list, airbag ban, conditions, 30 s cap, hold-to-run, control returned on every path, log), `[[test]]` profile entries, five on the simulated vehicle. |
-| Learn module data from another tool: a phone's Bluetooth log of an app and its adapter (pcap, PacketLogger), or a bus log (`icarus bus watch --raw`, candump) | done 2026-11-19, tested on small files written for the tests (`icarus import btlog`/`buslog`, docs/CAPTURES.md): a timed transcript and a set of every identifier a module answered on a data read (21, 22; identity reads 1A listed, not imported), unnamed and unverified; only the OBD conversation kept, VINs masked (in requests and answers) |
+| Learn module data from another tool: a phone's Bluetooth log of an app and its adapter (pcap, PacketLogger), or a bus log (`icarus bus watch --raw`, candump) | done 2026-11-19, tested on small files written for the tests (`icarus import btlog`/`buslog`, docs/CAPTURES.md): a timed transcript and a set of every identifier a module answered on a data read (21, 22; identity reads 1A, 22 F190 and 22 F18C listed, not imported), unnamed and unverified; only the OBD conversation kept, VINs masked (in requests and answers), module serial numbers always |
 | Learn a test from another tool: watch the bus (adapter monitor mode, a Y-cable) while a shop tool runs it, decode its 2F/30 requests into a `[[test]]` entry | done 2026-11-07 (Bus page, icarus bus watch); one button adds it to the vehicle's file |
 | Learning from another tool, as a step of its own | done 2026-11-08: the Learning page and `icarus learn`: marks name what is learned next, settings, tests and routines are named and added there, what is not learned (security access, refused writes) is noted, each session saved in the vehicle's Logs; Sarina (optional) reads a session and suggests what each thing is (`labyrinth-ask-sarina`, read-only; `learning_sessions` in `icarus mcp`). Since 2026-11-27 (ICA-101): nothing is learned from an immobilizer, smart-key or certification module (fenced by the frame's ID; its messages are not even written into the session), and on any module a write, routine or output test sent after security access (`27`) is noted, never learned, until the module is back in its default session |
 | Settings in the window | done 2026-11-08: the Settings page (value now, change with a yes, undo) |
@@ -109,8 +109,10 @@ A module is bricked when a write stops halfway or puts the wrong thing in. Icaru
     program that opened it alone (done: `port::open_serial` locks it with flock and marks it exclusive with TIOCEXCL), so
     a second program (the window and `icarus obd` on one cable at once) is refused with "another program has
     /dev/ttyUSB0 open" and that program's name, when this user may see it in /proc; so is a port another program had
-    open before, locking nothing (a terminal program). ModemManager, which runs as root and would probe a ttyACM cable
-    with AT commands past both, is told by the udev rule to leave the OpenPort alone.
+    open before, locking nothing (a terminal program). Icarus takes off only an exclusive mark it made itself: a port
+    another program marked (gpsd does, without a lock), which root's open gets past, keeps that program's mark.
+    ModemManager, which runs as root and would probe a ttyACM cable with AT commands past both, is told by the udev rule
+    to leave the OpenPort alone. Tested on a pseudo-terminal standing in for the cable; not yet tried on a cable in hand.
 
 ## Writing a module (flash): the conditions
 

@@ -13,6 +13,8 @@
 //! assistant, sees them; and on any module, a write, routine or output test the other tool sent after it unlocked the
 //! module with security access (`27`), since it may need access Icarus never uses. The module counts as unlocked until it
 //! confirms it is back in its default session (`50 01`, KWP2000's `50 81`) or reset (`51`).
+//! The VIN and a module's serial number are masked in what the log says (`capture::mask_message`), and a write of
+//! either is never learned.
 
 use crate::actuator::{Condition, Control, Protocol, TestDef};
 use crate::elm::Protocol as Bus;
@@ -306,8 +308,17 @@ impl Analyzer {
         } else {
             format!("{id:03X} request")
         };
-        self.log
-            .push_back(format!("{at:8.3}  {arrow:<22} {}", describe(msg)));
+        // the VIN and a module's serial number never reach the log (ICA-106): it is shown, saved with a learning session
+        // and handed to `icarus mcp`'s learning_sessions, so to a model that may be in the cloud. Learning sees the bytes.
+        let (shown, hidden) = icarus_core::moddata::capture::mask_message(msg);
+        let mut said = describe(&shown);
+        if hidden.vin {
+            said += " [VIN masked]";
+        }
+        if hidden.serial {
+            said += " [serial number masked]";
+        }
+        self.log.push_back(format!("{at:8.3}  {arrow:<22} {said}"));
         self.logged += 1;
         while self.log.len() > 500 {
             self.log.pop_front();
@@ -334,6 +345,11 @@ impl Analyzer {
                 self.read_values
                     .insert((rx_tx, *lid as u16, true), v.to_vec());
             }
+            // the VIN (2E F190, KWP2000's 3B 90) and a module's serial number (2E F18C) are identity, not a setting: a
+            // setting learned from one would carry it into the session and the vehicle's profile
+            [0x2E, 0xF1, 0x90 | 0x8C, ..] | [0x3B, 0x90, ..] => self.note(format!(
+                "{id:03X}: a write of the VIN or of the module's serial number: identity, never learned"
+            )),
             [0x2E, hi, lo, v @ ..] if !v.is_empty() && v.len() <= 16 => {
                 self.pending_writes
                     .insert((id, u16::from_be_bytes([*hi, *lo]), false), v.to_vec());

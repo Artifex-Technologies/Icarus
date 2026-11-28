@@ -9,7 +9,9 @@ What other projects may rely on from Icarus, and what it uses from them. One sec
 stdin/stdout, seven read-only tools: `explain_code`, `vehicle_check`, `vehicle_modules`, `module_data`, `learning_sessions`,
 `drive_logs`, `tires_gears`.
 `vehicle_check` gives the VIN with its last 6 characters (the serial number) as `******` unless it is called with
-`show_vin: true`.
+`show_vin: true`. No tool gives a module's serial number: `learning_sessions` gives sessions with the VIN and serial
+numbers masked (bytes as `2A`, the line marked `[VIN masked]` or `[serial number masked]`), and `module_data` never reads
+`22 F190` or `22 F18C`.
 Nothing that clears codes, runs a test or writes is offered to a model; a test fails if a tool with such a name appears.
 Nothing from an immobilizer, smart-key or certification module reaches a model: `vehicle_modules` does not ask them,
 `module_data` sends them no data request, and a learning session never holds their messages. The

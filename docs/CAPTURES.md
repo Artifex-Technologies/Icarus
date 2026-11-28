@@ -7,8 +7,9 @@ identifiers each module answers. Icarus reads a recording of that tool at work a
 2. a **module-data set** (Icarus's own format, `~/.config/icarus/data/SET/`): every identifier a module answered on a data
    read (UDS `22`, KWP2000 `21`) becomes a request with one placeholder value covering its answer's bytes, unnamed
    (`22 1234 (8 bytes)`) and not verified, with the answers seen kept as samples (a `22` read of several identifiers at
-   once counts as a read of each, K-line and J1850 modules too). Identity reads (KWP2000 `1A`) are
-   listed as seen, not imported: a module's identity is read in a later build.
+   once counts as a read of each, K-line and J1850 modules too). Identity reads (KWP2000 `1A`, and UDS `22 F190`, the VIN,
+   and `22 F18C`, the module's serial number) are listed as seen, not imported: a module's identity is read in a later
+   build.
 
 ```sh
 icarus import btlog obdlink.pklg --make toyota --transcript obdlink.csv   # a phone's Bluetooth log
@@ -90,6 +91,7 @@ The captures, transcripts and sets of a real vehicle stay outside this repositor
 | Which K-line or J1850 headers count as "every module" | KWP2000: a format byte with its top two bits set (`C0`-`FF`) or target `33`; J1850 and ISO 9141-2: the first byte's addressing bit (`04`) clear, or target `6A`, so Ford's `C4 10 F5` (priority 6, to one module) is that module's; with no protocol known, any first byte of `C0` or above, and targets `33` and `6A` |
 | The same, refused or unanswered every time | listed with the module's refusal code or the adapter's words (NO DATA) |
 | An identity read (`1A`) | listed as "seen, not imported" (a module's identity is read in a later build) |
+| A read of the VIN (`22 F190`) or of a module's serial number (`22 F18C`), alone or in a read of several | listed as "the VIN (identity): seen, not imported" or "the module's serial number (identity): ...": a set that read them would hand them whole to whatever reads the module's data (`icarus mcp`'s `module_data` among them), so module data never reads them, in any set |
 | An answer longer than one value can cover (over 8191 bytes) | listed, the rest of the capture imported |
 | A write, test, routine, clearing, security access, session or reset (`2E`, `2F`, `31`, `3B`, `14`, `27`, `10`, `11`...) | listed as "seen, not imported" |
 | Standard OBD-II (`01`, `09`...) and anything sent to every module (`7DF`, BMW's `6F1` to `DF` or the E-series' `EF`, K-line's functional addresses `33` and `6A`) | listed as "seen, not imported" |

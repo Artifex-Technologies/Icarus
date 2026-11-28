@@ -2042,6 +2042,8 @@ mod tests {
    0.211       7E0  30 00 00 00 00 00 00 00
    0.220       7E8  21 58 58 58 41 30 30 48
    0.230       7E8  22 30 30 30 30 30 30 31
+   0.250       7E0  03 22 23 45 00 00 00 00
+   0.260       7E8  06 62 23 45 0A 0B 0C 00
    0.300       780  03 22 01 01 00 00 00 00
    0.310       788  04 62 01 01 05 00 00 00
    0.400       7E0  04 2E 12 34 01 00 00 00
@@ -2053,7 +2055,8 @@ mod tests {
 ";
 
     /// ICA-106: a capture with a module's serial number in it (22 F18C, and KWP2000's 1A 89) gives a transcript and a set
-    /// without its bytes, --keep-vin or not.
+    /// without its bytes, --keep-vin or not: masked in the transcript, and its read left out of the set (identity), so
+    /// nothing reads it on the vehicle later.
     #[test]
     fn a_capture_with_a_serial_number_gives_neither_transcript_nor_set_its_bytes() {
         // made-up serial numbers "SN01" and "SN02"
@@ -2085,12 +2088,13 @@ mod tests {
             let files = md::set_files(l.imp.set.as_ref().unwrap(), &l.imp.modules);
             for (name, text) in &files {
                 assert!(!text.contains("53 4E 30"), "{name}: {text}");
+                assert!(!text.contains("0xF18C"), "{name}: {text}");
             }
             assert!(
-                files
-                    .iter()
-                    .any(|(_, t)| t.contains("serial number masked")),
-                "{files:?}"
+                l.imp.left_out.iter().any(|(w, y)| w == "7E0 22 F1 8C"
+                    && y == "the module's serial number (identity): seen, not imported"),
+                "{:?}",
+                l.imp.left_out
             );
         }
     }
@@ -2251,7 +2255,7 @@ mod tests {
             "name",
             "truck",
             "7E0",
-            "RAW_22_F190",
+            "RAW_22_2345",
             "--name",
             "x",
             "--unit",
@@ -2284,11 +2288,10 @@ mod tests {
         let ecm = l.imp.modules.iter().find(|m| m.module.tx == 0x7E0).unwrap();
         assert_eq!(ecm.module.name, "engine (ECM)", "named from the profile");
         let labels: Vec<String> = ecm.requests.iter().map(|r| r.label()).collect();
-        assert_eq!(labels, vec!["22 1234", "22 F190"]);
-        let vin_sample = ecm.requests[1].sample.as_deref().unwrap();
-        assert!(
-            !vin_sample.contains("4A 54 58") && vin_sample.contains("2A 2A"),
-            "{vin_sample}"
+        assert_eq!(
+            labels,
+            vec!["22 1234", "22 2345"],
+            "the VIN's read left out"
         );
         assert_eq!(l.masked, 1);
         assert!(
@@ -2304,6 +2307,10 @@ mod tests {
                 .unwrap_or_else(|| panic!("{w}: {:?}", l.imp.left_out))
         };
         assert!(why("780 22 0101").contains("airbag"));
+        assert_eq!(
+            why("7E0 22 F1 90"),
+            "the VIN (identity): seen, not imported"
+        );
         assert!(why("2E 12 34").contains("seen, not imported"));
         assert!(why("01 0C").contains("seen, not imported"));
         assert!(why("7B0 21 05").contains("refused"));

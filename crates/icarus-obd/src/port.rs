@@ -381,7 +381,8 @@ impl Target {
 /// A file descriptor (serial line or Bluetooth socket), read with poll so a silent adapter never hangs Icarus.
 pub struct FdPort {
     fd: OwnedFd,
-    /// A serial port this program took for itself (`open_serial`: TIOCEXCL), handed back when it closes.
+    /// A serial port this program marked exclusive itself (`open_serial`: TIOCEXCL, `mark_exclusive`), its mark taken
+    /// off when it closes. A mark that was there before (another program's) is not this program's to take off.
     exclusive: bool,
 }
 
@@ -393,6 +394,23 @@ impl Drop for FdPort {
             unsafe { libc::ioctl(self.fd.as_raw_fd(), libc::TIOCNXCL) };
         }
     }
+}
+
+/// Marks the tty open at `fd` exclusive (TIOCEXCL: the kernel refuses any other open of it but root's), and says
+/// whether this call made the mark. It did not when the tty was marked already: another program's mark, which only
+/// root's open gets past (gpsd marks its receiver so, without a lock). Nor when the kernel cannot say (TIOCGEXCL is
+/// Linux 3.8 and later): only a mark this program is sure it made is taken off when it lets go.
+fn mark_exclusive(fd: &OwnedFd, path: &str) -> io::Result<bool> {
+    let mut was: libc::c_int = 0;
+    let known = unsafe { libc::ioctl(fd.as_raw_fd(), libc::TIOCGEXCL, &mut was) } == 0;
+    if unsafe { libc::ioctl(fd.as_raw_fd(), libc::TIOCEXCL) } != 0 {
+        let e = io::Error::last_os_error();
+        return Err(io::Error::new(
+            e.kind(),
+            format!("could not take {path} for this program alone ({e})"),
+        ));
+    }
+    Ok(known && was == 0)
 }
 
 impl FdPort {
@@ -604,16 +622,10 @@ fn open_serial_with(path: &str, baud: u32, procs: &Procs, me: u32) -> io::Result
             }
         }
     }
-    if unsafe { libc::ioctl(fd.as_raw_fd(), libc::TIOCEXCL) } != 0 {
-        let e = io::Error::last_os_error();
-        return Err(io::Error::new(
-            e.kind(),
-            format!("could not take {path} for this program alone ({e})"),
-        ));
-    }
+    let mine = mark_exclusive(&fd, path)?;
     let port = FdPort {
         fd,
-        exclusive: true,
+        exclusive: mine,
     };
     let before: Vec<(u32, String)> = procs
         .holding(Path::new(path))
@@ -1041,14 +1053,65 @@ mod tests {
         (m, path)
     }
 
-    /// ICA-104: one program at a time on an adapter. A pty stands in for the cable, and a made-up /proc says who has it.
+    /// The pty at `path` opened as any program would, with no lock and no mark: Ok, or the error number open gave.
+    fn raw_open(path: &str) -> Result<OwnedFd, i32> {
+        let c = std::ffi::CString::new(path).unwrap();
+        let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error().raw_os_error().unwrap_or(0));
+        }
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+
+    /// Whether the tty open at `fd` is marked exclusive (TIOCGEXCL).
+    fn marked(fd: &OwnedFd) -> bool {
+        let mut on: libc::c_int = 0;
+        assert_eq!(
+            unsafe { libc::ioctl(fd.as_raw_fd(), libc::TIOCGEXCL, &mut on) },
+            0,
+            "{}",
+            io::Error::last_os_error()
+        );
+        on != 0
+    }
+
+    /// ICA-104: one program at a time on an adapter. A pty stands in for the cable. The made-up /proc is empty at first,
+    /// so only the kernel's locks (flock and TIOCEXCL) can refuse the second program; then it names the window.
     #[test]
     fn a_port_another_program_has_open_is_refused_with_its_name() {
         let (_other_end, path) = pty();
         let m = Made::new("held");
         let procs = Procs(m.root.join("proc"));
+        // opened before Icarus takes it, and unseen by the made-up /proc: it shows the lock Icarus holds
+        let early = raw_open(&path).expect("open before");
         let first = open_serial_with(&path, 38_400, &procs, 1).expect("the first program gets it");
-        // the window, say, as /proc shows it
+        // flock: held, so another open file of the port cannot lock it
+        assert_eq!(
+            unsafe { libc::flock(early.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            -1,
+            "the lock is held"
+        );
+        assert_eq!(
+            io::Error::last_os_error().raw_os_error(),
+            Some(libc::EWOULDBLOCK)
+        );
+        // TIOCEXCL: the kernel refuses a fresh open of it (root's open passes it, the lock still holds root)
+        assert!(marked(&early));
+        if unsafe { libc::geteuid() } != 0 {
+            assert_eq!(raw_open(&path).err(), Some(libc::EBUSY));
+        }
+        drop(early);
+        let e = open_serial_with(&path, 38_400, &procs, 2)
+            .err()
+            .expect("a second program is refused by the locks alone");
+        assert_eq!(e.kind(), io::ErrorKind::ResourceBusy);
+        assert!(
+            e.to_string().starts_with(&format!(
+                "another program has {path} open (one this user cannot see"
+            )),
+            "{e}"
+        );
+        // the window, say, as /proc shows it: named
         m.file("proc/4242/comm", "icarus-app\n");
         m.link("proc/4242/fd/7", &path);
         let e = open_serial_with(&path, 38_400, &procs, 2)
@@ -1066,11 +1129,7 @@ mod tests {
         std::fs::remove_dir_all(m.root.join("proc/4242")).unwrap();
         drop(open_serial_with(&path, 38_400, &procs, 2).expect("free again"));
         // a program that opened it before, locking nothing (a terminal program), is seen in /proc and refused too
-        let c = std::ffi::CString::new(path.as_str()).unwrap();
-        let raw =
-            unsafe { libc::open(c.as_ptr(), libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC) };
-        assert!(raw >= 0, "{}", io::Error::last_os_error());
-        let raw = unsafe { OwnedFd::from_raw_fd(raw) };
+        let raw = raw_open(&path).expect("free, so anyone may open it");
         m.file("proc/5150/comm", "screen\n");
         m.link("proc/5150/fd/3", &path);
         let e = open_serial_with(&path, 38_400, &procs, 2)
@@ -1086,6 +1145,76 @@ mod tests {
         drop(raw);
         std::fs::remove_dir_all(m.root.join("proc/5150")).unwrap();
         assert!(open_serial_with(&path, 38_400, &procs, 2).is_ok());
+    }
+
+    /// ICA-104: a program that locked the port (flock) without marking it is refused by the lock alone, and the refused
+    /// open leaves no mark behind.
+    #[test]
+    fn a_port_another_program_locked_is_refused() {
+        let (_other_end, path) = pty();
+        let theirs = raw_open(&path).expect("open");
+        assert_eq!(
+            unsafe { libc::flock(theirs.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        let m = Made::new("locked");
+        let procs = Procs(m.root.join("proc"));
+        let e = open_serial_with(&path, 38_400, &procs, 2)
+            .err()
+            .expect("refused by the lock");
+        assert_eq!(e.kind(), io::ErrorKind::ResourceBusy);
+        assert!(
+            e.to_string().starts_with(&format!(
+                "another program has {path} open (one this user cannot see"
+            )),
+            "{e}"
+        );
+        assert!(!marked(&theirs), "a refused open leaves no mark");
+        drop(theirs);
+        assert!(open_serial_with(&path, 38_400, &procs, 2).is_ok());
+    }
+
+    /// ICA-104: a mark another program made (gpsd marks its receiver so, without a lock) is never taken off by Icarus.
+    /// Root's open gets past it, and taking it off when letting go would leave that program's port open to everyone.
+    #[test]
+    fn another_programs_exclusive_mark_is_left_on() {
+        let (_other_end, path) = pty();
+        let theirs = raw_open(&path).expect("open");
+        assert_eq!(
+            unsafe { libc::ioctl(theirs.as_raw_fd(), libc::TIOCEXCL) },
+            0
+        );
+        // what open_serial does past the open, on a second open file of the port (as root's open would get one)
+        let second = theirs.try_clone().unwrap();
+        assert!(
+            !mark_exclusive(&second, &path).unwrap(),
+            "not this program's mark"
+        );
+        drop(FdPort {
+            fd: second,
+            exclusive: false,
+        });
+        assert!(marked(&theirs), "their mark stays");
+        // the whole open, as whoever runs the tests: refused (EBUSY), or, as root, let in; either way the mark stays
+        let m = Made::new("theirs");
+        drop(open_serial_with(
+            &path,
+            38_400,
+            &Procs(m.root.join("proc")),
+            2,
+        ));
+        assert!(marked(&theirs), "their mark stays");
+        // on a port nobody marked, the mark is this program's own
+        let (_other_end, free) = pty();
+        let fd = raw_open(&free).expect("open");
+        assert!(mark_exclusive(&fd, &free).unwrap());
+        assert!(marked(&fd));
+        let mine = FdPort {
+            fd: fd.try_clone().unwrap(),
+            exclusive: true,
+        };
+        drop(mine);
+        assert!(!marked(&fd), "taken off when this program lets go");
     }
 
     /// A port that does not say whether it is a cable (`Port::wired`'s default).

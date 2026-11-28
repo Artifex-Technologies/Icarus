@@ -5,7 +5,9 @@
 //!
 //! What Icarus cannot work out by itself (what an identifier is, what a routine did, why a write was refused) can go to
 //! Sarina, only when Sarina is installed (`sarina`): Sarina reads the session file and answers, read-only
-//! (`sarina_question`). The file has no VIN in it.
+//! (`sarina_question`). The file has neither the VIN nor a module's serial number in it, since it is also handed to
+//! `icarus mcp`'s learning_sessions: the vehicle is named by its make or name, the analyzer's log masks both wherever a
+//! message carries them (`capture::mask_message`), and a write of either is never learned as a setting.
 
 use crate::bus::{self, Analyzer};
 use crate::settings;
@@ -263,6 +265,78 @@ mod tests {
         assert_eq!(sessions(&dir).len(), 2);
         assert!(sarina_question(&p1).contains(p1.file_name().unwrap().to_str().unwrap()));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A message as the bus carries it: one frame, or a first frame and its consecutive frames (ISO-TP).
+    fn frames(id: u32, msg: &[u8], at: f64) -> Vec<Frame> {
+        let frame = |data: Vec<u8>| Frame {
+            id,
+            ext: false,
+            data,
+            at,
+        };
+        if msg.len() <= 7 {
+            return vec![frame([&[msg.len() as u8][..], msg].concat())];
+        }
+        let mut out = vec![frame(
+            [
+                &[0x10 | (msg.len() >> 8) as u8, msg.len() as u8][..],
+                &msg[..6],
+            ]
+            .concat(),
+        )];
+        for (i, part) in msg[6..].chunks(7).enumerate() {
+            out.push(frame([&[0x20 | ((i + 1) & 0x0F) as u8][..], part].concat()));
+        }
+        out
+    }
+
+    /// ICA-106: another tool reads the VIN (09 02, as most do on connecting) and a module's serial number (22 F18C), and
+    /// writes the serial number: the session, which `icarus mcp` hands on, holds none of their bytes, and learns no setting
+    /// from the write.
+    #[test]
+    fn a_session_holds_neither_the_vin_nor_a_serial_number() {
+        let vin = crate::sim::VIN.as_bytes();
+        let serial = b"SN0123456789"; // made up
+        let answer_vin = [&[0x49, 0x02, 0x01][..], vin].concat();
+        let answer_serial = [&[0x62, 0xF1, 0x8C][..], serial].concat();
+        let write_serial = [&[0x2E, 0xF1, 0x8C][..], serial].concat();
+        let convo: Vec<(u32, &[u8])> = vec![
+            (0x7DF, &[0x09, 0x02]),
+            (0x7E8, &answer_vin),
+            (0x7E0, &[0x22, 0xF1, 0x8C]),
+            (0x7E8, &answer_serial),
+            (0x7E0, &[0x22, 0xF1, 0x8C]),
+            (0x7E8, &answer_serial),
+            (0x7E0, &write_serial),
+            (0x7E8, &[0x6E, 0xF1, 0x8C]),
+        ];
+        let mut a = Analyzer::default();
+        for (i, (id, msg)) in convo.into_iter().enumerate() {
+            for f in frames(id, msg, i as f64) {
+                a.add(&f);
+            }
+        }
+        assert_eq!(a.logged, 9, "eight messages and a note: {:?}", a.log);
+        assert!(a.settings.is_empty(), "{:?}", a.settings);
+        let t = session_text(&a, "the adapter sim:off", "Toyota", &[]);
+        let hex = |b: &[u8]| -> Vec<String> { b.iter().map(|x| format!("{x:02X}")).collect() };
+        for secret in [vin, &serial[..]] {
+            for w in hex(secret).windows(3) {
+                assert!(!t.contains(&w.join(" ")), "{} in {t}", w.join(" "));
+            }
+            assert!(!t.contains(std::str::from_utf8(secret).unwrap()), "{t}");
+        }
+        assert_eq!(t.matches("[VIN masked]").count(), 1, "{t}");
+        assert_eq!(t.matches("[serial number masked]").count(), 3, "{t}");
+        assert!(
+            t.contains(
+                "a write of the VIN or of the module's serial number: identity, never learned"
+            ),
+            "{t}"
+        );
+        // what is not identity is told as before
+        assert!(t.contains("read data by identifier: F18C"), "{t}");
     }
 
     #[test]

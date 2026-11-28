@@ -200,7 +200,8 @@ Or the **Learning** page: Start learning, type what you are about to do and pres
   of the next write that does, and one with no read before it stays a whole-value setting), and whether the tool opened
   the extended session first. An output-control request (UDS `2F ... 03`, KWP2000 `30 .. 07`) becomes a `[[test]]`, and a routine the tool
   starts (`31 01`) a `[[service]]`. A mark names the next one learned; one change per mark works best. All are unchecked,
-  with the most cautious conditions; the airbag modules and immobilizer, key and odometer settings are never learned.
+  with the most cautious conditions; the airbag modules and immobilizer, key and odometer settings are never learned, nor is a write of the VIN or a
+  module's serial number.
 - **What is never learned from: the key modules, and anything after security access.** Nothing to or from an
   immobilizer, smart-key or certification module (a profile's `[[module]]` with `kind = "immobilizer"`, `"smart-key"` or
   `"certification"`: fenced by address, whatever the tool or a mark calls it) is learned, and its messages are not written
@@ -211,7 +212,10 @@ Or the **Learning** page: Start learning, type what you are about to do and pres
 - **What is not learned, but noted.** Security access (the tool unlocking a module), a routine's stop and results, writes
   too long for a setting, memory writes and programming, and writes the module refused, each in words.
 - **The session** is saved in the vehicle's `Logs` folder as `learning-DATE-TIME.md`: the module names from Icarus's
-  profile, the marks, what was learned, what was noted, and every diagnostic message in words (but a key module's). No VIN.
+  profile, the marks, what was learned, what was noted, and every diagnostic message in words (but a key module's). No
+  VIN and no module serial number: where a message carries one (`09 02`, `22 F190`, `22 F18C`, KWP2000's `1A 90` and
+  `1A 89`, and the writes `2E F190`, `2E F18C`, `3B 90`), its bytes are masked (`2A`) and the line says so, as in the Bus
+  page's log.
 - **Naming and adding.** On the Learning page each learned setting gets a name and names for its values ("was"/"set"
   become "on"/"off"), and one button adds it to the vehicle's file (`~/.config/icarus/vehicles/MAKE.toml`); the Module settings
   and Tests pages then offer it.
@@ -381,8 +385,9 @@ icarus data name obdlink 7E0 RAW_22_1234 --name "Coolant temperature" --byte 1 -
 
 It gives a transcript (CSV: time, module, request, answer, to match against a screen recording of the app) and a
 module-data set: every identifier a module answered on a data read (`22`, `21`) becomes a request with one unnamed
-placeholder value over its answer's bytes, not verified, with the answers seen as samples. Identity reads (`1A`) are
-listed as seen, not imported (identity comes in a later build). Writes, tests, routines,
+placeholder value over its answer's bytes, not verified, with the answers seen as samples. Identity reads (`1A`, and the
+VIN's and the serial number's `22 F190` and `22 F18C`) are listed as seen, not imported (identity comes in a later build).
+Writes, tests, routines,
 clearing and security access the tool did are listed as seen, never imported; the gates of `icarus obd data` apply (airbag
 and key modules identity only, never 7DF or an answer ID). **Privacy:** only the OBD conversation is kept. Bluetooth addresses,
 device names, link keys and every other Bluetooth channel are never written to any output, adapter commands are counted
@@ -459,10 +464,11 @@ the saved file is for study only. No family's description ships yet: each needs 
 
 `icarus mcp` is a Model Context Protocol server on stdin/stdout with seven read-only tools: `explain_code` (what a code
 means, where to start, the parts), `vehicle_check` (identity, check-engine light, readiness, codes explained, freeze frame,
-current values, on-board test results; the VIN's last 6 characters, its serial number, hidden unless `show_vin` is true,
-since what a tool says may go on to a model in the cloud), `vehicle_modules` (every module's codes), `module_data` (each module's own
-values), `learning_sessions` (what Icarus saved while watching another tool), `drive_logs` (recorded drives summarized)
-and `tires_gears`. Nothing that clears
+current values, on-board test results; the VIN's last 6 characters, its serial number, hidden unless `show_vin` is true),
+`vehicle_modules` (every module's codes), `module_data` (each module's own values; never the VIN or a module's serial
+number, which no set reads), `learning_sessions` (what Icarus saved while watching another tool, the VIN and serial numbers
+masked), `drive_logs` (recorded drives summarized) and `tires_gears`. What a tool says may go on to a model in the cloud,
+so no tool gives the whole VIN unless asked for it, nor any module's serial number. Nothing that clears
 codes, runs a test or writes is offered to a model; a test fails if a tool with such a name appears. Nothing from an
 immobilizer, smart-key or certification module reaches a model either: `vehicle_modules` does not ask them, `module_data`
 sends them no data request, and a learning session never holds their messages. The adapter comes from

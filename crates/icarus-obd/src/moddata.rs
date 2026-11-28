@@ -11,7 +11,8 @@
 //!
 //! **The gates**, checked when a set is loaded and again before every request (a hand-edited file cannot get past them):
 //! 1. services 21, 22 and 1A only, built by Icarus from the identifier, and `uds::check_read_only` on the bytes; 1A is kept
-//!    for identity (a later build), so no data request uses it yet;
+//!    for identity (a later build), so no data request uses it yet; never 22 F190 (the VIN) or 22 F18C (a module's serial
+//!    number), identity that tells one vehicle from every other (`capture::IDENTIFYING`);
 //! 2. the request ID is one module's (`vehicles::request_id_refused`: never 7DF, never 7E8-7EF or another answer ID the
 //!    profiles know), not the answer ID of any module in the set, and not its own answer ID;
 //! 3. airbag and occupant modules (`actuator::is_airbag`, a source's "airbag" type, or an address any vehicle profile
@@ -540,6 +541,16 @@ impl Gates {
         }
         if r.service == 0x21 && r.ident > 0xFF {
             return Some("21 takes a one-byte identifier".into());
+        }
+        if let Some((_, what)) = capture::IDENTIFYING
+            .iter()
+            .find(|(did, _)| r.service == 0x22 && *did == r.ident)
+        {
+            return Some(format!(
+                "22 {:04X} is {what}: identity, never read as module data (what a set reads may go on to \
+                 `icarus mcp`, and so to a model in the cloud)",
+                r.ident
+            ));
         }
         uds::check_read_only(&r.bytes())
             .err()
@@ -2221,6 +2232,46 @@ mod tests {
         assert!(crate::uds::module_dtcs(&mut elm, 0x7E0, 0x7E8)
             .unwrap()
             .is_ok());
+    }
+
+    /// ICA-106: a set that reads the VIN (22 F190) or a module's serial number (22 F18C), as one imported before captures
+    /// left them out may, has those reads refused at load and at send: `module_data` would hand them whole to a model.
+    #[test]
+    fn the_vin_and_serial_numbers_are_never_read_as_module_data() {
+        let profiles = crate::vehicles::builtin();
+        let mut m = module("0x7E0", "kind = \"engine\"");
+        let first = m.requests[0].clone();
+        for (ident, what) in [(0xF190, "the VIN"), (0xF18C, "the module's serial number")] {
+            let mut r = first.clone();
+            r.ident = ident;
+            m.requests.push(r);
+            let gates = Gates::new(&profiles, std::slice::from_ref(&m), "toyota");
+            let why = gates
+                .request_refused(&m, m.requests.last().unwrap())
+                .unwrap();
+            assert!(
+                why.starts_with(&format!("22 {ident:04X} is {what}: identity")),
+                "{why}"
+            );
+            // at send: the simulated engine answers 22 F190 with its VIN, and is not asked
+            let o = read_request(
+                &mut Elm::connect(Box::new(SimCar::new())).unwrap(),
+                &mut pacer(),
+                &gates,
+                &m,
+                m.requests.last().unwrap(),
+                &Scope::default(),
+            );
+            assert_eq!(o, Outcome::Skipped(why));
+        }
+        // at load: taken out, listed with why; the module's own data stays
+        let gates = Gates::new(&profiles, std::slice::from_ref(&m), "toyota");
+        let mut ms = vec![m];
+        let refused = gate(&mut ms, &gates);
+        assert_eq!(refused.len(), 2, "{refused:?}");
+        assert!(refused.iter().all(|(_, y)| y.contains("identity")));
+        assert_eq!(ms[0].requests.len(), 1);
+        assert_eq!(ms[0].requests[0].ident, 0x1F21);
     }
 
     #[test]

@@ -7,8 +7,9 @@
 //! CLI-only. Nothing from an immobilizer, smart-key or certification module is given out (`icarus_obd::fence`): the
 //! module list does not ask them, module data sends them no data request, and a learning session never holds their
 //! messages. The adapter is the one named by ICARUS_ADAPTER in the server's environment, else the one the window last used.
-//! What a tool says may go on to a model in the cloud, so the VIN's serial number (its last 6 characters) is hidden unless
-//! asked for (`vehicle_check`'s `show_vin`).
+//! What a tool says may go on to a model in the cloud, so no tool hands on the VIN whole or a module's serial number:
+//! `vehicle_check` hides the VIN's own serial number (its last 6 characters) unless asked for it (`show_vin`); a learning
+//! session is saved with both masked (`bus::Analyzer`'s log); and module data never reads either (`moddata`'s gates).
 
 use icarus_obd::elm::Elm;
 use icarus_obd::port::Target;
@@ -447,6 +448,12 @@ fn dropped_notes(elm: &mut Elm) -> String {
         .collect()
 }
 
+/// Whether `vehicle_check` was asked for the whole VIN: only by `show_vin: true`. Anything else (left out, false, the text
+/// "true", a number) hides its serial number.
+fn show_vin(args: &Value) -> bool {
+    args.get("show_vin").and_then(Value::as_bool) == Some(true)
+}
+
 fn call(name: &str, args: &Value) -> Result<String, String> {
     let s = |k: &str| args.get(k).and_then(|v| v.as_str()).map(str::to_string);
     let n = |k: &str| args.get(k).and_then(|v| v.as_f64());
@@ -465,9 +472,7 @@ fn call(name: &str, args: &Value) -> Result<String, String> {
                 code_line(&i.code, "", profile)
             ))
         }
-        "vehicle_check" => {
-            vehicle_check(args.get("show_vin").and_then(Value::as_bool) == Some(true))
-        }
+        "vehicle_check" => vehicle_check(show_vin(args)),
         "drive_logs" => drive_logs(args["file"].as_str()),
         "vehicle_modules" => vehicle_modules(),
         "module_data" => module_data_on(&mut connect()?, s("module").as_deref()),
@@ -628,6 +633,18 @@ mod tests {
             tool["inputSchema"]["properties"]["show_vin"]["type"],
             "boolean"
         );
+        // what a tools/call's arguments ask for: the whole VIN only with show_vin true itself
+        for (args, whole) in [
+            (json!({}), false),
+            (json!(null), false),
+            (json!({"show_vin": false}), false),
+            (json!({"show_vin": "true"}), false),
+            (json!({"show_vin": 1}), false),
+            (json!({"show_vin": null}), false),
+            (json!({"show_vin": true}), true),
+        ] {
+            assert_eq!(show_vin(&args), whole, "{args}");
+        }
     }
 
     /// ICA-26: the drive_logs tool reads a recording as `obd live --csv` writes it (the adapter line first): listed, the newest
