@@ -230,10 +230,9 @@ Or the **Learning** page: Start learning, type what you are about to do and pres
   other bits of the same identifier is learned as a setting of its own; a first write that changed nothing takes the bits
   of the next write that does, and one with no read before it stays a whole-value setting), and whether the tool opened
   the extended session first. An output-control request (UDS `2F ... 03`, KWP2000 `30 .. 07`) becomes a `[[test]]`, and a
-  routine the tool starts (`31 01`, with up to 8 bytes of parameters; a longer start is only in the session's messages)
-  a `[[service]]` entry with those parameters, learned
-  from the start request itself (once per module and routine, whatever the module answers), with the extended session
-  and waiting for its result. A mark names the next one learned; one change per mark works best. All are unchecked, with
+  routine the tool starts and the module says it started (`31 01` answered `71 01`, after any number of `7F 31 78`,
+  "response pending"; up to 8 bytes of parameters) a `[[service]]` entry with those parameters (once per module and
+  routine), with the extended session and waiting for its result. A mark names the next one learned; one change per mark works best. All are unchecked, with
   the most cautious conditions (a learned routine: engine off, parked, 30 s at most); the airbag modules and immobilizer,
   key and odometer settings are never learned, nor is a write of the VIN or a module's serial number.
 - **What is never learned from: the key modules, and anything after security access.** Nothing to or from an
@@ -243,10 +242,12 @@ Or the **Learning** page: Start learning, type what you are about to do and pres
   security access (`27`) is noted and never learned, since it may need access Icarus never uses, until the module says it
   is back in its default session; so is the module's answer to it, and a write sent before the unlock whose answer had not
   come yet is dropped at the unlock.
-- **What is not learned, but noted.** A routine's start is learned (above); only these are noted, each in words: security
-  access (the tool unlocking a module), a routine's stop (`31 02`) and its results (`31 03`), a routine start on an airbag
-  module, writes of the VIN or a serial number, writes too long for a setting, memory writes and programming, output
-  controls of another kind than short-term adjustment, and writes and output tests the module refused.
+- **What is not learned, but noted.** A routine's start the module took is learned (above); only these are noted, each
+  in words: security access (the tool unlocking a module), a routine's stop (`31 02`) and its results (`31 03`), a
+  routine start on an airbag module, a routine start with more than 8 bytes of parameters (too long to learn), writes of
+  the VIN or a serial number, writes too long for a setting, memory writes and programming, output controls of another
+  kind than short-term adjustment, and writes and routine starts the module refused (`7F`, with its reason). An output
+  test is learned from its request; a refusal of it is noted beside it.
 - **The session** is saved in the vehicle's `Logs` folder as `learning-DATE-TIME.md`: the module names from Icarus's
   profile, the marks, what was learned, what was noted, and every diagnostic message in words (but a key module's). No
   VIN and no module serial number: where a message carries one (`09 02`, `22 F190`, `22 F18C`, KWP2000's `1A 90` and

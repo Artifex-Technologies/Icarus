@@ -1,6 +1,6 @@
 //! Learning from another tool: while it works on my own vehicle, Icarus watches the bus (`bus::Analyzer`), the person marks
 //! what they are about to do in it ("seat belt chime off"), and what the modules accepted becomes `[[test]]` and
-//! `[[setting]]` entries named by those marks, and a routine the tool starts (`31 01`) a `[[service]]` entry. A session is saved as a Markdown file in the vehicle's Logs folder: the
+//! `[[setting]]` entries named by those marks, and a routine the tool starts and the module takes (`31 01` answered `71 01`) a `[[service]]` entry. A session is saved as a Markdown file in the vehicle's Logs folder: the
 //! marks, what was learned, what was seen but not learned, and every diagnostic message in words.
 //!
 //! What Icarus cannot work out by itself (what an identifier is, what a routine did, why a write was refused) can go to

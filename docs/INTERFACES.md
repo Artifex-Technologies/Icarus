@@ -47,9 +47,11 @@ commands. A serial port Icarus opens is its own until it lets go: a second progr
 | Tactrix OpenPort 2.0 | `0403:cc4d` | CDC ACM serial, its own J2534 command language | serial (`cdc_acm`, `/dev/ttyACM*`) | the j2534 library for Linux (BSD); not yet seen here |
 | FTDI and CP210x cables (ELM327, OBDLink SX/EX) | `0403:6001`, `0403:6015`, `10c4:ea60` | serial | serial | standard IDs |
 
-`icarus devices` lists what of this is plugged in and whether this user may open it (the udev rule in
-`packaging/70-icarus-tuners.rules` gives the person at the seat each of these; the icarus-git package installs it, and
-`bash scripts/install-local.sh --udev` does for a checkout). It
+`icarus devices` lists what of this is plugged in and whether this user may open it, and if not, what to do (the udev
+rule in `packaging/70-icarus-tuners.rules` gives the person at the seat each of these but FTDI's own `0403:6001` and a
+`0403:6015` that is not an OBDLink, both on too many other devices; the icarus-git package installs it, and
+`bash scripts/install-local.sh --udev` does for a checkout). For those two, or with the rule installed already, a serial
+port opens to the uucp group: `sudo usermod -aG uucp $USER`, then log in again. It
 sends nothing to any device. Of these, Icarus speaks one device's own protocol so far: the OpenPort 2.0's (below).
 
 ## SCT X4 (7015) — Ford

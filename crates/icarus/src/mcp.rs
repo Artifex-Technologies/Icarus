@@ -227,16 +227,17 @@ fn code_line(code: &str, extra: &str, profile: Option<&vehicles::Profile>) -> St
     }
 }
 
+/// Values in words, US units first and metric after as the report gives them (`icarus_obd::units`, ICA-202): "vehicle
+/// speed 44.7 mph (72.0 km/h)".
 fn values(list: &[(u8, f64)]) -> String {
     list.iter()
         .filter_map(|(p, v)| {
-            j1979::pid(*p).map(|d| match d.unit {
-                "km/h" => format!(
-                    "{} {v:.0} km/h ({:.0} mph)",
+            j1979::pid(*p).map(|d| {
+                format!(
+                    "{} {}",
                     d.name.to_lowercase(),
-                    v / 1.609344
-                ),
-                unit => format!("{} {v:.1} {unit}", d.name.to_lowercase()),
+                    icarus_obd::units::both(d.unit, *v, 1)
+                )
             })
         })
         .collect::<Vec<_>>()
@@ -649,6 +650,43 @@ mod tests {
         ] {
             assert_eq!(show_vin(&args), whole, "{args}");
         }
+    }
+
+    /// ICA-202: vehicle_check gives the simulated vehicle's freeze frame and current values in US units first (mph, °F,
+    /// psi) with metric after, through icarus_obd::units as the report does.
+    #[test]
+    fn vehicle_check_gives_us_units_first() {
+        let mut elm = Elm::connect(Box::new(icarus_obd::sim::SimCar::new())).unwrap();
+        let mut d = report::Diagnosis {
+            freeze: j1979::freeze_frame(&mut elm).unwrap(),
+            ..Default::default()
+        };
+        for p in [0x05, 0x0D, 0x0B] {
+            if let Some(x) = j1979::read(&mut elm, p).unwrap().first() {
+                d.snapshot.push((p, x.value));
+            }
+        }
+        let t = check_text(&d, "", false);
+        let freeze = t
+            .lines()
+            .find(|l| l.starts_with("Freeze frame"))
+            .unwrap_or_else(|| panic!("{t}"));
+        for want in [
+            "vehicle speed 44.7 mph (72.0 km/h)",
+            "coolant temperature 194.0 °F (90.0 °C)",
+            "intake manifold pressure (map) 7.0 psi (48.0 kPa)",
+            "engine speed 2150.0 rpm",
+        ] {
+            assert!(freeze.contains(want), "{want}: {freeze}");
+        }
+        let now = t
+            .lines()
+            .find(|l| l.starts_with("Now:"))
+            .unwrap_or_else(|| panic!("{t}"));
+        for unit in ["mph (", "°F (", "psi ("] {
+            assert!(now.contains(unit), "{unit}: {now}");
+        }
+        assert!(!t.contains("km/h (") && !t.contains("°C ("), "{t}");
     }
 
     /// ICA-26: the drive_logs tool reads a recording as `obd live --csv` writes it (the adapter line first): listed, the newest

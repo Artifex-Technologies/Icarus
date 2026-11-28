@@ -202,15 +202,36 @@ pub struct Found {
     pub product: u16,
     /// What the device says it is (its USB strings), when it says.
     pub label: String,
+    /// Its USB product string alone (what the udev rule's `ATTRS{product}` matches), empty when it gives none.
+    pub product_name: String,
     /// Its usbfs node.
     pub node: PathBuf,
     /// Its serial ports, for a serial device.
     pub ports: Vec<String>,
 }
 
+/// Whether Icarus's udev rule (`packaging/70-icarus-tuners.rules`, which the icarus-git package installs) gives the
+/// person at the seat this device, by its IDs and its USB product string. FTDI's own 0403:6001 is on too many other
+/// devices to give out, and 0403:6015 only on OBDLink's cables (their product string says "OBDLink"). A test holds this
+/// to the rule file, line by line.
+pub fn udev_rule_covers(vendor: u16, product: u16, product_name: &str) -> bool {
+    match (vendor, product) {
+        (0x5059, _) | (0x1a84, _) => true,
+        (0x10c4, 0xea60 | 0xea63 | 0xea70) => true,
+        (0x0403, 0xd018 | 0xd019 | 0xcc4d) => true,
+        (0x0403, 0x6015) => product_name.starts_with("OBDLink"),
+        _ => false,
+    }
+}
+
+/// What a serial port's owner group gives: on Arch and Labyrinth OS, the uucp group owns /dev/ttyUSB* and /dev/ttyACM*.
+const UUCP: &str = "join the uucp group (sudo usermod -aG uucp $USER), then log in again";
+
 impl Found {
-    /// Whether Icarus can use it now, and if not, what to do.
+    /// Whether Icarus can use it now, and if not, what to do: the udev rule where it covers the device (and the uucp group
+    /// for a serial port when the rule is installed already), the uucp group alone for a serial port it does not cover.
     pub fn status(&self, can_open: impl Fn(&Path) -> bool) -> String {
+        let rule = udev_rule_covers(self.vendor, self.product, &self.product_name);
         match self.known.access {
             Access::Serial if self.ports.is_empty() => {
                 "no serial port yet (Linux's driver did not take it)".into()
@@ -219,16 +240,24 @@ impl Found {
                 let p = Path::new("/dev").join(&self.ports[0]);
                 if can_open(&p) {
                     format!("ready: {}", p.display())
-                } else {
+                } else if rule {
                     format!(
-                        "{} is there but not yours to open: install the icarus-git package (its udev rule), then plug it in again",
+                        "{} is there but not yours to open: install the icarus-git package (its udev rule), then plug it \
+                         in again; with the package installed already, {UUCP}",
                         p.display()
                     )
+                } else {
+                    format!("{} is there but not yours to open: {UUCP}", p.display())
                 }
             }
             Access::RawUsb if can_open(&self.node) => "ready: Icarus can open it (raw USB)".into(),
-            Access::RawUsb => {
+            Access::RawUsb if rule => {
                 "plugged in, but not yours to open: install the icarus-git package (its udev rule), then plug it in again"
+                    .into()
+            }
+            Access::RawUsb => {
+                "plugged in, but not yours to open: Icarus's udev rule does not cover it yet (it would need a line for \
+                 its IDs)"
                     .into()
             }
         }
@@ -271,7 +300,8 @@ pub fn scan(root: &Path) -> Vec<Found> {
         let Some(known) = identify(vendor, product) else {
             continue;
         };
-        let label = [text(root, dev, "manufacturer"), text(root, dev, "product")]
+        let product_name = text(root, dev, "product");
+        let label = [text(root, dev, "manufacturer"), product_name.clone()]
             .into_iter()
             .filter(|s| !s.is_empty())
             .collect::<Vec<_>>()
@@ -302,6 +332,7 @@ pub fn scan(root: &Path) -> Vec<Found> {
             vendor,
             product,
             label,
+            product_name,
             node: PathBuf::from(format!("/dev/bus/usb/{bus:03}/{num:03}")),
             ports,
         });
@@ -423,5 +454,120 @@ mod tests {
         assert_eq!(cp.ports, vec!["ttyUSB0"]);
         assert_eq!(cp.status(|_| true), "ready: /dev/ttyUSB0");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// ICA-203: a serial cable that cannot be opened gets the udev rule's advice only when the rule covers it (an OBDLink
+    /// EX, a CP210x), and the uucp group's otherwise (an FT232R cable, a 0403:6015 that is not OBDLink's).
+    #[test]
+    fn a_cable_the_rule_does_not_cover_gets_the_uucp_group() {
+        let root = std::env::temp_dir().join(format!("icarus-usb-uucp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for (dev, vendor, product, label, num) in [
+            ("1-1", "0403", "6015", ("OBDLink", "OBDLink EX"), 2),
+            ("1-2", "0403", "6015", ("FTDI", "FT231X USB UART"), 3),
+            ("1-3", "0403", "6001", ("FTDI", "FT232R USB UART"), 4),
+            (
+                "1-4",
+                "10c4",
+                "ea60",
+                ("Silicon Labs", "CP2102 USB to UART Bridge Controller"),
+                5,
+            ),
+        ] {
+            usb(&root, dev, vendor, product, label, 1, num);
+            std::fs::create_dir_all(root.join(format!("{dev}:1.0/ttyUSB{}", num - 2))).unwrap();
+        }
+        let found = scan(&root);
+        let said: Vec<(String, String)> = found
+            .iter()
+            .map(|f| (f.product_name.clone(), f.status(|_| false)))
+            .collect();
+        assert_eq!(said.len(), 4, "{said:?}");
+        let udev = "install the icarus-git package (its udev rule), then plug it in again";
+        let uucp = "join the uucp group (sudo usermod -aG uucp $USER), then log in again";
+        for (name, status) in &said {
+            match name.as_str() {
+                "OBDLink EX" | "CP2102 USB to UART Bridge Controller" => {
+                    assert!(
+                        status.contains(udev) && status.ends_with(uucp),
+                        "{name}: {status}"
+                    )
+                }
+                _ => assert!(
+                    !status.contains("udev")
+                        && status.ends_with(&format!("not yours to open: {uucp}")),
+                    "{name}: {status}"
+                ),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The rule file's lines, each as (vendor, products: empty for any, product string prefix: empty for any).
+    fn rule_lines() -> Vec<(String, Vec<String>, String)> {
+        let rules = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../packaging/70-icarus-tuners.rules"
+        ))
+        .unwrap();
+        let value = |line: &str, key: &str| -> Option<String> {
+            line.split(',')
+                .map(str::trim)
+                .find_map(|m| m.strip_prefix(key)?.strip_prefix("==\""))
+                .map(|v| v.trim_end_matches('"').to_string())
+        };
+        rules
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(|l| {
+                let attr = |k: &str| {
+                    value(l, &format!("ATTRS{{{k}}}")).or_else(|| value(l, &format!("ATTR{{{k}}}")))
+                };
+                (
+                    attr("idVendor").unwrap_or_default(),
+                    attr("idProduct")
+                        .map(|p| p.split('|').map(str::to_string).collect())
+                        .unwrap_or_default(),
+                    attr("product")
+                        .unwrap_or_default()
+                        .trim_end_matches('*')
+                        .to_string(),
+                )
+            })
+            .collect()
+    }
+
+    /// ICA-203: every known device the udev advice is given for has a line in the rule that matches it, and the ones it is
+    /// not given for have none: what `status` says and what the package installs agree.
+    #[test]
+    fn the_udev_advice_follows_the_rule_file() {
+        let lines = rule_lines();
+        assert!(lines.len() >= 6, "{lines:?}");
+        let matches = |vendor: u16, product: u16, name: &str| {
+            lines.iter().any(|(v, ps, prefix)| {
+                *v == format!("{vendor:04x}")
+                    && (ps.is_empty() || ps.contains(&format!("{product:04x}")))
+                    && name.starts_with(prefix.as_str())
+            })
+        };
+        for k in KNOWN {
+            // a vendor-only entry: any product of that maker
+            let product = k.product.unwrap_or(0x0001);
+            for name in ["OBDLink EX", "FT231X USB UART", ""] {
+                assert_eq!(
+                    udev_rule_covers(k.vendor, product, name),
+                    matches(k.vendor, product, name),
+                    "{} {} ({:04x}:{product:04x}, {name:?}): status and the rule file disagree",
+                    k.maker,
+                    k.name,
+                    k.vendor
+                );
+            }
+        }
+        assert!(!matches(0x0403, 0x6001, "FT232R USB UART"));
+        assert!(
+            matches(0x0403, 0x6015, "OBDLink EX") && !matches(0x0403, 0x6015, "FT231X USB UART")
+        );
     }
 }

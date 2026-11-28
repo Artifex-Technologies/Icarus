@@ -1607,9 +1607,16 @@ fn obd_codes(elm: &mut dyn Link) -> Result<(), String> {
                 .map(|c| format!(", stored by {c}"))
                 .unwrap_or_default()
         );
+        // the units setting (ICARUS_UNITS, else the locale), as live values: US first with metric after, or metric (ICA-202)
+        let us = icarus_core::moddata::units::us_customary();
         for (p, v) in &f.values {
             if let Some(x) = j1979::pid(*p) {
-                println!("  {:<36} {v:.1} {}", x.name, x.unit);
+                let shown = if us {
+                    icarus_obd::units::both(x.unit, *v, 1)
+                } else {
+                    format!("{v:.1} {}", x.unit).trim_end().to_string()
+                };
+                println!("  {:<36} {shown}", x.name);
             }
         }
     }

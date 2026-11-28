@@ -189,6 +189,9 @@ pub struct Analyzer {
     /// The last value each (module, identifier, KWP2000?) was read as, and writes waiting for the module's answer.
     read_values: HashMap<(u16, u16, bool), Vec<u8>>,
     pending_writes: HashMap<(u16, u16, bool), Vec<u8>>,
+    /// Routine starts (`31 01`) waiting for the module's answer, by (module, routine), as the entry each would be: one is
+    /// learned when the module says it started (`71 01`), noted when it refuses (`7F 31`).
+    pending_routines: HashMap<(u16, u16), crate::service::ServiceDef>,
     /// Modules another tool has in the extended diagnostic session.
     extended: HashSet<u16>,
     /// What the person said they were about to do in the other tool (`mark`), with the time: newest last.
@@ -371,6 +374,32 @@ impl Analyzer {
             }
             [0x7B, lid, ..] => self.setting_written(rx_tx, *lid as u16, Protocol::Kwp),
             // 78 is "response pending", not a refusal: the answer is still to come
+            [0x7F, 0x31, code] if *code != 0x78 => {
+                let mut refused: Vec<u16> = self
+                    .pending_routines
+                    .keys()
+                    .filter(|k| k.0 == rx_tx)
+                    .map(|k| k.1)
+                    .collect();
+                refused.sort();
+                self.pending_routines.retain(|k, _| k.0 != rx_tx);
+                let what = if refused.is_empty() {
+                    "routine control".to_string()
+                } else {
+                    format!(
+                        "start of routine {}",
+                        refused
+                            .iter()
+                            .map(|r| format!("{r:04X}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                };
+                self.note(format!(
+                    "{rx_tx:03X} refused the tool's {what}: {}",
+                    crate::uds::nrc(*code)
+                ));
+            }
             [0x7F, sid @ (0x2E | 0x3B | 0x2F | 0x30), code] if *code != 0x78 => {
                 let kwp = *sid == 0x3B;
                 self.pending_writes.retain(|k, _| !(k.0 == rx_tx && k.2 == kwp));
@@ -513,8 +542,9 @@ impl Analyzer {
         match msg {
             [0x27, level, ..] => {
                 // a write sent before the unlock and still waiting for its answer is not learned from an answer that
-                // comes after it (that answer could be to a write sent unlocked)
+                // comes after it (that answer could be to a write sent unlocked); a routine start the same
                 self.pending_writes.retain(|k, _| k.0 != tx);
+                self.pending_routines.retain(|k, _| k.0 != tx);
                 if self.unlocked.insert(tx) {
                     self.note(format!(
                         "{tx:03X}: security access (level {level:02X}): the tool unlocked the module. Icarus never does \
@@ -535,7 +565,7 @@ impl Analyzer {
                 return false;
             }
             // the module's answer to a write the tool sent it unlocked: nothing to learn from either (the write was noted)
-            [0x6E | 0x7B, ..] if self.unlocked.contains(&tx.wrapping_sub(8)) => return true,
+            [0x6E | 0x7B | 0x71, ..] if self.unlocked.contains(&tx.wrapping_sub(8)) => return true,
             _ => {}
         }
         if !self.unlocked.contains(&tx) {
@@ -567,20 +597,42 @@ impl Analyzer {
         true
     }
 
+    /// The module `tx` said it started `routine` (`71 01`): the start the tool sent it, if one is waiting, becomes a
+    /// service entry. A start the module refused (`7F 31`) is noted, not learned; one still pending (`7F 31 78`) waits.
+    fn routine_started(&mut self, tx: u16, routine: u16) {
+        let Some(s) = self.pending_routines.remove(&(tx, routine)) else {
+            return;
+        };
+        if !self
+            .services
+            .iter()
+            .any(|x| x.module == tx && x.routine == routine)
+        {
+            self.name_for(String::new(), true);
+            self.services.push(s);
+        }
+    }
+
     /// An output-control request from another tool becomes a test (the most cautious conditions, unchecked).
     fn learn(&mut self, tx: u16, msg: &[u8]) {
         if self.after_unlock(tx, msg) {
             return;
         }
         self.learn_setting(tx, msg);
-        // a routine another tool started: a service entry, unchecked, with the most cautious conditions
+        // a routine another tool started: kept until the module answers; a service entry, unchecked, with the most
+        // cautious conditions, once it says it started (`routine_started`)
         if let [0x31, 0x01, hi, lo, params @ ..] = msg {
             let routine = u16::from_be_bytes([*hi, *lo]);
-            if params.len() <= 8
-                && !self
-                    .services
-                    .iter()
-                    .any(|s| s.module == tx && s.routine == routine)
+            if params.len() > 8 {
+                self.note(format!(
+                    "{tx:03X}: routine {routine:04X} started with {} bytes of parameters, too long to learn (a service \
+                     entry takes at most 8)",
+                    params.len()
+                ));
+            } else if !self
+                .services
+                .iter()
+                .any(|s| s.module == tx && s.routine == routine)
             {
                 let s = crate::service::ServiceDef {
                     name: self.name_for(format!("Learned: routine {routine:04X} on {tx:03X}"), false),
@@ -604,12 +656,15 @@ impl Analyzer {
                     .or_else(|| self.fence.refuses(tx.into(), s.rx().into()))
                 {
                     None => {
-                        self.name_for(String::new(), true);
-                        self.services.push(s);
+                        self.pending_routines.insert((tx, routine), s);
                     }
                     Some(why) => self.note(format!("{tx:03X} routine {routine:04X}: {why}")),
                 }
             }
+            return;
+        }
+        if let [0x71, 0x01, hi, lo, ..] = msg {
+            self.routine_started(tx.wrapping_sub(8), u16::from_be_bytes([*hi, *lo]));
             return;
         }
         let (protocol, out, state) = match msg {
@@ -909,6 +964,7 @@ mod tests {
             (0x7C0, &[0x04, 0x2E, 0xA0, 0x02, 0x01]),
             (0x7C8, &[0x03, 0x6E, 0xA0, 0x02]),
             (0x7E0, &[0x04, 0x31, 0x01, 0xFF, 0x00]),
+            (0x7E8, &[0x04, 0x71, 0x01, 0xFF, 0x00]),
             (0x7E0, &[0x02, 0x27, 0x01]),
             (0x7B0, &[0x03, 0x3B, 0x30, 0x01]),
             (0x7B8, &[0x03, 0x7F, 0x3B, 0x22]),
@@ -1069,6 +1125,7 @@ mod tests {
                 (0x7A4, vec![0x02, 0x10, 0x01]),
                 (0x7AC, vec![0x02, 0x50, 0x01]),
                 (0x7A4, vec![0x04, 0x31, 0x01, 0x56, 0x78]),
+                (0x7AC, vec![0x04, 0x71, 0x01, 0x56, 0x78]),
             ],
             20.0,
         );
@@ -1230,6 +1287,86 @@ mod tests {
         );
         assert_eq!(b.settings.len(), 1, "{:?}", b.settings);
         assert_eq!(b.settings[0].mask, None);
+    }
+
+    /// ICA-219: a routine start is learned only once the module says it started it (`71 01`, after any number of `7F 31 78`
+    /// "response pending"); one the module refused (`7F 31 xx`) is noted with the refusal in words, and a start with more
+    /// than 8 bytes of parameters is noted as too long to learn. Each answer comes after its request.
+    #[test]
+    fn a_routine_is_learned_only_when_the_module_starts_it() {
+        let mut a = Analyzer::default();
+        a.mark("Throttle relearn", 0.0);
+        watch(
+            &mut a,
+            &[
+                (0x7E0, vec![0x02, 0x10, 0x03]),
+                (0x7E8, vec![0x02, 0x50, 0x03]),
+                // refused: conditions not correct
+                (0x7E0, vec![0x05, 0x31, 0x01, 0x02, 0x01, 0x05]),
+                (0x7E8, vec![0x03, 0x7F, 0x31, 0x22]),
+                // pending twice, then started
+                (0x7E0, vec![0x04, 0x31, 0x01, 0x02, 0x02]),
+                (0x7E8, vec![0x03, 0x7F, 0x31, 0x78]),
+                (0x7E8, vec![0x03, 0x7F, 0x31, 0x78]),
+                (0x7E8, vec![0x05, 0x71, 0x01, 0x02, 0x02, 0x00]),
+                // 9 bytes of parameters (13 bytes: a first frame, the tool's flow control, a consecutive frame)
+                (0x7C0, vec![0x10, 0x0D, 0x31, 0x01, 0x03, 0x01, 0x01, 0x02]),
+                (0x7C8, vec![0x30, 0x00, 0x00]),
+                (0x7C0, vec![0x21, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09]),
+                (0x7C8, vec![0x04, 0x71, 0x01, 0x03, 0x01]),
+                // a start nothing answered is not learned either
+                (0x7B0, vec![0x04, 0x31, 0x01, 0x04, 0x01]),
+            ],
+            1.0,
+        );
+        assert_eq!(
+            a.services
+                .iter()
+                .map(|s| (s.module, s.routine, s.name.as_str()))
+                .collect::<Vec<_>>(),
+            [(0x7E0, 0x0202, "Throttle relearn")],
+            "{:?}",
+            a.notes
+        );
+        for want in [
+            "7E0 refused the tool's start of routine 0201: conditions not correct",
+            "7C0: routine 0301 started with 9 bytes of parameters, too long to learn",
+        ] {
+            assert!(
+                a.notes.iter().any(|n| n.contains(want)),
+                "{want}: {:?}",
+                a.notes
+            );
+        }
+        assert_eq!(a.notes.len(), 2, "{:?}", a.notes);
+        // the refused start does not stay waiting: a later 71 01 with no start of its own teaches nothing, and the same
+        // routine started again and accepted is learned with the parameters of the start that worked
+        let mut b = Analyzer::default();
+        watch(
+            &mut b,
+            &[
+                (0x7E0, vec![0x05, 0x31, 0x01, 0x02, 0x01, 0x05]),
+                (0x7E8, vec![0x03, 0x7F, 0x31, 0x22]),
+                (0x7E8, vec![0x04, 0x71, 0x01, 0x02, 0x01]),
+            ],
+            1.0,
+        );
+        assert!(b.services.is_empty(), "{:?}", b.services);
+        watch(
+            &mut b,
+            &[
+                (0x7E0, vec![0x05, 0x31, 0x01, 0x02, 0x01, 0x06]),
+                (0x7E8, vec![0x04, 0x71, 0x01, 0x02, 0x01]),
+            ],
+            10.0,
+        );
+        assert_eq!(
+            b.services
+                .iter()
+                .map(|s| (s.routine, s.params.clone()))
+                .collect::<Vec<_>>(),
+            [(0x0201, vec![0x06])]
+        );
     }
 
     #[test]
