@@ -63,7 +63,7 @@ impl ServiceDef {
         if let Some(why) = not_one_module(self.module) {
             return Some(why);
         }
-        if is_airbag(self.module, &self.name) || is_airbag(self.rx(), "") {
+        if is_airbag(self.module.into(), &self.name) || is_airbag(self.rx().into(), "") {
             return Some(
                 "airbag and occupant-detection modules never run service routines from Icarus"
                     .into(),

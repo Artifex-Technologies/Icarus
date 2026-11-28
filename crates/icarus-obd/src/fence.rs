@@ -414,7 +414,14 @@ mod tests {
             refused(&mut changed, r, "undoing a setting");
             let r = crate::service::run(&mut e, &oil, true).map(|_| ());
             refused(&mut e, r, "a service routine");
-            let r = crate::clear::clear_module(&mut e, 0x7C0, 0x7C8, crate::uds::Dialect::Uds);
+            let r = crate::clear::clear_module(
+                &mut e,
+                0x7C0,
+                0x7C8,
+                crate::uds::Dialect::Uds,
+                &crate::vehicles::builtin(),
+                Some("toyota"),
+            );
             refused(&mut e, r, "clearing its codes");
             fence_for_test(Some(one_for_test(0x7E0, kind)));
             let mut e = connect();
@@ -502,7 +509,14 @@ mod tests {
             ),
             (
                 "clearing its codes",
-                crate::clear::clear_module(&mut e, 0x7C0, 0x7C8, crate::uds::Dialect::Uds),
+                crate::clear::clear_module(
+                    &mut e,
+                    0x7C0,
+                    0x7C8,
+                    crate::uds::Dialect::Uds,
+                    &crate::vehicles::builtin(),
+                    Some("toyota"),
+                ),
             ),
         ] {
             let why = r.unwrap_err();

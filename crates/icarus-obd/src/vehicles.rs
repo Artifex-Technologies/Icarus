@@ -805,11 +805,16 @@ mod tests {
             eleven.unreachable(Reach::of(Iso9141)).is_some(),
             "K-line reaches no module"
         );
-        // on 29-bit CAN the OBD-II range is the engine's and the transmission's 29-bit addresses
+        // on 29-bit CAN the OBD-II range is the engine's and the transmission's 29-bit addresses, and the profile's airbag
+        // unit (ICA-108: asked for its identity and codes, as Toyota's 780 is, and nothing else)
         let on29 = candidates_on(find(&builtin(), "honda").unwrap(), Can29At500);
         assert_eq!(
             on29.iter().map(|m| (m.tx, m.rx())).collect::<Vec<_>>(),
-            vec![(0x18DA_10F1, 0x18DA_F110), (0x18DA_18F1, 0x18DA_F118)]
+            vec![
+                (0x18DA_10F1, 0x18DA_F110),
+                (0x18DA_18F1, 0x18DA_F118),
+                (0x18DA_53F1, 0x18DA_F153)
+            ]
         );
         // a 29-bit module request ID must be 18DAxxF1 (the broadcast 18DB33F1 and the answers 18DAF1xx are not)
         let all = builtin();

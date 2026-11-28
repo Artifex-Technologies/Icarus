@@ -405,7 +405,14 @@ mod tests {
         let r = crate::clear::clear_obd(&mut c).map(|_| ());
         refused(&mut c, r);
         let mut c = car();
-        let r = crate::clear::clear_module(&mut c, 0x7E0, 0x7E8, crate::uds::Dialect::Uds);
+        let r = crate::clear::clear_module(
+            &mut c,
+            0x7E0,
+            0x7E8,
+            crate::uds::Dialect::Uds,
+            &crate::vehicles::builtin(),
+            Some("toyota"),
+        );
         refused(&mut c, r);
         let mut c = car();
         let t = crate::sim::tests().remove(0);
@@ -546,6 +553,8 @@ mod tests {
             0x7E1,
             0x7E9,
             crate::uds::Dialect::Uds,
+            &crate::vehicles::builtin(),
+            Some("toyota"),
         ));
         let t = crate::sim::tests().remove(0);
         read_only(crate::actuator::start(&mut car(), &t, 30.0).map(|_| ()));

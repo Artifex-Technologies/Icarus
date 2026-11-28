@@ -574,6 +574,19 @@ pub(crate) fn run_with(
                     send(Event::ClearFailed(format!("not cleared: {why}")));
                     continue;
                 }
+                // one module: on the make the confirmed connection's VIN picks, where its profile names no airbag
+                // module a module of unknown kind could be it (ICA-200); the airbag modules by ID or by the profile
+                let make = on
+                    .vin
+                    .as_deref()
+                    .and_then(|v| vehicles::for_vin(&profiles, v))
+                    .map(|p| p.id.clone());
+                if let Some(why) = target.as_ref().and_then(|&(tx, rx, _)| {
+                    clear::refused_on(&profiles, make.as_deref(), tx.into(), rx.into(), "")
+                }) {
+                    send(Event::ClearFailed(format!("not cleared: {why}")));
+                    continue;
+                }
                 let Some(e) = elm.as_mut() else { continue };
                 live.clear();
                 send(Event::Status("Saving a report before clearing...".into()));
@@ -591,8 +604,10 @@ pub(crate) fn run_with(
                 };
                 let result = match target {
                     None => clear::clear_obd(e).map(|ok| format!("Cleared: {}", ok.join(", "))),
-                    Some((tx, rx, d)) => clear::clear_module(e, tx, rx, d)
-                        .map(|_| format!("Cleared module {tx:03X}")),
+                    Some((tx, rx, d)) => {
+                        clear::clear_module(e, tx.into(), rx.into(), d, &profiles, make.as_deref())
+                            .map(|_| format!("Cleared module {tx:03X}"))
+                    }
                 };
                 let msg = match result {
                     Ok(msg) => msg,
@@ -1571,6 +1586,118 @@ pub(crate) mod tests {
             v.iter()
                 .any(|(_, id, b)| *id == 0x7C0 && b.first() == Some(&0x2E)),
             "the write reached the cluster"
+        );
+        drop(ctx);
+        worker.join().unwrap();
+        drop(home);
+    }
+
+    /// ICA-200: on a simulated vehicle whose profile (a user file written for the test, picked by the VIN) names no airbag
+    /// module, the window's clear of a module the sweep found and the profile does not name (the ABS module at 7B0) is
+    /// refused with module data's reason, and nothing is sent (not even the report's reads); a listed airbag ID is refused
+    /// too; the engine, which the profile names with a kind, still clears.
+    #[test]
+    fn a_clear_of_a_module_of_unknown_kind_is_refused_where_the_profile_names_no_airbag_module() {
+        const KART: &str = "ZZKICARUSKART0001";
+        let home = crate::TestHome::new("worker-ica200");
+        let vehicles = home.dir.join("config/icarus/vehicles");
+        std::fs::create_dir_all(&vehicles).unwrap();
+        std::fs::write(
+            vehicles.join("kart.toml"),
+            "name = \"Kart\"\nwmi = [\"ZZK\"]\n[[module]]\ntx = 0x7E0\nname = \"engine\"\nkind = \"engine\"\n",
+        )
+        .unwrap();
+        let (ctx, crx) = mpsc::channel();
+        let (etx, erx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            run_with(
+                crx,
+                etx,
+                icarus_obd::fence::Fence::default,
+                || {},
+                &|spec: &str| match spec {
+                    "kart" => Elm::connect(Box::new(
+                        icarus_obd::sim::SimCar::engine_off().with_vin(KART),
+                    ))
+                    .map_err(|e| e.to_string()),
+                    s => Err(format!("no adapter {s} in this test")),
+                },
+                &icarus_obd::lock::session_allows_changes,
+            )
+        });
+        ctx.send(Cmd::Connect("kart".into())).unwrap();
+        let seen = until(&erx, "the connection", &|e| {
+            matches!(e, Event::Connected(_))
+        });
+        let Some(Event::Connected(info)) = seen.last() else {
+            unreachable!()
+        };
+        assert_eq!(info.profile.as_ref().map(|p| p.id.as_str()), Some("kart"));
+        let on = info.connection.clone();
+        until(&erx, "the connection's requests", &|e| {
+            matches!(e, Event::Sent(_))
+        });
+        for target in [(0x7B0, 0x7B8, Dialect::Kwp), (0x780, 0x788, Dialect::Uds)] {
+            ctx.send(Cmd::Clear {
+                target: Some(target),
+                on: on.clone(),
+            })
+            .unwrap();
+        }
+        ctx.send(Cmd::Disconnect).unwrap();
+        let after = until(&erx, "the disconnect", &|e| {
+            matches!(e, Event::Disconnected)
+        });
+        let refusals: Vec<&String> = after
+            .iter()
+            .filter_map(|e| match e {
+                Event::ClearFailed(m) => Some(m),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(refusals.len(), 2, "{refusals:?}");
+        assert!(
+            refusals[0].starts_with("not cleared")
+                && refusals[0].contains("what 7B0 is, is not known")
+                && refusals[0].contains("could be the airbag module"),
+            "{}",
+            refusals[0]
+        );
+        assert!(refusals[1].contains("is an airbag"), "{}", refusals[1]);
+        for e in &after {
+            assert!(
+                !matches!(
+                    e,
+                    Event::Sent(_) | Event::Cleared(..) | Event::ReportSaved(_)
+                ),
+                "something went onto the bus for a refused clear"
+            );
+        }
+        // the engine, named with a kind in the profile: cleared
+        ctx.send(Cmd::Connect("kart".into())).unwrap();
+        let seen = until(&erx, "the connection", &|e| {
+            matches!(e, Event::Connected(_))
+        });
+        let Some(Event::Connected(info)) = seen.last() else {
+            unreachable!()
+        };
+        ctx.send(Cmd::Clear {
+            target: Some((0x7E0, 0x7E8, Dialect::Uds)),
+            on: info.connection.clone(),
+        })
+        .unwrap();
+        let done = until(&erx, "the clear", &|e| {
+            matches!(e, Event::Cleared(..) | Event::ClearFailed(_))
+        });
+        assert!(
+            matches!(done.last(), Some(Event::Cleared(m, _)) if m.starts_with("Cleared module 7E0")),
+            "{:?}",
+            done.iter()
+                .filter_map(|e| match e {
+                    Event::ClearFailed(m) => Some(m.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
         );
         drop(ctx);
         worker.join().unwrap();

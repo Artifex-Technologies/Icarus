@@ -61,7 +61,8 @@ pub fn plan(
             rx: Some(rx),
             ext: None,
             tester: None,
-            ids: Ids::Can11,
+            // a 29-bit ID (an address the sweep found on Honda) as one, so the gates judge it as one (ICA-108)
+            ids: if tx > 0x7FF { Ids::Can29 } else { Ids::Can11 },
             bus: None,
             dialect: None,
             kind: String::new(),

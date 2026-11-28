@@ -2,4 +2,13 @@ name = "Honda / Acura"
 wmi = ["JH", "1H", "2H", "5J", "5F", "19"]
 notes = """Most Honda modules use 29-bit CAN IDs (18DAxxF1, answering from 18DAF1xx). On a Honda whose OBD-II runs on
 29-bit CAN, a scan asks the engine (18DA10F1) and transmission (18DA18F1), and --sweep asks every 29-bit module address;
-no other Honda module address is in this profile until one is seen on a vehicle."""
+no other Honda module address is in this profile until one is seen on a vehicle, but for the airbag module below."""
+
+# The airbag (SRS) unit, listed so it is fenced by its address (identity and codes read, nothing else), whatever a sweep or a
+# file calls it. Module address 53 is "SRS airbags" in the Honda Civic Type R (FL5) diagnostic reference
+# (github.com/Caldis/fl5-can-signals, its module table, which addresses a module as request 18DA<module>F1 and answer
+# 18DAF1<module>): request 18DA53F1, answering from 18DAF153. Seen on that car there, not yet by Icarus on any Honda.
+[[module]]
+tx = 0x18DA53F1
+name = "airbags (SRS)"
+kind = "airbag"

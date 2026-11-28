@@ -81,8 +81,8 @@ impl SettingDef {
             return Some(why);
         }
         // the one airbag check (actuator::is_airbag), by request ID, answer ID and name
-        if crate::actuator::is_airbag(self.module, &words)
-            || crate::actuator::is_airbag(self.rx(), "")
+        if crate::actuator::is_airbag(self.module.into(), &words)
+            || crate::actuator::is_airbag(self.rx().into(), "")
         {
             return Some("airbag and occupant-detection modules are never changed".into());
         }

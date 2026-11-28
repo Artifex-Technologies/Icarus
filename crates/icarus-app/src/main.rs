@@ -1918,6 +1918,12 @@ impl App {
             .filter(|_| !self.profile_choice.is_empty());
         let profile = chosen.or(self.info.as_ref().and_then(|i| i.profile.as_ref()));
         let vehicle = self.info.as_ref().and_then(|i| i.vehicle.as_ref());
+        // the make the worker clears on: the VIN's profile, not one chosen for its explanations
+        let clear_make = self
+            .info
+            .as_ref()
+            .and_then(|i| i.profile.as_ref())
+            .map(|p| p.id.clone());
         let mut ask_clear: Option<(u16, u16, Dialect, String)> = None;
         for m in &self.modules {
             let adv = self.levels.advanced;
@@ -1989,17 +1995,46 @@ impl App {
                         // clear path takes 11-bit IDs on the main bus only: a 29-bit module, one answering outside
                         // 700-7FF (GM's body range) or one on Ford's MS-CAN gets no button
                         let small = |id: u32| u16::try_from(id).ok().filter(|i| *i <= 0x7FF);
-                        let airbag = icarus_obd::actuator::is_airbag(
-                            small(m.addr.tx).unwrap_or(0),
+                        let airbag = icarus_obd::actuator::is_airbag(m.addr.tx, &m.addr.name)
+                            || icarus_obd::actuator::is_airbag(m.addr.rx(), "")
+                            || m.addr.kind.eq_ignore_ascii_case("airbag");
+                        // as the worker judges it (ICA-200): on the make the VIN picks, where its profile names no
+                        // airbag module a module of unknown kind could be it, so it gets no button and says why
+                        let unknown = icarus_obd::clear::refused_on(
+                            &all,
+                            clear_make.as_deref(),
+                            m.addr.tx,
+                            m.addr.rx(),
                             &m.addr.name,
-                        ) || small(m.addr.rx())
-                            .is_some_and(|r| icarus_obd::actuator::is_airbag(r, ""));
+                        )
+                        .filter(|why| {
+                            small(m.addr.tx).is_some() && why.contains("could be the airbag module")
+                        });
                         let clear_ids = small(m.addr.tx)
                             .zip(small(m.addr.rx()))
                             .filter(|(t, r)| {
-                                icarus_obd::clear::refused(*t, *r, &m.addr.name).is_none()
+                                icarus_obd::clear::refused_on(
+                                    &all,
+                                    clear_make.as_deref(),
+                                    (*t).into(),
+                                    (*r).into(),
+                                    &m.addr.name,
+                                )
+                                .is_none()
                             })
                             .filter(|_| m.addr.ext.is_none() && !m.addr.on_ms_can());
+                        if !codes.is_empty() && !airbag {
+                            if let Some(why) = &unknown {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Not cleared by Icarus: {}.",
+                                        why.trim_start_matches("refused: ")
+                                    ))
+                                    .small()
+                                    .color(pal.dim),
+                                );
+                            }
+                        }
                         if !codes.is_empty() && airbag {
                             ui.label(
                                 RichText::new(

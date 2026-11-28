@@ -18,8 +18,11 @@
 //! 3. airbag and occupant modules (`actuator::is_airbag`, a source's "airbag" type, or an address any vehicle profile
 //!    names as its airbag module): identity only, no data requests; and where the vehicle's make (or the set's, when they
 //!    differ: the stricter holds; `Gates::for_vehicle`) has no profile naming its airbag module (GM, Honda, Nissan,
-//!    Stellantis, BMW... today), or is not known, a module whose kind is not known (no `kind`, not in the profile) gets
-//!    none either: it could be the airbag module;
+//!    Stellantis, BMW... today; Honda's names only a 29-bit one, which leaves its 11-bit modules under this caution), or
+//!    is not known, a module whose kind is not known (no `kind`, not in the profile) gets none either: it could be the
+//!    airbag module; and on 29-bit CAN or K-line a module whose kind is not known gets none on any make, since the airbag
+//!    list (`actuator::is_airbag_at`: 11- and 29-bit CAN IDs, K-line and DoIP addresses) knows few such addresses
+//!    (`Gates::unknown_kind`, ICA-108; clearing asks the same, `clear::refused_on`, ICA-200);
 //!    immobilizer, smart-key and certification modules (`fence`: by their file's kind or name, or an address any vehicle
 //!    profile or another set's file gives one of those kinds; 29-bit IDs too): identity only, as the airbag module;
 //!    one request ID is one module: a second module file on the same ID gets no data requests;
@@ -104,12 +107,14 @@ pub struct Gates {
     /// Set when the make's profile names no airbag module (or there is no profile for it): why a module of unknown kind
     /// gets no data request.
     caution: Option<String>,
-    /// The request IDs the make's profile names (a module there is of known kind).
-    named: BTreeSet<u16>,
+    /// The request IDs the make's profile names without an extended address (a module there is of known kind): 11-bit, and
+    /// 29-bit written whole.
+    named: BTreeSet<u32>,
     /// Every address a vehicle profile (any make's) names as its airbag or occupant module: (request ID, extended
-    /// address), and the answer IDs of those without one. A module there is the airbag module whatever its own file says.
-    airbag_tx: BTreeSet<(u16, Option<u8>)>,
-    airbag_rx: BTreeSet<u16>,
+    /// address), and the answer IDs of those without one; 11- and 29-bit. A module there is the airbag module whatever its
+    /// own file says.
+    airbag_tx: BTreeSet<(u32, Option<u8>)>,
+    airbag_rx: BTreeSet<u32>,
     /// Addresses (request ID, extended address) the vehicle's profile names as a chassis or driver-assist module (with
     /// the make unknown, every profile's): (the profile's id, the name it gives, what kind of module that is).
     chassis_at: BTreeMap<(u16, Option<u8>), (String, String, &'static str)>,
@@ -281,13 +286,23 @@ pub enum Sweep {
     Listed(Vec<u16>),
 }
 
-/// Airbag and occupant modules: identity only.
+/// Airbag and occupant modules: identity only. By its kind, its name, or its address on the airbag list
+/// (`actuator::is_airbag_at`): a CAN ID (11- or 29-bit, request or answer), or a K-line address.
 pub fn is_airbag(m: &ModuleHead) -> bool {
-    let words = format!("{} {}", m.name, m.kind);
-    let small = |id: u32| u16::try_from(id).ok().filter(|i| *i <= 0x7FF);
-    m.kind.eq_ignore_ascii_case("airbag")
-        || crate::actuator::is_airbag(small(m.tx).unwrap_or(0), &words)
-        || small(m.rx()).is_some_and(|rx| crate::actuator::is_airbag(rx, ""))
+    use crate::actuator::{airbag_address, airbag_name, Address};
+    if m.kind.eq_ignore_ascii_case("airbag") || airbag_name(&format!("{} {}", m.name, m.kind)) {
+        return true;
+    }
+    match m.ids {
+        Ids::Can11 | Ids::Can29 => {
+            airbag_address(Address::Can(m.tx)) || airbag_address(Address::Can(m.rx()))
+        }
+        Ids::Kline => [Some(m.tx), m.rx]
+            .into_iter()
+            .flatten()
+            .filter_map(|a| u8::try_from(a).ok())
+            .any(|a| airbag_address(Address::Kline(a))),
+    }
 }
 
 impl Gates {
@@ -303,10 +318,9 @@ impl Gates {
         let profile = profiles
             .iter()
             .find(|p| !make.is_empty() && p.id.eq_ignore_ascii_case(make));
-        // 11-bit IDs only: the ones module data reaches and the airbag list names (a 29-bit module counts by its name)
-        let small = |id: u32| u16::try_from(id).ok().filter(|i| *i <= 0x7FF);
+        // by its request ID (11- or 29-bit), its answer ID, or its name
         let airbag = |a: &crate::vehicles::ModuleAddr| {
-            crate::actuator::is_airbag(small(a.tx).unwrap_or(0), &a.name)
+            crate::actuator::is_airbag(a.tx, &a.name) || crate::actuator::is_airbag(a.rx(), "")
         };
         let caution = match profile {
             None => Some(if make.is_empty() {
@@ -317,6 +331,12 @@ impl Gates {
             Some(p) if !p.modules.iter().any(airbag) => {
                 Some(format!("the {} profile names no airbag module", p.id))
             }
+            // only a 29-bit one (Honda's): an 11-bit module of unknown kind could still be the airbag module of a model
+            // on 11-bit CAN
+            Some(p) if !p.modules.iter().any(|a| a.tx <= 0x7FF && airbag(a)) => Some(format!(
+                "the {} profile names no airbag module on 11-bit CAN",
+                p.id
+            )),
             Some(_) => None,
         };
         let airbags: Vec<&crate::vehicles::ModuleAddr> = profiles
@@ -334,14 +354,11 @@ impl Gates {
             chassis_at,
             fence: crate::fence::Fence::of(profiles),
             profiles: profiles.to_vec(),
-            airbag_tx: airbags
-                .iter()
-                .filter_map(|a| small(a.tx).map(|t| (t, a.ext)))
-                .collect(),
+            airbag_tx: airbags.iter().map(|a| (a.tx, a.ext)).collect(),
             airbag_rx: airbags
                 .iter()
                 .filter(|a| a.ext.is_none())
-                .filter_map(|a| small(a.rx()))
+                .map(|a| a.rx())
                 .collect(),
             caution,
             named: profile
@@ -349,7 +366,7 @@ impl Gates {
                     p.modules
                         .iter()
                         .filter(|a| a.ext.is_none())
-                        .filter_map(|a| small(a.tx))
+                        .map(|a| a.tx)
                         .collect()
                 })
                 .unwrap_or_default(),
@@ -461,12 +478,63 @@ impl Gates {
         if is_airbag(h) {
             return true;
         }
-        if h.ids != Ids::Can11 {
-            return false;
+        if h.ids == Ids::Kline {
+            return false; // no profile names a K-line address
         }
-        let small = |id: u32| u16::try_from(id).ok();
-        small(h.tx).is_some_and(|t| self.airbag_tx.contains(&(t, h.ext)))
-            || (h.ext.is_none() && small(h.rx()).is_some_and(|r| self.airbag_rx.contains(&r)))
+        self.airbag_tx.contains(&(h.tx, h.ext))
+            || (h.ext.is_none() && self.airbag_rx.contains(&h.rx()))
+    }
+
+    /// Why `h` could be the airbag module, if it could: what it is, is not known (no `kind` in its file, and the make's
+    /// profile does not name its request ID), and either
+    /// - it is on 11-bit CAN and the make's profile names no airbag module (or the make is not known: `caution`), so any
+    ///   module could be it; or
+    /// - it is on 29-bit CAN or K-line, whatever the make: the airbag list knows few such addresses (`actuator::SRS_CAN`,
+    ///   none on K-line), so the fence cannot tell such a module apart (ICA-108).
+    ///
+    /// Module data and the sweeps give such a module identity only, and clearing its codes is refused
+    /// (`clear::refused_on`).
+    pub fn unknown_kind(&self, h: &ModuleHead) -> Option<String> {
+        if !h.kind.trim().is_empty() {
+            return None;
+        }
+        let named = match h.ids {
+            Ids::Can11 => h.tx <= 0x7FF && self.named.contains(&h.tx),
+            Ids::Can29 => h.tx > 0x7FF && h.ext.is_none() && self.named.contains(&h.tx),
+            Ids::Kline => false,
+        };
+        if named {
+            return None;
+        }
+        let hint = "give it a kind in its file, e.g. kind = \"body\", once you know what it is";
+        match h.ids {
+            Ids::Can11 => self.caution.as_ref().map(|why| {
+                format!(
+                    "refused: what {:03X} is, is not known, and {why}, so it could be the airbag module ({hint})",
+                    h.tx
+                )
+            }),
+            Ids::Can29 | Ids::Kline => Some(format!(
+                "refused: what {} is, is not known, and the airbag list cannot tell a {} module apart yet, so it could \
+                 be the airbag module: identity only ({hint})",
+                h.label(),
+                if h.ids == Ids::Kline {
+                    "K-line"
+                } else {
+                    "29-bit"
+                }
+            )),
+        }
+    }
+
+    /// The gates for a vehicle of `make` (a profile's id; None: not known) with no module-data set: what clearing codes
+    /// asks (`clear::refused_on`). With the make not known, a module of unknown kind could be the airbag module.
+    pub fn for_make(profiles: &[Profile], make: Option<&str>) -> Gates {
+        let mut g = Gates::new(profiles, &[], make.unwrap_or(""));
+        if make.is_none() {
+            g.caution = Some("this vehicle's make is not known".into());
+        }
+        g
     }
 
     /// Adds the key modules of `fence` to the ones the profiles name: another set's files' (`load_all`), or the whole
@@ -498,18 +566,15 @@ impl Gates {
             return Some(why);
         }
         if h.ids != Ids::Can11 {
-            return None; // not reachable yet, which `reachable` says; its IDs are not 11-bit request IDs
+            // not reachable yet, which `reachable` says, and its IDs are not 11-bit request IDs; but one the fence cannot
+            // classify gets identity only even once it is reachable (ICA-108)
+            return self.unknown_kind(h);
         }
         let (Ok(tx), Ok(rx)) = (u16::try_from(h.tx), u16::try_from(h.rx())) else {
             return Some("not an 11-bit CAN ID".into());
         };
-        if let Some(why) = &self.caution {
-            if h.kind.trim().is_empty() && !self.named.contains(&tx) {
-                return Some(format!(
-                    "refused: what {tx:03X} is, is not known, and {why}, so it could be the airbag module (give it a \
-                     kind in its file, e.g. kind = \"body\", once you know what it is)"
-                ));
-            }
+        if let Some(why) = self.unknown_kind(h) {
+            return Some(why);
         }
         if tx == rx {
             return Some(format!(
@@ -2617,16 +2682,9 @@ mod tests {
         let mut unknown = module("0x7A2", "");
         unknown.module.kind.clear();
         unknown.module.name = "module (7A2)".into();
-        // GM's profile names no airbag module: a module that is only an address could be it
-        for make in [
-            "gm",
-            "honda",
-            "nissan",
-            "stellantis",
-            "bmw",
-            "",
-            "nosuchmake",
-        ] {
+        // GM's profile names no airbag module: a module that is only an address could be it; Honda's names only a 29-bit
+        // one, so an 11-bit module could still be it (ICA-108)
+        for make in ["gm", "honda", "stellantis", "bmw", "", "nosuchmake"] {
             let gates = Gates::new(&profiles, std::slice::from_ref(&unknown), make);
             let why = gates
                 .module_refused(&unknown)
@@ -2660,6 +2718,92 @@ mod tests {
             ms[0].requests.is_empty() && refused.len() == 1,
             "{refused:?}"
         );
+    }
+
+    /// ICA-108: modules on 29-bit CAN and K-line. An airbag module there (Honda's 18DA53F1, by its address alone; a K-line
+    /// module whose file calls it the SRS unit) and one the fence cannot classify (no kind in its file, not named by the
+    /// make's profile) get identity only, on every make (Toyota's, whose profile names its airbag module, included): no
+    /// data request at load, none at send time on the simulated vehicle, and no sweep (the as-built block). With a kind
+    /// in its file, or named by the make's profile, such a module is classified, and left to `reachable` as before.
+    #[test]
+    fn modules_on_29_bit_can_and_k_line_get_identity_only_unless_classified() {
+        use crate::sim::recording::Recorder;
+        let profiles = crate::vehicles::builtin();
+        let head = |tx: &str, rx: &str, ids: &str, name: &str, kind: &str| {
+            let mut m = module(
+                tx,
+                &format!("rx = {rx}\nids = \"{ids}\"\nkind = \"{kind}\""),
+            );
+            m.module.name = name.into();
+            m
+        };
+        let srs29 = head("0x18DA53F1", "0x18DAF153", "can29", "module (18DA53F1)", "");
+        let srs_k = head("0x58", "0x58", "kline", "SRS unit", "");
+        let odd29 = head("0x18DA42F1", "0x18DAF142", "can29", "module (18DA42F1)", "");
+        let odd_k = head("0x28", "0x28", "kline", "module (K-line 28)", "");
+        let all = [srs29.clone(), srs_k.clone(), odd29.clone(), odd_k.clone()];
+        for make in ["honda", "toyota", "nissan", "gm", ""] {
+            let gates = Gates::new(&profiles, &all, make);
+            for m in [&srs29, &srs_k] {
+                assert_eq!(
+                    gates.module_refused(m).as_deref(),
+                    Some("airbag module: identity only"),
+                    "{make}: {}",
+                    m.module.label()
+                );
+            }
+            for (m, what) in [(&odd29, "29-bit"), (&odd_k, "K-line")] {
+                let why = gates.module_refused(m).unwrap_or_else(|| panic!("{make}"));
+                assert!(
+                    why.contains("could be the airbag module")
+                        && why.contains("identity only")
+                        && why.contains(what),
+                    "{make}: {why}"
+                );
+            }
+            for m in &all {
+                assert!(gates.request_refused(m, &m.requests[0]).is_some());
+                assert!(gates.sweep(m, 0x22, 0xDE00..=0xDEFF).is_err());
+                let (port, log) = Recorder::new(SimCar::honda());
+                let mut elm = Elm::connect(Box::new(port)).unwrap();
+                log.lock().unwrap().clear();
+                let o = read_request(
+                    &mut elm,
+                    &mut pacer(),
+                    &gates,
+                    m,
+                    &m.requests[0],
+                    &Scope::default(),
+                );
+                assert!(matches!(o, Outcome::Skipped(_)), "{make}: {o:?}");
+                assert!(sent(&log.lock().unwrap()).is_empty(), "nothing was sent");
+            }
+            let mut ms = all.to_vec();
+            let refused = gate(&mut ms, &gates);
+            assert!(
+                ms.iter().all(|m| m.requests.is_empty()) && refused.len() == 4,
+                "{make}: {refused:?}"
+            );
+        }
+        // the as-built sweep of a 29-bit address the sweep found asks nothing either
+        let e = crate::asbuilt::plan(
+            &profiles,
+            Some("honda"),
+            0x18DA_42F1,
+            0x18DA_F142,
+            None,
+            &crate::fence::Fence::default(),
+        )
+        .unwrap_err();
+        assert!(e.contains("could be the airbag module"), "{e}");
+        // classified: by a kind in its file, or the make's profile naming it (Honda's airbag entry is named, but its
+        // address is the airbag module's)
+        let gates = Gates::new(&profiles, &[], "honda");
+        let engine = head("0x18DA10F1", "0x18DAF110", "can29", "engine", "engine");
+        let body = head("0x28", "0x28", "kline", "body", "body");
+        assert_eq!(gates.module_refused(&engine), None);
+        assert_eq!(gates.module_refused(&body), None);
+        assert!(reachable(&engine).is_err() && reachable(&body).is_err());
     }
 
     #[test]

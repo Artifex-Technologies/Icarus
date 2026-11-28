@@ -2030,55 +2030,61 @@ fn obd_selftests(elm: &mut dyn Link) -> Result<(), String> {
     Ok(())
 }
 
+/// What `obd clear --module` clears: the request and answer IDs, the vehicle's make (a profile's id), the dialect.
+type ClearTarget = (u32, u32, Option<String>, uds::Dialect);
+
+/// The module `obd clear --module ID[/ANSWER]` aims at, on the vehicle whose VIN `elm` gives (its make picked from
+/// `profiles`; None when the VIN cannot be read): its IDs, the make, and its dialect, learned by reading its codes first.
+/// Refused before anything but the VIN read is sent: an airbag module (by ID, and by the name this vehicle's profile gives
+/// it), an ID that is not one module's, and where the make's profile names no airbag module (or the make is not known) a
+/// module of unknown kind (ICA-200, `clear::refused_on`).
+fn clear_target(
+    elm: &mut dyn Link,
+    id: &str,
+    profiles: &[vehicles::Profile],
+) -> Result<ClearTarget, String> {
+    let (t, r) = id.split_once('/').map_or((id, None), |(a, b)| (a, Some(b)));
+    let hex = |s: &str| {
+        u32::from_str_radix(s.trim_start_matches("0x"), 16)
+            .map_err(|_| format!("{s} is not a module ID in hex"))
+    };
+    let tx = hex(t)?;
+    if let Some(why) = clear::refused(tx, tx.saturating_add(8), "") {
+        return Err(why);
+    }
+    let rx = r.map(hex).transpose()?.unwrap_or(tx.saturating_add(8));
+    let make = j1979::vin(elm)
+        .ok()
+        .flatten()
+        .and_then(|v| vehicles::for_vin(profiles, &v).map(|p| p.id.clone()));
+    if let Some(why) = clear::refused_on(profiles, make.as_deref(), tx, rx, "") {
+        return Err(why);
+    }
+    let read = uds::module_dtcs(elm, tx, rx)
+        .map_err(e)?
+        .map_err(|why| format!("{tx:03X} did not give its codes ({why})"))?;
+    match read.none_failed() {
+        Some(clean) => println!("{tx:03X}: {clean}"),
+        None => println!(
+            "{tx:03X} has {} code(s): {}{}",
+            read.codes.len(),
+            read.codes
+                .iter()
+                .map(|c| c.code.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            read.others().map(|m| format!(" ({m})")).unwrap_or_default()
+        ),
+    }
+    Ok((tx, rx, make, read.dialect))
+}
+
 fn obd_clear(elm: &mut dyn Link, args: &Args) -> Result<(), String> {
     // one module (its dialect is learned by reading its codes first) or every OBD-II module
+    let ps = profiles();
     let target = match args.opt("module") {
         None => None,
-        Some(id) => {
-            let (t, r) = id.split_once('/').map_or((id, None), |(a, b)| (a, Some(b)));
-            let hex = |s: &str| {
-                u16::from_str_radix(s.trim_start_matches("0x"), 16)
-                    .map_err(|_| format!("{s} is not a module ID in hex"))
-            };
-            let tx = hex(t)?;
-            if let Some(why) = actuator::not_one_module(tx) {
-                return Err(why);
-            }
-            let rx = r.map(hex).transpose()?.unwrap_or(tx + 8);
-            // never an airbag module: by ID, and by the name this vehicle's profile gives it
-            let ps = profiles();
-            let name = j1979::vin(elm)
-                .ok()
-                .flatten()
-                .and_then(|v| icarus_obd::vehicles::for_vin(&ps, &v).cloned())
-                .and_then(|p| {
-                    p.modules
-                        .into_iter()
-                        .find(|m| m.tx == u32::from(tx))
-                        .map(|m| m.name)
-                })
-                .unwrap_or_default();
-            if let Some(why) = clear::refused(tx, rx, &name) {
-                return Err(why);
-            }
-            let read = uds::module_dtcs(elm, tx.into(), rx.into())
-                .map_err(e)?
-                .map_err(|why| format!("{tx:03X} did not give its codes ({why})"))?;
-            match read.none_failed() {
-                Some(clean) => println!("{tx:03X}: {clean}"),
-                None => println!(
-                    "{tx:03X} has {} code(s): {}{}",
-                    read.codes.len(),
-                    read.codes
-                        .iter()
-                        .map(|c| c.code.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                    read.others().map(|m| format!(" ({m})")).unwrap_or_default()
-                ),
-            }
-            Some((tx, rx, read.dialect))
-        }
+        Some(id) => Some(clear_target(elm, id, &ps)?),
     };
     println!("{}", clear::WARNING);
     if args.opt("yes").is_none() {
@@ -2092,14 +2098,14 @@ fn obd_clear(elm: &mut dyn Link, args: &Args) -> Result<(), String> {
             return Err("not cleared".into());
         }
     }
-    let d = report::collect(elm, &profiles(), target.is_some()).map_err(e)?;
+    let d = report::collect(elm, &ps, target.is_some()).map_err(e)?;
     let saved = report::save(&d, None)
         .map_err(|x| format!("not cleared: the report could not be saved ({x})"))?;
     println!("Report saved first: {}", saved.display());
     match target {
         None => println!("Cleared: {}", clear::clear_obd(elm)?.join(", ")),
-        Some((tx, rx, d)) => {
-            clear::clear_module(elm, tx, rx, d)?;
+        Some((tx, rx, make, d)) => {
+            clear::clear_module(elm, tx, rx, d, &ps, make.as_deref())?;
             println!("Cleared module {tx:03X}.");
         }
     }
@@ -3059,6 +3065,55 @@ mod tests {
         assert_eq!(lines.len(), 2, "{lines:?}");
         assert!(lines[0].contains("P0301-00"), "{lines:?}");
         assert!(lines[1].ends_with("and 2 more it can set, none failed"));
+    }
+
+    /// ICA-200 and ICA-108: `obd clear --module` on a simulated vehicle whose profile (a profile written for the test,
+    /// picked by the VIN) names no airbag module. A module the profile does not name (the ABS module at 7B0, as a sweep
+    /// finds it) is refused with module data's reason, and nothing but the VIN read is sent (no codes read, nothing to the
+    /// module, no clearing request); the listed airbag IDs (Toyota's 780, Nissan's 752 and its answer 772, Honda's
+    /// 29-bit 18DA53F1) are refused too; the engine, which the profile names with a kind, gets as far as its codes.
+    #[test]
+    fn clear_module_refuses_a_module_of_unknown_kind_where_the_profile_names_no_airbag_module() {
+        let mut ps = vehicles::builtin();
+        ps.push(
+            vehicles::parse(
+                "kart",
+                "a test",
+                "name = \"Kart\"\nwmi = [\"ZZK\"]\n[[module]]\ntx = 0x7E0\nname = \"engine\"\nkind = \"engine\"\n",
+            )
+            .unwrap(),
+        );
+        let connect = || {
+            let car = icarus_obd::sim::SimCar::engine_off().with_vin("ZZKICARUSKART0001");
+            let mut e = Elm::connect(Box::new(car)).unwrap();
+            e.take_sent();
+            e
+        };
+        let mut e = connect();
+        let why = clear_target(&mut e, "7B0", &ps).unwrap_err();
+        assert!(
+            why.contains("what 7B0 is, is not known") && why.contains("could be the airbag module"),
+            "{why}"
+        );
+        let sent = e.take_sent();
+        assert!(
+            sent.iter()
+                .all(|(_, to, d)| *to != 0x7B0 && d.first() == Some(&0x09)),
+            "only the VIN read: {sent:?}"
+        );
+        for id in ["780", "752", "7A0/772", "18DA53F1"] {
+            let mut e = connect();
+            let why = clear_target(&mut e, id, &ps).unwrap_err();
+            assert!(why.contains("is an airbag"), "{id}: {why}");
+            assert!(
+                e.take_sent()
+                    .iter()
+                    .all(|(_, _, d)| d.first() == Some(&0x09)),
+                "{id}: only the VIN read"
+            );
+        }
+        let (tx, rx, make, _) = clear_target(&mut connect(), "7E0", &ps).unwrap();
+        assert_eq!((tx, rx, make.as_deref()), (0x7E0, 0x7E8, Some("kart")));
     }
 
     /// ICA-192: --read-only is taken out wherever it stands (before the command, after it, twice), and nothing else is: the

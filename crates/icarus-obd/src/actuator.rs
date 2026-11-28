@@ -120,7 +120,7 @@ impl TestDef {
         if let Some(why) = not_one_module(self.module) {
             return Some(why);
         }
-        if is_airbag(self.module, &self.name) || is_airbag(self.rx(), "") {
+        if is_airbag(self.module.into(), &self.name) || is_airbag(self.rx().into(), "") {
             return Some("airbag and occupant-detection modules are never tested".into());
         }
         if self.protocol == Protocol::Kwp && self.id > 0xFF {
@@ -185,21 +185,49 @@ pub fn not_one_module(id: u16) -> Option<String> {
     }
 }
 
-/// Airbag and occupant-detection modules, by ID (a request ID in the built-in profiles, or its answer ID) or by name: Icarus
-/// never tests them, clears their codes or writes to them ("the airbag modules never"). One check for every path that acts.
+/// Where a module is, for the airbag list: a CAN ID (11-bit, or 29-bit written whole), a K-line address byte (ISO 9141-2,
+/// ISO 14230), or a DoIP logical address (ISO 13400).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Address {
+    Can(u32),
+    Kline(u8),
+    Doip(u16),
+}
+
+/// Airbag and occupant-detection modules, by CAN ID (a request ID or the answer ID that goes with it, 11- or 29-bit) or by
+/// name: Icarus never tests them, clears their codes or writes to them ("the airbag modules never"). One check for every
+/// path that acts; `is_airbag_at` takes a K-line or DoIP address too.
 ///
 /// By name: the words anywhere ("airbags", "restraints", "occupant classification", "pretensioner", "squib", "SRS"), and
 /// the makers' acronyms as whole words only, so "ODS" matches but "methods" does not: ORC (occupant restraint controller),
 /// ACU (airbag control unit), SDM (sensing and diagnostic module), SIR, OCS/ODS/OCM (occupant classification and
 /// detection), RCM (restraints control module), ACSM and MRS (BMW), and "air bag" written as two words.
-pub fn is_airbag(id: u16, name: &str) -> bool {
+pub fn is_airbag(id: u32, name: &str) -> bool {
+    is_airbag_at(Address::Can(id), name)
+}
+
+/// `is_airbag` for any kind of address.
+pub fn is_airbag_at(at: Address, name: &str) -> bool {
+    airbag_address(at) || airbag_name(name)
+}
+
+/// Whether the address is on the airbag list (`SRS_CAN`, `SRS_KLINE`, `SRS_DOIP`), whatever the module calls itself.
+pub fn airbag_address(at: Address) -> bool {
+    match at {
+        Address::Can(id) => SRS_CAN.iter().any(|&(tx, rx)| id == tx || id == rx),
+        Address::Kline(a) => SRS_KLINE.contains(&a),
+        Address::Doip(a) => SRS_DOIP.contains(&a),
+    }
+}
+
+/// Whether a module's name (or kind) says it is an airbag or occupant module (the words and acronyms below).
+pub fn airbag_name(name: &str) -> bool {
     let lower = name.to_lowercase();
     let words: Vec<&str> = lower
         .split(|c: char| !c.is_ascii_alphanumeric())
         .filter(|w| !w.is_empty())
         .collect();
-    SRS_IDS.iter().any(|&s| id == s || id == s + 8)
-        || AIRBAG_WORDS.iter().any(|w| lower.contains(w))
+    AIRBAG_WORDS.iter().any(|w| lower.contains(w))
         || words.iter().any(|w| AIRBAG_ACRONYMS.contains(w))
         || words
             .windows(2)
@@ -219,9 +247,32 @@ const AIRBAG_WORDS: &[&str] = &[
 const AIRBAG_ACRONYMS: &[&str] = &[
     "orc", "acu", "sdm", "sir", "ocs", "ods", "ocm", "rcm", "acsm", "mrs",
 ];
-/// Airbag and occupant-detection request IDs in the built-in profiles (Toyota/Subaru/Mazda 780 and 781, Ford RCM 737, VW 715,
-/// Hyundai/Kia 7D2).
-const SRS_IDS: &[u16] = &[0x780, 0x781, 0x737, 0x715, 0x7D2];
+/// Airbag and occupant-detection modules on CAN: (request ID, answer ID), each as a built-in profile names it.
+/// - Toyota/Subaru/Mazda 780 and 781, Ford RCM 737, VW 715, Hyundai/Kia 7D2: request IDs in the profiles, the answer
+///   taken as request + 8.
+/// - Nissan 752, answering from 772: the "ID Query" and "ID Response" table of the Nissan Leaf CAN bus messages README
+///   (github.com/dalathegreat/leaf_can_bus_messages, "What about active CAN-polling?", the AIRBAG row).
+/// - Honda 18DA53F1, answering from 18DAF153: module address 53 is "SRS airbags" in the Honda Civic Type R (FL5)
+///   diagnostic reference (github.com/Caldis/fl5-can-signals, its module table), which addresses a module as request
+///   18DA<module>F1 and answer 18DAF1<module> (ISO 15765-4's normal fixed addressing, the tester at F1).
+///
+/// GM's 247 and Stellantis' 744 (answering from 4C4) are leads no independent public source has confirmed yet, so they
+/// are not listed: on those makes, whose profiles name no airbag module, a module of unknown kind gets identity only
+/// instead (`moddata::Gates::unknown_kind`, `clear::refused_on`).
+const SRS_CAN: &[(u32, u32)] = &[
+    (0x780, 0x788),
+    (0x781, 0x789),
+    (0x737, 0x73F),
+    (0x715, 0x71D),
+    (0x7D2, 0x7DA),
+    (0x752, 0x772),
+    (0x18DA_53F1, 0x18DA_F153),
+];
+/// Airbag modules on K-line, by address byte: none confirmed by a public source yet, so a K-line module whose kind is not
+/// known gets identity only (`moddata::Gates::unknown_kind`).
+const SRS_KLINE: &[u8] = &[];
+/// Airbag modules on DoIP, by logical address: none confirmed yet (and Icarus has no DoIP link).
+const SRS_DOIP: &[u16] = &[];
 const MIN_VOLTS: f64 = 11.5;
 
 /// The only requests the actuator path sends.
@@ -522,6 +573,76 @@ mod tests {
         let mut t = crate::sim::tests().remove(0);
         t.max_seconds = 120;
         assert!(t.refused().is_some());
+    }
+
+    /// ICA-108: the leads' airbag modules are on the list by request and answer ID, 29-bit included: Nissan's 752
+    /// (answering from 772) and Honda's 18DA53F1 (answering from 18DAF153); a K-line or DoIP address is its own kind of
+    /// address, not a CAN ID. A test, a setting and a routine aimed at Nissan's, by its request ID or its answer ID, are
+    /// refused with nothing sent; aimed at Honda's 29-bit one, they cannot be written into a profile (these entries take
+    /// 11-bit IDs), so the file is refused when it loads.
+    #[test]
+    fn writes_to_the_leads_airbag_modules_are_refused() {
+        for id in [0x752, 0x772, 0x18DA_53F1, 0x18DA_F153] {
+            assert!(is_airbag(id, ""), "{id:X}");
+            assert!(airbag_address(Address::Can(id)), "{id:X}");
+        }
+        assert!(
+            !is_airbag(0x18DA_10F1, "") && !is_airbag(0x18DA_F110, ""),
+            "Honda's engine"
+        );
+        assert!(!is_airbag(0x753, "") && !is_airbag(0x75A, ""));
+        assert!(!airbag_address(Address::Kline(0x52)) && !airbag_address(Address::Doip(0x0752)));
+        assert!(
+            is_airbag_at(Address::Kline(0x52), "SRS"),
+            "by name on any address"
+        );
+        crate::lock::switch_for_test(&[]);
+        crate::fence::fence_for_test(Some(crate::fence::Fence::default()));
+        let dir = std::env::temp_dir().join(format!("icarus-leads-{}", std::process::id()));
+        let log = crate::settings::log_path(&dir);
+        for (module, rx) in [(0x752, None), (0x7A0, Some(0x772))] {
+            let mut e =
+                crate::elm::Elm::connect(Box::new(crate::sim::SimCar::engine_off())).unwrap();
+            e.take_sent();
+            let mut t = crate::sim::tests().remove(0);
+            (t.module, t.rx) = (module, rx);
+            let mut s = crate::sim::settings().remove(0);
+            (s.module, s.rx) = (module, rx);
+            let mut r = crate::sim::services().remove(0);
+            (r.module, r.rx) = (module, rx);
+            let off = s.values["off"].clone();
+            for (what, why) in [
+                ("a test", t.refused()),
+                ("a setting", s.refused()),
+                ("a routine", r.refused()),
+                ("starting a test", start(&mut e, &t, 30.0).err()),
+                (
+                    "changing a setting",
+                    crate::settings::change(&mut e, &s, &off, &log).err(),
+                ),
+                ("reading a setting", crate::settings::read(&mut e, &s).err()),
+                (
+                    "running a routine",
+                    crate::service::run(&mut e, &r, true).err(),
+                ),
+            ] {
+                let why = why.unwrap_or_else(|| panic!("{what} at {module:X} went"));
+                assert!(why.contains("airbag"), "{what} at {module:X}: {why}");
+            }
+            assert!(e.take_sent().is_empty(), "nothing sent");
+        }
+        assert!(!log.exists(), "nothing logged as changed");
+        for entry in [
+            "[[test]]\nname = \"Horn\"\nmodule = 0x18DA53F1\nprotocol = \"uds\"\nid = 0x2001\n",
+            "[[setting]]\nname = \"Chime\"\nmodule = 0x18DA53F1\nprotocol = \"uds\"\nid = 0x1001\nvalues = { on = [1], off = [0] }\n",
+            "[[service]]\nname = \"Relearn\"\nmodule = 0x18DA53F1\nroutine = 0x3001\n",
+        ] {
+            assert!(
+                crate::vehicles::parse("honda", "a test", entry).is_err(),
+                "{entry}"
+            );
+        }
+        crate::fence::fence_for_test(None);
     }
 
     #[test]
