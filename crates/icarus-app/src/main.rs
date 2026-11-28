@@ -412,6 +412,12 @@ struct App {
     /// on and closed when that one ends (ICA-105).
     confirms: confirm::Confirms,
     selftests: Option<Vec<icarus_obd::mode06::TestResult>>,
+    /// The last health check (ICA-214), and whether one is under way.
+    health: Option<Result<icarus_obd::health::Health, String>>,
+    checking_health: bool,
+    /// The bench make named for this session (ICA-222; empty: from the VIN alone), and the profiles' names to pick from.
+    bench_make: String,
+    make_ids: Vec<String>,
     battery_agm: bool,
     /// NHTSA lookups run on their own thread; answers come back here.
     bg_tx: Sender<Bg>,
@@ -614,6 +620,14 @@ impl App {
             test_reading: None,
             confirms: Default::default(),
             selftests: None,
+            health: None,
+            checking_health: false,
+            bench_make: String::new(),
+            make_ids: icarus_obd::vehicles::load(icarus_obd::vehicles::user_dir().as_deref())
+                .0
+                .into_iter()
+                .map(|p| p.id)
+                .collect(),
             battery_agm: true,
             bg_tx: bg_tx.clone(),
             bg_rx,
@@ -1034,6 +1048,8 @@ impl App {
                     self.modules.clear();
                     self.history.clear();
                     self.selftests = None;
+                    self.health = None;
+                    self.checking_health = false;
                     self.setting_views.clear();
                     self.settings_asked = false;
                     self.refresh_sessions();
@@ -1181,6 +1197,17 @@ impl App {
                 Event::SelfTests(r) => {
                     self.status = format!("{} on-board test results read.", r.len());
                     self.selftests = Some(r);
+                }
+                Event::Health(h) => {
+                    self.checking_health = false;
+                    self.status = match &h {
+                        Ok(h) if h.drifts() > 0 => {
+                            format!("Health check done: {} thing(s) drifted.", h.drifts())
+                        }
+                        Ok(_) => "Health check done.".into(),
+                        Err(_) => "The health check could not be read.".into(),
+                    };
+                    self.health = Some(h.map(|b| *b));
                 }
                 Event::ClearFailed(m) => {
                     // said as it is: a refused clear is not the adapter going to sleep (`Failed` under `auto`)
@@ -1373,6 +1400,47 @@ impl App {
                 .small()
                 .weak(),
         );
+        // ICA-222: a bench ECU with a blank or foreign VIN gives no make, so every module write to it would be refused;
+        // its make is named here, once, before connecting (never guessed: a profile's own name)
+        let before = self.bench_make.clone();
+        ui.horizontal(|ui| {
+            ui.label("Bench make");
+            ui.add_enabled_ui(self.link == Link::Off, |ui| {
+                egui::ComboBox::from_id_salt("bench-make")
+                    .selected_text(if self.bench_make.is_empty() {
+                        "from the VIN"
+                    } else {
+                        self.bench_make.as_str()
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.bench_make, String::new(), "from the VIN");
+                        for id in &self.make_ids {
+                            ui.selectable_value(&mut self.bench_make, id.clone(), id);
+                        }
+                    });
+            })
+            .response
+            .on_disabled_hover_text("Disconnect to change it: a session names its make once");
+            ui.label(
+                RichText::new(
+                    "only for an ECU on the bench whose VIN is blank, unreadable or names no profile; a VIN that names a make must agree",
+                )
+                .small()
+                .weak(),
+            );
+        });
+        if self.bench_make != before {
+            icarus_obd::benchmake::choose(Some(self.bench_make.as_str()));
+        }
+    }
+
+    /// The make writes follow on the connection open now, as every confirmation says it (ICA-222).
+    fn make_words(&self) -> String {
+        match self.info.as_ref().map(|i| &i.make) {
+            Some(Ok(m)) => m.words(),
+            Some(Err(why)) => why.clone(),
+            None => "not connected".into(),
+        }
     }
 
     fn page_vehicle(&mut self, ui: &mut egui::Ui, pal: &theme::Palette) {
@@ -1414,6 +1482,14 @@ impl App {
                             .map_or("generic OBD-II (no profile for this VIN)", |p| {
                                 p.name.as_str()
                             }),
+                    );
+                    row(
+                        ui,
+                        "Make for writes",
+                        &match &info.make {
+                            Ok(m) => m.words(),
+                            Err(why) => why.clone(),
+                        },
                     );
                     row(ui, "Adapter", &info.adapter);
                     if let Some(v) = info.voltage {
@@ -1722,6 +1798,72 @@ impl App {
                 }
             }
         });
+        let mut check_health = false;
+        card(ui, pal, "Health check", |ui| {
+            ui.label(RichText::new("How everything looks, beside this vehicle's own earlier checks: failed codes (every module), monitors not yet run, misfire counts and the total fuel trim per bank (warm idle, and a cruise when driving). Reads only; each check is kept in the vehicle's folder (Logs/health-history.jsonl).").weak());
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
+                        !self.checking_health,
+                        egui::Button::new(if self.health.is_some() {
+                            "Check again"
+                        } else {
+                            "Check"
+                        }),
+                    )
+                    .clicked()
+                {
+                    check_health = true;
+                }
+                if self.checking_health {
+                    ui.spinner();
+                    ui.label(
+                        RichText::new(
+                            "keep the engine running: the fuel trims are sampled for a few seconds",
+                        )
+                        .small()
+                        .weak(),
+                    );
+                }
+            });
+            match &self.health {
+                None => {}
+                Some(Err(why)) => {
+                    ui.colored_label(pal.amber, why);
+                }
+                Some(Ok(h)) => {
+                    use icarus_obd::health::Kind;
+                    ui.label(RichText::new(&h.check.entry.when).small().weak());
+                    for s in &h.said {
+                        ui.horizontal_wrapped(|ui| {
+                            let (col, on) = match s.kind {
+                                Kind::Drift => (pal.red, true),
+                                Kind::Changed => (pal.amber, true),
+                                Kind::Steady => (pal.green, false),
+                                Kind::Info => (pal.text, false),
+                            };
+                            dot(ui, col, on);
+                            ui.label(&s.text);
+                        });
+                    }
+                    for n in &h.check.notes {
+                        ui.label(RichText::new(n).small().weak());
+                    }
+                    match &h.kept {
+                        Ok(p) => ui.label(
+                            RichText::new(format!("Kept in {}", p.display()))
+                                .small()
+                                .weak(),
+                        ),
+                        Err(why) => ui.label(
+                            RichText::new(format!("Not kept: {why}"))
+                                .small()
+                                .color(pal.amber),
+                        ),
+                    };
+                }
+            }
+        });
         card(ui, pal, "Report", |ui| {
             ui.label(RichText::new("Everything above (and, if chosen, every module's codes) in one file to keep or show a mechanic, with search and parts links. Saved in ~/Documents/Icarus/reports.").weak());
             ui.horizontal(|ui| {
@@ -1791,6 +1933,11 @@ impl App {
         if read_selftests {
             self.live_on = false;
             let _ = self.tx.send(Cmd::SelfTests);
+        }
+        if check_health {
+            self.live_on = false;
+            self.checking_health = true;
+            let _ = self.tx.send(Cmd::Health);
         }
         if ask_clear {
             self.confirms.clear =
@@ -2421,6 +2568,9 @@ impl App {
         let tests = info.tests.clone();
         let services = info.services.clone();
         let on = info.connection.clone();
+        // the make tests and routines follow (ICA-222): a held test has no dialog of its own to say it
+        ui.label(RichText::new(format!("Make: {}.", self.make_words())).weak());
+        ui.add_space(4.0);
         if !services.is_empty() {
             card(ui, pal, "Service routines", |ui| {
                 ui.label(RichText::new("Relearns, resets, TPMS, coding: each the maker's own routine, run once after a confirmation. Its conditions, the battery and the Read-Only switch are checked first; every run is logged.").weak());
@@ -5495,6 +5645,7 @@ impl eframe::App for App {
                 if !def.warning.is_empty() {
                     ui.label(&def.warning);
                 }
+                ui.label(RichText::new(format!("Make: {}.", self.make_words())).weak());
                 if !def.conditions.is_empty() {
                     ui.label(
                         RichText::new(format!(
@@ -5549,6 +5700,7 @@ impl eframe::App for App {
                 ui.add_space(6.0);
                 ui.label(icarus_obd::clear::WARNING);
                 ui.label(RichText::new("The engine must be off, ignition on.").weak());
+                ui.label(RichText::new(format!("Make: {}.", self.make_words())).weak());
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     if ui
@@ -5611,6 +5763,7 @@ impl eframe::App for App {
                 if !conds.is_empty() {
                     ui.label(format!("Needs: {}. Battery at 12 V or more (a charger on it helps).", conds.join(", ")));
                 }
+                ui.label(RichText::new(format!("Make: {}.", self.make_words())).weak());
                 if !def.checked {
                     ui.colored_label(
                         pal.amber,

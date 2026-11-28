@@ -398,8 +398,9 @@ pub fn caution_words(profiles: &[Profile], make: Option<&str>, tx: u16, rx: u16)
 
 /// The airbag caution at the moment of a write (ICA-200), for an actuator test, a setting or a service routine aimed at
 /// the module at `tx`/`rx` (`what` says which, for the action log): the vehicle's make is the one its VIN, read now,
-/// picks from the profiles as they stand (`current`), and with no VIN or no profile for it the make is not known, so a
-/// module of unknown kind is refused. Only the VIN is read; nothing is sent to the module.
+/// picks from the profiles as they stand (`current`); where the VIN is blank, unreadable or names no profile, the make
+/// named for this bench session (ICA-222, `benchmake`), which must agree with a VIN that names one; with neither the
+/// make is not known, so a module of unknown kind is refused. Only the VIN is read; nothing is sent to the module.
 pub fn caution_holds(
     link: &mut dyn crate::link::Link,
     tx: u16,
@@ -407,13 +408,15 @@ pub fn caution_holds(
     what: &str,
 ) -> Result<(), String> {
     let profiles = current();
-    let make = crate::j1979::vin(link)
-        .ok()
-        .flatten()
-        .and_then(|v| for_vin(&profiles, &v).map(|p| p.id.clone()));
-    match caution_words(&profiles, make.as_deref(), tx, rx) {
+    let make = crate::benchmake::for_write(link, &profiles, &format!("{what} on {tx:03X}"))?;
+    match caution_words(&profiles, make.make.as_deref(), tx, rx) {
         None => Ok(()),
         Some(why) => {
+            let why = if make.make.is_none() {
+                format!("{why}; {}", make.words())
+            } else {
+                why
+            };
             crate::audit::log(&format!(
                 "{what} on {tx:03X} refused: it could be the airbag module"
             ));

@@ -8,8 +8,8 @@ use icarus_obd::j1979::{self, DtcKind};
 use icarus_obd::link::Link;
 use icarus_obd::port::Target;
 use icarus_obd::{
-    actuator, bus, charging, clear, dtc, garage, lock, lookup, mode06, nhtsa, report, settings,
-    sim, slcan, socketcan, uds, vehicles, vin,
+    actuator, benchmake, bus, charging, clear, dtc, garage, lock, lookup, mode06, nhtsa, report,
+    settings, sim, slcan, socketcan, uds, vehicles, vin,
 };
 mod data;
 mod fuel;
@@ -276,13 +276,24 @@ Trouble codes:
   icarus obd report --adapter A [--scan] [--out FILE]
                                              everything in one Markdown report (~/Documents/Icarus/reports); --scan adds
                                              every module
+  icarus obd health --adapter A              how everything looks, beside this vehicle's own earlier checks: failed
+                                             codes (OBD-II and each module's), monitors not yet run, misfire counts
+                                             (Mode 06, and the module data's), total fuel trim per bank at a warm idle
+                                             (and at a cruise, when driving) and the gap between banks; drift said in
+                                             words (a trim moved 5 points or more). Reads only; kept in the vehicle's
+                                             folder (Logs/health-history.jsonl)
 
   The adapter A: sim (a simulated vehicle), /dev/ttyUSB0[@baud], bt:AA:BB:CC:DD:EE:FF[#channel] (paired Bluetooth, such as
   an OBDLink MX+), tcp:host:port (Wi-Fi), can:can0 or can0 (a Linux CAN interface such as a CANable: Icarus speaks
   ISO-TP over it itself). ICARUS_ADAPTER sets a default.
 
   --read-only, on any command (or ICARUS_READ_ONLY=1): this run clears, tests and changes nothing on any vehicle, whatever
-  VIN it gives and whatever its Read-Only switch says (a spare ECM on the bench, a friend's vehicle). Reads all work.";
+  VIN it gives and whatever its Read-Only switch says (a spare ECM on the bench, a friend's vehicle). Reads all work.
+
+  --make NAME on obd clear, test, service, setting and setting-undo (and the lists tests, services, settings): a bench
+  ECU's make (a profile's own name: icarus vehicles), used only where its VIN is blank, unreadable or names no profile;
+  a VIN that names a make must agree. Said in every confirmation and the action log; the airbag list and the key
+  modules' fence hold whatever it says.";
 
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
@@ -1076,6 +1087,25 @@ fn cmd_obd(a: &[String]) -> Result<(), String> {
     ) {
         lock::session_allows_changes()?;
     }
+    // a bench ECU's make, named once for this run (ICA-222): used only where the VIN gives none, and it must be a
+    // profile's own name; `obd scan --make` keeps its own meaning (the profile to scan with)
+    if matches!(
+        a.first().map(String::as_str),
+        Some(
+            "clear"
+                | "test"
+                | "service"
+                | "setting"
+                | "setting-undo"
+                | "tests"
+                | "services"
+                | "settings"
+        )
+    ) {
+        if let Some(m) = args.opt("make") {
+            benchmake::choose(Some(&benchmake::profile_id(&profiles(), m)?));
+        }
+    }
     // connected, run, and the senders any broadcast left out noted however it ended
     let module_reads = matches!(
         a.first().map(String::as_str),
@@ -1107,6 +1137,7 @@ fn cmd_obd(a: &[String]) -> Result<(), String> {
         Some("data") => data::obd_data(&args),
         Some("suggest") => data::obd_suggest(&args),
         Some("report") => with(&|e| obd_report(e, &args)),
+        Some("health") => with(&obd_health),
         Some("tests") => with(&obd_tests),
         Some("services") => with(&obd_services),
         Some("service") => obd_service(&args),
@@ -1671,12 +1702,13 @@ fn obd_codes(elm: &mut dyn Link) -> Result<(), String> {
     Ok(())
 }
 
-/// The service routines known for the connected vehicle.
+/// The service routines known for the connected vehicle: its profile by its VIN, or by the bench make this run named
+/// (ICA-222: `write_make`). Says the make.
 fn vehicle_services(elm: &mut dyn Link) -> Result<Vec<icarus_obd::service::ServiceDef>, String> {
     let all = profiles();
-    let vin = j1979::vin(elm).map_err(e)?;
-    let profile = vin.as_deref().and_then(|v| vehicles::for_vin(&all, v));
-    Ok(vehicles::services_for(profile, vin.as_deref()))
+    let (vin, profile, make) = write_make(elm, &all, benchmake::chosen().as_deref())?;
+    println!("Make: {}.", make.words());
+    Ok(vehicles::services_for(profile.as_ref(), vin.as_deref()))
 }
 
 fn obd_services(elm: &mut dyn Link) -> Result<(), String> {
@@ -1763,11 +1795,13 @@ fn obd_service(args: &Args) -> Result<(), String> {
     Ok(())
 }
 
+/// The actuator tests known for the connected vehicle: its profile by its VIN, or by the bench make this run named
+/// (ICA-222: `write_make`). Says the make.
 fn vehicle_tests(elm: &mut dyn Link) -> Result<Vec<actuator::TestDef>, String> {
     let all = profiles();
-    let vin = j1979::vin(elm).map_err(e)?;
-    let profile = vin.as_deref().and_then(|v| vehicles::for_vin(&all, v));
-    Ok(vehicles::tests_for(profile, vin.as_deref()))
+    let (vin, profile, make) = write_make(elm, &all, benchmake::chosen().as_deref())?;
+    println!("Make: {}.", make.words());
+    Ok(vehicles::tests_for(profile.as_ref(), vin.as_deref()))
 }
 
 fn obd_tests(elm: &mut dyn Link) -> Result<(), String> {
@@ -1891,9 +1925,9 @@ fn vehicle_settings(
     elm: &mut dyn Link,
 ) -> Result<(Option<String>, Vec<settings::SettingDef>), String> {
     let all = profiles();
-    let vin = j1979::vin(elm).map_err(e)?;
-    let profile = vin.as_deref().and_then(|v| vehicles::for_vin(&all, v));
-    let list = vehicles::settings_for(profile, vin.as_deref());
+    let (vin, profile, make) = write_make(elm, &all, benchmake::chosen().as_deref())?;
+    println!("Make: {}.", make.words());
+    let list = vehicles::settings_for(profile.as_ref(), vin.as_deref());
     Ok((vin, list))
 }
 
@@ -2084,18 +2118,46 @@ fn obd_selftests(elm: &mut dyn Link) -> Result<(), String> {
     Ok(())
 }
 
-/// What `obd clear --module` clears: the request and answer IDs, the vehicle's make (a profile's id), the dialect.
-type ClearTarget = (u32, u32, Option<String>, uds::Dialect);
+/// What `obd clear --module` clears: the request and answer IDs, the make it is cleared as (from the VIN, or the bench
+/// make this run named: ICA-222), the dialect.
+type ClearTarget = (u32, u32, benchmake::WriteMake, uds::Dialect);
+
+/// The make the vehicle on `elm` is written as (ICA-222): its VIN's, or where the VIN is blank, unreadable or names no
+/// profile, the bench make named for this run (`chosen`, from --make); a named make the VIN disagrees with is refused.
+/// With it, that make's profile. Only the VIN is read.
+fn write_make(
+    elm: &mut dyn Link,
+    profiles: &[vehicles::Profile],
+    chosen: Option<&str>,
+) -> Result<
+    (
+        Option<String>,
+        Option<vehicles::Profile>,
+        benchmake::WriteMake,
+    ),
+    String,
+> {
+    let vin = j1979::vin(elm).map_err(e);
+    let m = benchmake::for_vin(profiles, vin.clone(), chosen)?;
+    let profile = m
+        .make
+        .as_deref()
+        .and_then(|id| profiles.iter().find(|p| p.id == id))
+        .cloned();
+    Ok((vin.ok().flatten(), profile, m))
+}
 
 /// The module `obd clear --module ID[/ANSWER]` aims at, on the vehicle whose VIN `elm` gives (its make picked from
-/// `profiles`; None when the VIN cannot be read): its IDs, the make, and its dialect, learned by reading its codes first.
-/// Refused before anything but the VIN read is sent: an airbag module (by ID, and by the name this vehicle's profile gives
-/// it), an ID that is not one module's, and where the make's profile names no airbag module (or the make is not known) a
-/// module of unknown kind (ICA-200, `clear::refused_on`).
+/// `profiles`, or the bench make `chosen` where the VIN gives none: `write_make`): its IDs, the make, and its dialect,
+/// learned by reading its codes first. Refused before anything but the VIN read is sent: an airbag module (by ID, and by
+/// the name this vehicle's profile gives it), an ID that is not one module's, a bench make the VIN disagrees with, and
+/// where the make's profile names no airbag module (or the make is not known) a module of unknown kind (ICA-200,
+/// `clear::refused_on`).
 fn clear_target(
     elm: &mut dyn Link,
     id: &str,
     profiles: &[vehicles::Profile],
+    chosen: Option<&str>,
 ) -> Result<ClearTarget, String> {
     let (t, r) = id.split_once('/').map_or((id, None), |(a, b)| (a, Some(b)));
     let hex = |s: &str| {
@@ -2107,12 +2169,13 @@ fn clear_target(
         return Err(why);
     }
     let rx = r.map(hex).transpose()?.unwrap_or(tx.saturating_add(8));
-    let make = j1979::vin(elm)
-        .ok()
-        .flatten()
-        .and_then(|v| vehicles::for_vin(profiles, &v).map(|p| p.id.clone()));
-    if let Some(why) = clear::refused_on(profiles, make.as_deref(), tx, rx, "") {
-        return Err(why);
+    let (_, _, make) = write_make(elm, profiles, chosen)?;
+    if let Some(why) = clear::refused_on(profiles, make.make.as_deref(), tx, rx, "") {
+        return Err(if make.make.is_none() {
+            format!("{why}; {}", make.words())
+        } else {
+            why
+        });
     }
     let read = uds::module_dtcs(elm, tx, rx)
         .map_err(e)?
@@ -2136,10 +2199,14 @@ fn clear_target(
 fn obd_clear(elm: &mut dyn Link, args: &Args) -> Result<(), String> {
     // one module (its dialect is learned by reading its codes first) or every OBD-II module
     let ps = profiles();
+    let chosen = benchmake::chosen();
     let target = match args.opt("module") {
         None => None,
-        Some(id) => Some(clear_target(elm, id, &ps)?),
+        Some(id) => Some(clear_target(elm, id, &ps, chosen.as_deref())?),
     };
+    // the make it is cleared as, in the confirmation (and, when this run named it, in the action log)
+    let (_, _, make) = write_make(elm, &ps, chosen.as_deref())?;
+    println!("Make: {}.", make.words());
     println!("{}", clear::WARNING);
     if args.opt("yes").is_none() {
         print!("Type yes to save a report and clear: ");
@@ -2159,10 +2226,31 @@ fn obd_clear(elm: &mut dyn Link, args: &Args) -> Result<(), String> {
     match target {
         None => println!("Cleared: {}", clear::clear_obd(elm)?.join(", ")),
         Some((tx, rx, make, d)) => {
-            clear::clear_module(elm, tx, rx, d, &ps, make.as_deref())?;
+            if make.chosen {
+                icarus_obd::audit::log(&format!("clear {tx:03X}: {}", make.words()));
+            }
+            clear::clear_module(elm, tx, rx, d, &ps, make.make.as_deref())?;
             println!("Cleared module {tx:03X}.");
         }
     }
+    Ok(())
+}
+
+/// `icarus obd health` (ICA-214): one answer to "how does everything look?": codes, monitors, misfires and fuel trims,
+/// each beside this vehicle's own earlier checks (kept in its folder), drift said in words. Reads only.
+fn obd_health(elm: &mut dyn Link) -> Result<(), String> {
+    let all = profiles();
+    let vin = j1979::vin(elm).map_err(e)?;
+    let profile = vin
+        .as_deref()
+        .and_then(|v| vehicles::for_vin(&all, v))
+        .cloned();
+    // the module data's misfire values, where the vehicle's set has them (its own gates and pacing; none: Mode 06 only)
+    let us = icarus_core::moddata::units::us_customary();
+    let values = icarus_obd::vehicledata::read(elm, &all, None, us).ok();
+    println!("Sampling the fuel trims for a few seconds: keep the engine running (warm, at idle or a steady cruise).");
+    let c = icarus_obd::health::check(elm, profile.as_ref(), values.as_ref()).map_err(e)?;
+    print!("{}", icarus_obd::health::keep(c).text());
     Ok(())
 }
 
@@ -3220,7 +3308,7 @@ mod tests {
             e
         };
         let mut e = connect();
-        let why = clear_target(&mut e, "7B0", &ps).unwrap_err();
+        let why = clear_target(&mut e, "7B0", &ps, None).unwrap_err();
         assert!(
             why.contains("what 7B0 is, is not known") && why.contains("could be the airbag module"),
             "{why}"
@@ -3233,7 +3321,7 @@ mod tests {
         );
         for id in ["780", "752", "7A0/772", "18DA53F1"] {
             let mut e = connect();
-            let why = clear_target(&mut e, id, &ps).unwrap_err();
+            let why = clear_target(&mut e, id, &ps, None).unwrap_err();
             assert!(why.contains("is an airbag"), "{id}: {why}");
             assert!(
                 e.take_sent()
@@ -3242,8 +3330,44 @@ mod tests {
                 "{id}: only the VIN read"
             );
         }
-        let (tx, rx, make, _) = clear_target(&mut connect(), "7E0", &ps).unwrap();
-        assert_eq!((tx, rx, make.as_deref()), (0x7E0, 0x7E8, Some("kart")));
+        let (tx, rx, make, _) = clear_target(&mut connect(), "7E0", &ps, None).unwrap();
+        assert_eq!((tx, rx, make.make.as_deref()), (0x7E0, 0x7E8, Some("kart")));
+    }
+
+    /// ICA-222 on the command line: `obd clear --module` on a simulated ECM with a blank VIN. Without --make the engine
+    /// at 7E0 is refused (the make is not known, and that is said); with --make toyota it gets as far as its codes, named
+    /// as the make chosen; 780 (the airbag module) stays refused; and on a VIN that decodes to toyota, --make gm is
+    /// refused. Only the VIN read goes out before each refusal.
+    #[test]
+    fn clear_module_on_a_blank_vin_bench_ecm_takes_a_named_make() {
+        let ps = vehicles::builtin();
+        let bench = |vin: &str| {
+            let car = icarus_obd::sim::SimCar::engine_off().with_vin(vin);
+            let mut e = Elm::connect(Box::new(car)).unwrap();
+            e.take_sent();
+            e
+        };
+        let only_vin = |e: &mut Elm| e.take_sent().iter().all(|(_, _, d)| d[..] == [0x09, 0x02]);
+        let mut e = bench("");
+        let why = clear_target(&mut e, "7E0", &ps, None).unwrap_err();
+        assert!(
+            why.contains("could be the airbag module") && why.contains("VIN blank"),
+            "{why}"
+        );
+        assert!(only_vin(&mut e));
+        let (tx, _, make, _) = clear_target(&mut e, "7E0", &ps, Some("toyota")).unwrap();
+        assert_eq!(tx, 0x7E0);
+        assert_eq!(make.words(), "make chosen by me: toyota, VIN blank");
+        let why = clear_target(&mut e, "780", &ps, Some("toyota")).unwrap_err();
+        assert!(why.contains("airbag"), "{why}");
+        let mut t = bench(sim::VIN);
+        let why = clear_target(&mut t, "7E0", &ps, Some("gm")).unwrap_err();
+        assert!(why.contains("the VIN names toyota"), "{why}");
+        assert!(only_vin(&mut t));
+        assert!(
+            clear_target(&mut e, "7E0", &ps, Some("toy")).is_err(),
+            "never a guess"
+        );
     }
 
     /// ICA-192: --read-only is taken out wherever it stands (before the command, after it, twice), and nothing else is: the

@@ -45,6 +45,9 @@ pub enum Cmd {
     },
     /// Read the on-board test results (service 06).
     SelfTests,
+    /// A health check (ICA-214: `icarus_obd::health`): codes, monitors, misfires and fuel trims beside this vehicle's
+    /// earlier checks, kept in its folder. Reads only.
+    Health,
     /// Measure battery and charging voltage for some seconds.
     Charging(u64, icarus_obd::charging::Battery),
     /// Watch the bus: through the connected adapter (None) or a Linux CAN interface (its name). Ends with BusStop or any
@@ -149,6 +152,9 @@ pub struct Info {
     pub vin: Option<String>,
     pub vin_info: Option<VinInfo>,
     pub profile: Option<Profile>,
+    /// The make writes follow (ICA-222): the VIN's, or the bench make named for this session where the VIN gives none;
+    /// or why the two disagree.
+    pub make: Result<icarus_obd::benchmake::WriteMake, String>,
     /// (module, monitors) from service 01 PID 01.
     pub monitors: Vec<(String, Monitors)>,
     pub fuel_system: Option<&'static str>,
@@ -256,6 +262,8 @@ pub enum Event {
     /// Each module's own values, or why they could not be read.
     ModuleData(Result<Box<icarus_obd::vehicledata::VehicleValues>, String>),
     SelfTests(Vec<icarus_obd::mode06::TestResult>),
+    /// A health check as kept and compared (ICA-214), or why it could not be read.
+    Health(Result<Box<icarus_obd::health::Health>, String>),
     Charging(icarus_obd::charging::Check),
     Bus(Box<BusView>),
     /// Codes cleared (what was said), and the Vehicle page's information read again.
@@ -585,19 +593,30 @@ pub(crate) fn run_with(
                     send(Event::ClearFailed(format!("not cleared: {why}")));
                     continue;
                 }
-                // one module: on the make the confirmed connection's VIN picks, where its profile names no airbag
-                // module a module of unknown kind could be it (ICA-200); the airbag modules by ID or by the profile
-                let make = on
-                    .vin
-                    .as_deref()
-                    .and_then(|v| vehicles::for_vin(&profiles, v))
-                    .map(|p| p.id.clone());
+                // one module: on the make the confirmed connection's VIN picks, or the bench make named for this
+                // session where the VIN gives none (ICA-222); where its profile names no airbag module a module of
+                // unknown kind could be it (ICA-200); the airbag modules by ID or by the profile
+                let make = match icarus_obd::benchmake::for_vin(
+                    &profiles,
+                    Ok(on.vin.clone()),
+                    icarus_obd::benchmake::chosen().as_deref(),
+                ) {
+                    Ok(m) => m,
+                    Err(why) => {
+                        send(Event::ClearFailed(format!("not cleared: {why}")));
+                        continue;
+                    }
+                };
                 if let Some(why) = target.as_ref().and_then(|&(tx, rx, _)| {
-                    clear::refused_on(&profiles, make.as_deref(), tx.into(), rx.into(), "")
+                    clear::refused_on(&profiles, make.make.as_deref(), tx.into(), rx.into(), "")
                 }) {
                     send(Event::ClearFailed(format!("not cleared: {why}")));
                     continue;
                 }
+                if make.chosen {
+                    icarus_obd::audit::log(&format!("clear codes: {}", make.words()));
+                }
+                let make = make.make;
                 let Some(e) = elm.as_mut() else { continue };
                 live.clear();
                 send(Event::Status("Saving a report before clearing...".into()));
@@ -665,12 +684,27 @@ pub(crate) fn run_with(
                     Err(x) => send(Event::Failed(x.to_string())),
                 }
             }
+            Some(Cmd::Health) => {
+                let Some(e) = elm.as_mut() else { continue };
+                live.clear();
+                send(Event::Status(
+                    "Health check: reading codes, monitors and misfires, then sampling the fuel trims...".into(),
+                ));
+                let profile = write_profile(&profiles, vin.as_deref());
+                let us = icarus_core::moddata::units::us_customary();
+                let values = icarus_obd::vehicledata::read(e, &profiles, None, us).ok();
+                send(Event::Health(
+                    icarus_obd::health::check(e, profile, values.as_ref())
+                        .map(|c| Box::new(icarus_obd::health::keep(c)))
+                        .map_err(|x| x.to_string()),
+                ));
+            }
             Some(Cmd::SettingsRead) => {
                 let Some(e) = elm.as_mut() else { continue };
                 live.clear();
                 send(Event::Status("Reading the settings...".into()));
                 let defs = vehicles::settings_for(
-                    vin.as_deref().and_then(|v| vehicles::for_vin(&profiles, v)),
+                    write_profile(&profiles, vin.as_deref()),
                     vin.as_deref(),
                 );
                 send(Event::Settings(read_settings(e, &defs, vin.as_deref())));
@@ -729,7 +763,7 @@ pub(crate) fn run_with(
                 });
                 send(Event::SettingDone(said));
                 let defs = vehicles::settings_for(
-                    vin.as_deref().and_then(|v| vehicles::for_vin(&profiles, v)),
+                    write_profile(&profiles, vin.as_deref()),
                     vin.as_deref(),
                 );
                 send(Event::Settings(read_settings(e, &defs, vin.as_deref())));
@@ -1090,14 +1124,30 @@ fn connect(
 }
 
 /// Everything the Vehicle page shows, read again (its connection left for the caller to say).
+/// The profile a vehicle with `vin` is written (and its tests, settings and routines listed) as: its VIN's, or the bench
+/// make's named for this session where the VIN gives none (ICA-222); none when the two disagree or neither names one.
+fn write_profile<'a>(profiles: &'a [Profile], vin: Option<&str>) -> Option<&'a Profile> {
+    let m = icarus_obd::benchmake::for_vin(
+        profiles,
+        Ok(vin.map(str::to_string)),
+        icarus_obd::benchmake::chosen().as_deref(),
+    )
+    .ok()?;
+    profiles
+        .iter()
+        .find(|p| Some(p.id.as_str()) == m.make.as_deref())
+}
+
 fn gather(elm: &mut Elm, profiles: &[Profile]) -> Result<Info, String> {
     let e = |x: ObdError| x.to_string();
     let vin = j1979::vin(elm).map_err(e)?;
     let vin_info = vin.as_deref().and_then(|v| vin::decode(v).ok());
-    let profile = vin
-        .as_deref()
-        .and_then(|v| vehicles::for_vin(profiles, v))
-        .cloned();
+    let make = icarus_obd::benchmake::for_vin(
+        profiles,
+        Ok(vin.clone()),
+        icarus_obd::benchmake::chosen().as_deref(),
+    );
+    let profile = write_profile(profiles, vin.as_deref()).cloned();
     let mut monitors = Vec::new();
     if let Ok(a) = elm.request(&[0x01, 0x01]) {
         for x in a
@@ -1170,6 +1220,7 @@ fn gather(elm: &mut Elm, profiles: &[Profile]) -> Result<Info, String> {
         vin,
         vin_info,
         profile,
+        make,
         monitors,
         fuel_system,
         live,

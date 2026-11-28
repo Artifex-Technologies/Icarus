@@ -9,6 +9,7 @@
 pub mod actuator;
 pub mod asbuilt;
 pub mod audit;
+pub mod benchmake;
 pub mod bus;
 pub mod canlink;
 pub mod charging;
@@ -22,6 +23,7 @@ pub mod fence;
 pub mod fuel;
 pub mod garage;
 pub mod gps;
+pub mod health;
 pub mod history;
 pub mod j1939;
 pub mod j1979;

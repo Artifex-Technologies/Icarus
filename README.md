@@ -69,6 +69,22 @@ On-board test results (`icarus obd selftests`, Mode 06, CAN vehicles): each emis
 its limits (a catalyst near its limit fails soon) and misfire counts per cylinder; pass or fail compares raw numbers, real
 units only where the scaling is certain.
 
+## Health check
+
+`icarus obd health --adapter A` (or the Health check card on the Vehicle page) answers "how does everything look?" in one
+go, each part beside this vehicle's own earlier checks: the failed codes (OBD-II's stored, pending and permanent, and each
+of the profile's modules' own, a code marked only "not tested" left out), the readiness monitors not yet run, the misfire
+counts (Mode 06's per cylinder, and the module data's values that say misfire where the vehicle's set has them), and the
+total fuel trim (short + long) per bank at a warm idle, and at a cruise (30 mph or more) when the check runs while I
+drive, with the gap between the banks. The trims are a short sample of a few seconds, kept only with the engine warm
+(coolant 158 °F or more). Drift is said in words: a total trim or the bank-to-bank gap that moved 5 points or more since
+the earliest of the last ten checks is drift ("bank 2 total trim (warm idle) moved from -2 to +4 since 2026-11-21: 6
+points leaner-correcting"), less is steady; a new code, a monitor no longer complete and misfires up by 5 or more are
+said too. It only reads (nothing cleared, nothing written to the vehicle). Each check is one line in the vehicle's folder,
+`Logs/health-history.jsonl` (one JSON object a line: `when`, `codes`, `monitors_incomplete`, `monitors_complete`,
+`misfires` as `{name, count}`, `trims` as `{bank, at: "warm-idle"|"cruise", short, long, samples}`, in percent); with no
+VIN the check is shown, not kept.
+
 Clearing (`icarus obd clear [--module ID]`, or Clear codes in the window) asks first, needs the engine off, and saves a
 report before it erases anything: the freeze frame goes with the codes, and every readiness monitor starts over. Only the
 clearing requests go out (OBD-II `04`, UDS `14 FF FF FF`, KWP2000 `14 FF 00`); permanent codes stay until their monitor
@@ -120,6 +136,17 @@ setting says why on its error line. Nothing turns it off until the run ends. A w
 when it does not answer so (an Icarus from before this), the later start says the window may still change a vehicle and
 ends with an error, and I close that window and start again. A start whose line does not parse says so itself (exit 2)
 and hands nothing to the open window.
+
+A spare ECM on the bench with a blank or foreign VIN gives no make, and the airbag caution (a module the make's profile
+does not name could be the airbag module) would then refuse every module write to it. So a bench session names its make
+once: `--make toyota` on `obd clear`, `test`, `service`, `setting` and `setting-undo` (and the lists `tests`, `services`,
+`settings`), or Bench make in the window's connection row (chosen before connecting). It is a profile's own name, never
+guessed; it is used only when the VIN is blank, unreadable or names no profile, and when the VIN names a make, the named
+one must agree or the write is refused with the mismatch said. Every confirmation says the make it follows, the Vehicle
+page's "Make for writes" line too, and the action log keeps it ("make chosen by me: toyota, VIN blank"). It only picks the
+profile the caution follows: the airbag list (Toyota's 780 stays refused) and the key modules' fence hold whatever it
+says. With any vehicle's Read-Only switch on, a blank VIN is still refused by the switch (it cannot tell the bench ECU
+from that vehicle), so the switch goes off for bench work.
 
 A clear, a service routine or a setting change confirmed in the window belongs to the connection it was confirmed on: its
 dialog closes when the adapter disconnects, connects again or fails, and a yes that reaches the vehicle side after the
@@ -689,7 +716,8 @@ tools too).
 
 `icarus-app` (Icarus in the app menu): the **Vehicle** page connects to the adapter and shows the VIN, the make's profile,
 the codes explained with Look up and parts buttons, the freeze frame, the check-engine light and readiness monitors, the
-vehicle's name, and Save report; **Modules** scans every module for its identity and codes;
+vehicle's name, the Health check (beside the vehicle's earlier checks), and Save report, with a Bench make for an ECU on
+the bench; **Modules** scans every module for its identity and codes;
 **Live data** picks values (one by one, or Select all and Clear selections) and draws them as they change, each with what it means; **Trail gauges** shows the trail values the vehicle gives (coolant, oil and intake temperatures, voltage, engine and road speed, load, fuel level, outside air, air pressure) as big readouts in your units, each outlined amber when it wants watching and red when it is time to stop (general bands for a petrol engine: coolant from 230 °F and 245 °F, voltage under 12.0 V and 11.5 V or over 15.0 V and 15.5 V...), with the lowest and highest since they started and road speed corrected for the tires; **Tests** runs actuator tests while a
 button is held; **Settings** shows each module setting's value and changes it (asks first; undo puts the last change
 back); **Learning** watches another tool and names what it learned; **Bus** shows every ID and message; **Maps** opens a
@@ -735,6 +763,7 @@ input, bit masks, 64-bit integers, point counts stored in the image, rescale and
 ```sh
 icarus obd info  --adapter A    # adapter, protocol, VIN, modules, calibration IDs, check-engine light, readiness monitors
 icarus obd codes --adapter A    # stored, pending and permanent trouble codes per module
+icarus obd health --adapter A   # codes, monitors, misfires and fuel trims beside this vehicle's earlier checks
 icarus obd pids  --adapter A    # the live values each module offers, and what each one means
 icarus obd live  --adapter A 0C 06 07 14 44 --csv run.csv   # watch values (PIDs in hex), optionally into a CSV log
 icarus obd scan  --adapter A --make toyota   # every module (ABS, airbags, cluster...): identity and trouble codes
