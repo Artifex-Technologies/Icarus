@@ -7,6 +7,7 @@
 //! lambda reads well below 1 (0.48 on a Tacoma, ICA-86), which is not running rich. Offline: only the file is read.
 
 pub mod compare;
+pub mod experiment;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

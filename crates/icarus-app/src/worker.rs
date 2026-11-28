@@ -1036,6 +1036,8 @@ fn start_recording(
             .as_deref()
             .filter(|_| !cfg!(test))
             .and_then(icarus_obd::garage::folder_label),
+        // the tank it runs on, from the vehicle's fuel log as each part begins (ICA-211)
+        fuel: Some(icarus_obd::fuel::source(vin.clone())),
         vin,
     };
     let r = icarus_obd::drive::Recorder::start_pruning(plan, PRUNE_AFTER_S)?;
@@ -1305,6 +1307,57 @@ pub(crate) mod tests {
             Some("No trouble codes (UDS)"),
             "a module that lists none"
         );
+    }
+
+    /// ICA-211 through the window's worker: a recording on a vehicle with a fuel log names the tank it runs on.
+    #[test]
+    fn a_recording_through_the_window_names_the_tank() {
+        let home = crate::TestHome::new("worker-fuel");
+        let vin = "1ABCDEFGH12345678";
+        let dir = icarus_obd::garage::ensure(vin).unwrap();
+        assert!(dir.starts_with(&home.dir));
+        let mut log = icarus_obd::fuel::FuelLog {
+            tank_gallons: Some(20.0),
+            ..Default::default()
+        };
+        log.add(icarus_obd::fuel::FillUp {
+            date: "2026-01-01".into(),
+            grade: 87.0,
+            ethanol: 10.0,
+            gallons: 20.0,
+            ..Default::default()
+        })
+        .unwrap();
+        log.save(&dir).unwrap();
+        let mut elm = Elm::connect(Box::new(icarus_obd::sim::SimCar::new())).unwrap();
+        let offered: Vec<u8> = j1979::supported(&mut elm)
+            .unwrap()
+            .into_iter()
+            .flat_map(|s| s.2)
+            .filter(|p| j1979::pid(*p).is_some())
+            .collect();
+        let how = RecordStart {
+            gps: None,
+            quiet: true,
+            watch: vec![],
+        };
+        let (r, _) = start_recording(
+            &mut elm,
+            &offered,
+            &vehicles::builtin(),
+            &how,
+            Some(vin.into()),
+        )
+        .unwrap();
+        assert!(r.follows_fuel_log());
+        let path = r.close().unwrap().remove(0);
+        assert!(path.starts_with(&home.dir));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("\n# fuel: tank 87 E10; filled 2026-01-01, 20 gal; blend 87 E10"),
+            "{text}"
+        );
+        drop(home);
     }
 
     /// ICA-208/112 through the window's worker: Record drive writes rows with standard and module columns, goes on when the

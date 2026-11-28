@@ -19,6 +19,7 @@ pub mod drivelog;
 pub mod dtc;
 pub mod elm;
 pub mod fence;
+pub mod fuel;
 pub mod garage;
 pub mod gps;
 pub mod history;

@@ -35,9 +35,13 @@ pub struct Recording {
     pub name: String,
     /// The adapter its first line names (`# adapter: ...`), when it does.
     pub adapter: Option<String>,
-    /// The fuel or calibration it was driven on (91 E0, 87, a tune's name), shown under the name when there is one. Not
-    /// recorded yet (ICA-113 and ICA-211 will set it); a side of drives pooled (`compare_pooled`) says how many it holds.
+    /// The fuel it was driven on, from its `# fuel:` line ("87 E10 tank, blend 88 E8", ICA-211; a calibration's name is
+    /// ICA-113's); a side of drives pooled (`compare_pooled`) says how many it holds. Shown under the name when there is one.
     pub tag: Option<String>,
+    /// For drives pooled as one (`compare_pooled`), each drive's file name.
+    pub files: Vec<String>,
+    /// For drives pooled as one: each drive that lacks a column the others have, and which ("b1.csv: commanded lambda").
+    pub lacking_in: Vec<String>,
     /// Its rows, and how many of them are at the conditions compared.
     pub rows: usize,
     pub kept: usize,
@@ -102,7 +106,20 @@ fn at(s: &Series, c: Option<usize>, i: usize) -> Option<f64> {
 /// One recording's cells: (the recording, trims by air flow band, timing by [rpm band, load band]).
 type Cells = BTreeMap<Vec<usize>, Cell>;
 
-fn one(name: &str, text: &str) -> Result<(Recording, Cells, Cells), String> {
+/// A recording read for comparing: its columns found by name, what it lacks, and which rows are at the conditions
+/// compared (warm, closed loop, running).
+struct Read {
+    s: Series,
+    rpm: Option<usize>,
+    load: Option<usize>,
+    maf: Option<usize>,
+    timing: Option<usize>,
+    trims: [Option<usize>; 4],
+    lacking: Vec<&'static str>,
+    matching: Vec<bool>,
+}
+
+fn read(name: &str, text: &str) -> Result<Read, String> {
     let s = series(text).map_err(|e| format!("{name}: {e}"))?;
     let rpm = s.find(&["engine speed"]);
     let load = s.find(&["engine load"]);
@@ -142,30 +159,48 @@ fn one(name: &str, text: &str) -> Result<(Recording, Cells, Cells), String> {
                 .map(|l| l.1),
         );
     }
-    let base = |i: usize| {
-        warm_at[i].is_some_and(|c| c >= WARM_C)
-            && at(&s, lambda, i).is_some_and(|l| (CLOSED_LOOP.0..=CLOSED_LOOP.1).contains(&l))
-            && at(&s, rpm, i).is_some_and(|r| r > RUNNING_RPM)
-    };
+    let matching = (0..s.t.len())
+        .map(|i| {
+            warm_at[i].is_some_and(|c| c >= WARM_C)
+                && at(&s, lambda, i).is_some_and(|l| (CLOSED_LOOP.0..=CLOSED_LOOP.1).contains(&l))
+                && at(&s, rpm, i).is_some_and(|r| r > RUNNING_RPM)
+        })
+        .collect();
+    Ok(Read {
+        s,
+        rpm,
+        load,
+        maf,
+        timing,
+        trims,
+        lacking,
+        matching,
+    })
+}
+
+fn one(name: &str, text: &str) -> Result<(Recording, Cells, Cells), String> {
+    let r = read(name, text)?;
+    let s = &r.s;
+    let base = |i: usize| r.matching[i];
     let total =
-        |st: Option<usize>, lt: Option<usize>, i: usize| Some(at(&s, st, i)? + at(&s, lt, i)?);
-    let bank1 = |i: usize| total(trims[0], trims[1], i);
-    let bank2 = |i: usize| total(trims[2], trims[3], i);
-    let advance = |i: usize| at(&s, timing, i);
+        |st: Option<usize>, lt: Option<usize>, i: usize| Some(at(s, st, i)? + at(s, lt, i)?);
+    let bank1 = |i: usize| total(r.trims[0], r.trims[1], i);
+    let bank2 = |i: usize| total(r.trims[2], r.trims[3], i);
+    let advance = |i: usize| at(s, r.timing, i);
     let kept = (0..s.t.len()).filter(|i| base(*i)).count();
-    let by_air = match maf {
+    let by_air = match r.maf {
         Some(m) => cells(
-            &s,
+            s,
             &[(m, Cut::Edges(AIR_FLOW))],
             |i| base(i) && (bank1(i).is_some() || bank2(i).is_some()),
             &[&bank1, &bank2],
         ),
         None => Cells::new(),
     };
-    let by_speed = match (rpm, load) {
-        (Some(r), Some(l)) => cells(
-            &s,
-            &[(r, Cut::Edges(RPM)), (l, Cut::Edges(LOAD))],
+    let by_speed = match (r.rpm, r.load) {
+        (Some(rp), Some(l)) => cells(
+            s,
+            &[(rp, Cut::Edges(RPM)), (l, Cut::Edges(LOAD))],
             |i| base(i) && advance(i).is_some(),
             &[&advance],
         ),
@@ -175,14 +210,84 @@ fn one(name: &str, text: &str) -> Result<(Recording, Cells, Cells), String> {
         Recording {
             name: name.to_string(),
             adapter: adapter_of(text),
-            tag: None,
+            tag: crate::fuel::of_recording(text).map(|t| t.short()),
             rows: s.t.len(),
             kept,
-            lacking,
+            lacking: r.lacking.clone(),
+            files: vec![],
+            lacking_in: vec![],
         },
         by_air,
         by_speed,
     ))
+}
+
+/// A row counts for at most this many seconds (the time to the next row): a gap in a recording is not driving.
+pub const ROW_MAX_S: f64 = 1.0;
+
+/// Seconds and rows by engine speed and load group, keyed as the timing table keys them.
+pub type Time = BTreeMap<Vec<usize>, (f64, usize)>;
+
+/// How long a recording spent at the conditions compared in each engine speed and load group, in seconds and rows, and the
+/// columns it lacks (ICA-212). Each row counts for the time to the next one, `ROW_MAX_S` at most (the last row as long as
+/// the one before it).
+pub fn time_by_speed_load(name: &str, text: &str) -> Result<(Time, Vec<&'static str>), String> {
+    let r = read(name, text)?;
+    let s = &r.s;
+    let mut out = Time::new();
+    let (Some(rp), Some(l)) = (r.rpm, r.load) else {
+        return Ok((out, r.lacking));
+    };
+    let n = s.t.len();
+    for i in 0..n {
+        if !r.matching[i] {
+            continue;
+        }
+        let (Some(a), Some(b)) = (
+            at(s, Some(rp), i).and_then(|v| Cut::Edges(RPM).band(v)),
+            at(s, Some(l), i).and_then(|v| Cut::Edges(LOAD).band(v)),
+        ) else {
+            continue;
+        };
+        let dt = if i + 1 < n {
+            s.t[i + 1] - s.t[i]
+        } else if i > 0 {
+            s.t[i] - s.t[i - 1]
+        } else {
+            0.0
+        };
+        let e = out.entry(vec![a, b]).or_default();
+        e.0 += dt.clamp(0.0, ROW_MAX_S);
+        e.1 += 1;
+    }
+    Ok((out, r.lacking))
+}
+
+/// An engine speed and load group's name as the timing table has it: "1800-2600 rpm, 60-80 %".
+pub fn speed_load_label(k: &[usize]) -> String {
+    format!(
+        "{} rpm, {} %",
+        band(RPM, k[0], f64::MAX),
+        band(LOAD, k[1], 100.0)
+    )
+}
+
+/// The same group in words: "60-80 % load, 1,800-2,600 rpm".
+pub fn speed_load_words(k: &[usize]) -> String {
+    let thousands = |v: f64| {
+        let n = v as u64;
+        if n >= 1000 {
+            format!("{},{:03}", n / 1000, n % 1000)
+        } else {
+            n.to_string()
+        }
+    };
+    format!(
+        "{} % load, {}-{} rpm",
+        band(LOAD, k[1], 100.0),
+        thousands(RPM[k[0]]),
+        thousands(RPM[k[0] + 1])
+    )
 }
 
 fn band(edges: &[f64], k: usize, cap: f64) -> String {
@@ -215,8 +320,9 @@ pub fn compare(recordings: &[(String, String)], min_rows: usize) -> Result<Compa
     Ok(assemble(parts, min_rows))
 }
 
-/// Several recordings as one (a side of a before-and-after, ICA-215): their rows pooled into the same groups, named `name`.
-/// What every one of them lacks is said; the adapters they name are listed once each.
+/// Several recordings as one (a side of a before-and-after, ICA-215; the drives on one blend, ICA-211): their rows pooled
+/// into the same groups, named `name`. What every one of them lacks is said, and each drive that lacks a column the others
+/// have is named with it; the adapters they name are listed once each, and the drives' names kept (`files`).
 fn pool(name: &str, recordings: &[(String, String)]) -> Result<(Recording, Cells, Cells), String> {
     if recordings.is_empty() {
         return Err(format!("{name}: no recordings"));
@@ -232,10 +338,13 @@ fn pool(name: &str, recordings: &[(String, String)]) -> Result<(Recording, Cells
     };
     let (mut air, mut speed) = (Cells::new(), Cells::new());
     let mut adapters: Vec<String> = vec![];
+    let mut each: Vec<(String, Vec<&'static str>)> = vec![];
     for (i, (n, text)) in recordings.iter().enumerate() {
         let (one_r, a, s) = one(n, text)?;
         r.rows += one_r.rows;
         r.kept += one_r.kept;
+        r.files.push(n.clone());
+        each.push((n.clone(), one_r.lacking.clone()));
         r.lacking = if i == 0 {
             one_r.lacking
         } else {
@@ -254,6 +363,16 @@ fn pool(name: &str, recordings: &[(String, String)]) -> Result<(Recording, Cells
         }
     }
     r.adapter = (!adapters.is_empty()).then(|| adapters.join(", "));
+    // what some drives lack and the others have: those drives named
+    for (n, lack) in each {
+        let only: Vec<&str> = lack
+            .into_iter()
+            .filter(|l| !r.lacking.contains(l))
+            .collect();
+        if !only.is_empty() {
+            r.lacking_in.push(format!("{n}: {}", only.join(", ")));
+        }
+    }
     Ok((r, air, speed))
 }
 
@@ -286,13 +405,7 @@ fn assemble(parts: Vec<(Recording, Cells, Cells)>, min_rows: usize) -> Compariso
         speed.push(s);
     }
     c.trims = groups(&air, |k| format!("{} g/s", band(AIR_FLOW, k[0], f64::MAX)));
-    c.timing = groups(&speed, |k| {
-        format!(
-            "{} rpm, {} %",
-            band(RPM, k[0], f64::MAX),
-            band(LOAD, k[1], 100.0)
-        )
-    });
+    c.timing = groups(&speed, speed_load_label);
     c
 }
 
@@ -325,11 +438,50 @@ pub fn misfires(text: &str) -> Result<(Vec<(String, f64)>, f64), String> {
     Ok((out, seconds.max(0.0)))
 }
 
-/// Compares recording files, the first the one the others are measured against.
+/// One group of `by_fuel`: its blend ("91 E0") and its recordings as (name, text).
+pub type Pool = (String, Vec<(String, String)>);
+
+/// Recordings grouped by the blend their `# fuel:` line estimates ("91 E0", "88 E8"), the highest octane first (then the
+/// least ethanol): the groups, and the names of those left out because their blend is not known.
+pub fn by_fuel(recordings: Vec<(String, String)>) -> (Vec<Pool>, Vec<String>) {
+    // grouped by the blend's name itself ("88 E7"), ordered by the octane and ethanol that name gives
+    let mut groups: BTreeMap<(i64, i64, String), Pool> = BTreeMap::new();
+    let mut unknown = vec![];
+    for (name, text) in recordings {
+        let named = crate::fuel::of_recording(&text)
+            .and_then(|t| t.blend)
+            .and_then(|b| Some((crate::fuel::Want::parse(&b)?, b)));
+        match named {
+            Some((w, label)) => {
+                let key = (
+                    -((w.aki * 10.0).round() as i64),
+                    (w.ethanol.unwrap_or(0.0) * 10.0).round() as i64,
+                    label.clone(),
+                );
+                groups
+                    .entry(key)
+                    .or_insert_with(|| (label, vec![]))
+                    .1
+                    .push((name, text));
+            }
+            None => unknown.push(name),
+        }
+    }
+    let mut pools: Vec<Pool> = groups.into_values().collect();
+    for p in &mut pools {
+        p.1.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+    (pools, unknown)
+}
+
+/// Compares recording files, the first the one the others are measured against. Each drive's fuel is worked out from its
+/// vehicle's fuel log as it is now (`fuel::with_line_at_read`), the line it was recorded with only when that cannot be.
 pub fn compare_files(paths: &[&Path], min_rows: usize) -> Result<Comparison, String> {
+    let lib = crate::garage::library();
     let mut v = vec![];
     for p in paths {
         let text = std::fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()))?;
+        let text = crate::fuel::with_line_at_read(&lib, Some(p), text);
         let name = p
             .file_name()
             .map(|f| f.to_string_lossy().into_owned())
@@ -423,10 +575,31 @@ impl Comparison {
         if let Some(t) = &r.tag {
             s.push_str(&format!(", {t}"));
         }
+        if !r.files.is_empty() {
+            // the drives named, the first few when there are many
+            const SHOWN: usize = 6;
+            let mut names = r
+                .files
+                .iter()
+                .take(SHOWN)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            if r.files.len() > SHOWN {
+                names.push_str(&format!(" and {} more", r.files.len() - SHOWN));
+            }
+            s.push_str(&format!(" ({names})"));
+        }
         if !r.lacking.is_empty() {
             s.push_str(&format!(
                 "; it has no {} column, so what needs it is left out",
                 r.lacking.join(", ")
+            ));
+        }
+        if !r.lacking_in.is_empty() {
+            s.push_str(&format!(
+                "; some of its drives lack a column ({}), so their rows are left out of what needs it",
+                r.lacking_in.join("; ")
             ));
         }
         s
@@ -511,9 +684,15 @@ fn columns(lines: &[Vec<String>]) -> String {
 
 /// The comparison in words and two tables; `warm` is the coolant temperature as shown ("176 °F (80 °C)").
 pub fn words(c: &Comparison, warm: &str) -> String {
+    let pooled = c.recordings.iter().any(|r| !r.files.is_empty());
     let mut o = format!(
-        "Comparing {} recordings.\n{}\n\n",
+        "Comparing {} {}.\n{}\n\n",
         c.recordings.len(),
+        if pooled {
+            "groups of drives, each group's drives pooled"
+        } else {
+            "recordings"
+        },
         c.conditions(warm)
     );
     for f in 0..c.recordings.len() {
@@ -747,5 +926,96 @@ mod tests {
             "2 up, 1 down (started again), 3 up"
         );
         assert_eq!(secs, 3.0);
+    }
+
+    /// ICA-211: drives pooled by the blend their `# fuel:` line estimates, the highest octane first, those with no known
+    /// blend left out and named.
+    #[test]
+    fn drives_pooled_by_fuel() {
+        let line = |tank: &str, blend: &str, aki: f64, e: f64| {
+            format!("# fuel: tank {tank}; filled 2026-11-01, 21.1 gal; blend {blend} (estimated {aki:.1} AKI, {e:.1} % ethanol)\n")
+        };
+        let on87 = line("87 E10", "87 E10", 87.0, 10.0);
+        let on91 = line("91 E0", "91 E0", 91.0, 0.0);
+        let rows = |timing: f64| drive(HEAD_A, &[(12, 2200.0, 70.0, timing, 20.0, 1.0)]);
+        let recs = vec![
+            ("b2.csv".to_string(), format!("{on87}{}", rows(20.0))),
+            ("a.csv".to_string(), format!("{on91}{}", rows(25.0))),
+            ("b1.csv".to_string(), format!("{on87}{}", rows(22.0))),
+            (
+                "first.csv".to_string(),
+                format!("# fuel: tank 91 E0; filled 2026-10-01, 10 gal; blend unknown (53 % of the tank is from before the first logged fill-up; the rest is 91.0 AKI, 0.0 % ethanol)\n{}", rows(25.0)),
+            ),
+            ("none.csv".to_string(), rows(25.0)),
+        ];
+        let (pools, unknown) = by_fuel(recs);
+        assert_eq!(unknown, ["first.csv", "none.csv"]);
+        // grouped by the blend's name: 88.46 AKI (one decimal: 88.5) named 88 E7 is with 88 E7, not under 89
+        let near = |aki: f64| format!("{}{}", line("87 E10", "88 E7", aki, 7.0), rows(21.0));
+        let (p2, _) = by_fuel(vec![
+            ("x.csv".to_string(), near(88.46)),
+            ("y.csv".to_string(), near(88.2)),
+        ]);
+        assert_eq!(p2.len(), 1);
+        assert_eq!((p2[0].0.as_str(), p2[0].1.len()), ("88 E7", 2));
+        let names: Vec<(&str, Vec<&str>)> = pools
+            .iter()
+            .map(|p| (p.0.as_str(), p.1.iter().map(|r| r.0.as_str()).collect()))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("91 E0", vec!["a.csv"]),
+                ("87 E10", vec!["b1.csv", "b2.csv"])
+            ]
+        );
+        let c = compare_pooled(&pools, MIN_ROWS).unwrap();
+        let g = c
+            .timing
+            .iter()
+            .find(|g| g.label == "1800-2600 rpm, 60-80 %")
+            .unwrap();
+        assert_eq!(
+            (g.cells[0].rows, g.cells[1].rows),
+            (12, 24),
+            "the 87 drives' rows added together"
+        );
+        assert_eq!(c.value(g, 1, 0), Some(21.0));
+        assert_eq!(c.difference(g, 1, 0), Some(-4.0));
+        assert_eq!(c.recordings[1].tag.as_deref(), Some("2 drives"));
+        assert!(
+            c.recording_line(1).contains("87 E10: 24 of 24 rows")
+                && c.recording_line(1).contains("(b1.csv, b2.csv)")
+        );
+        assert!(words(&c, "176 °F (80 °C)").starts_with("Comparing 2 groups of drives"));
+        assert!(compare_pooled(&pools[..1], MIN_ROWS).is_err());
+        // a drive that lacks a column the others have is named; what every drive lacks is said as before
+        let no_lambda: Vec<&str> = HEAD_A
+            .iter()
+            .copied()
+            .filter(|h| !h.starts_with("Commanded"))
+            .collect();
+        let c = compare_pooled(
+            &[
+                ("A".into(), vec![("a.csv".into(), rows(25.0))]),
+                (
+                    "B".into(),
+                    vec![
+                        ("b1.csv".into(), rows(22.0)),
+                        (
+                            "b2.csv".into(),
+                            drive(&no_lambda, &[(12, 2200.0, 70.0, 20.0, 20.0, 1.0)]),
+                        ),
+                    ],
+                ),
+            ],
+            MIN_ROWS,
+        )
+        .unwrap();
+        assert!(c.recordings[1].lacking.is_empty());
+        assert_eq!(c.recordings[1].lacking_in, ["b2.csv: commanded lambda"]);
+        assert!(c
+            .recording_line(1)
+            .contains("some of its drives lack a column (b2.csv: commanded lambda)"));
     }
 }

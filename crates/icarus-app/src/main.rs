@@ -5,6 +5,7 @@
 mod autoconn;
 mod confirm;
 mod devices;
+mod fuel;
 mod gauges;
 mod levels;
 mod listen;
@@ -456,6 +457,8 @@ struct App {
     garage_edit: Option<GarageEdit>,
     /// The Garage page's Maintenance card (maintenance.rs, ICA-185).
     maintenance: maintenance::Card,
+    /// The Garage page's Fuel log card (ICA-211), its own state.
+    fuel_card: fuel::FuelCard,
     /// The VINs whose Read-only switch is on (`icarus_obd::lock`).
     read_only: std::collections::BTreeSet<String>,
     import_path: String,
@@ -643,6 +646,7 @@ impl App {
             garage_details: Default::default(),
             garage_edit: None,
             maintenance: Default::default(),
+            fuel_card: Default::default(),
             read_only: icarus_obd::lock::read_only(),
             import_path: String::new(),
             t_stock: "P265/65R17".into(),
@@ -3755,6 +3759,7 @@ impl App {
                     }
                 });
             });
+            self.fuel_card.show(ui, pal, &vin, &dir, described.as_ref());
         });
         let first_def = |dir: &std::path::Path| {
             garage::files(dir, "Definitions")

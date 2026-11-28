@@ -94,7 +94,7 @@ battery type, set by "battery registration": a per-make configuration change for
 Every vehicle connected (with a VIN) gets a folder in `~/Documents/Icarus/Vehicles/`, named after the name it was given
 (else its VIN; renaming the vehicle renames the folder): **OEM tunes**, **Custom tunes**, **Definitions**, **Reports**
 (the vehicle's reports go here) and **Logs**, and its maintenance log (`maintenance.toml`, below). A stock image imported as OEM is copied in read-only and never replaced: it is
-the way back.
+the way back. Beside them, once made: `fuel.toml` (the fuel log, below) and `experiments.toml` (A/B experiments).
 
 ## The Read-Only switch
 
@@ -138,6 +138,91 @@ recording's column headed by its file name and the adapter it names, with each g
 the first recording. A group under the minimum count is marked thin and never summarized, and no difference is given
 beside it. The recordings may hold different columns in a different order; each is found by its name. A recording is a
 path, or a file name in `~/Documents/Icarus/logs` or a vehicle's Logs folder. The Logs page's Compare view shows the same.
+Each recording is shown with the fuel it ran on, worked out from the fuel log (below) as it is now: "87 E10 tank, blend 88 E8".
+
+```sh
+icarus logs compare --by-fuel [drive-A.csv drive-B.csv...] [--vin VIN] [--min-rows 10]
+```
+
+The same with the drives pooled by their estimated blend ("91 E0", "88 E8": octane and ethanol to the nearest whole),
+the highest octane first, each group's rows added together: the recordings given, else the vehicle's (`--vin`, or the one
+vehicle with a folder): its Logs folder and the shared `~/Documents/Icarus/logs`, a drive whose `# vehicle:` line names
+another vehicle left out, as the maintenance log's before-and-after does. A recording whose blend is not known (recorded with no fuel log, or on the first tank logged, mostly unknown) is
+left out and named.
+
+### What an A/B question still needs
+
+```sh
+icarus logs experiment "91 vs 87" "91 E0" "87 E10" [--min-seconds 60] [--vin VIN]
+icarus logs experiment "91 vs 87"       # run it again
+icarus logs experiment                  # the ones kept
+```
+
+Each side is a fuel tag (matched on each recording's estimated blend, within 0.5 octane and 2 points of ethanol; "87"
+alone takes any ethanol) or recordings separated by commas (`drive-a.csv,drive-b.csv`). For each engine speed and load
+group of the timing table, at the conditions compared (warm, closed loop, running), it adds up how many seconds of driving
+each side has (each row counts for the time to the next one, a second at most) and says what is still missing: "20 s more
+at 60-80 % load, 1,800-2,600 rpm, on 87 E10 (has 40 s)". A group needs both sides once both have reached it (10 rows each,
+enough for compare to show a value) or one side has the minimum there; a group only one side touched briefly is listed as
+seen, not needed. Done when every group that needs it has the minimum (60 s unless `--min-seconds`) on both sides. The
+experiment is kept in the vehicle's folder, `experiments.toml`:
+
+```toml
+["91 vs 87"]
+a = "91 E0"
+b = "87 E10"
+min_seconds = 60.0
+```
+
+## The fuel log
+
+```sh
+icarus fuel add --grade 87 --ethanol 10 --gallons 14.2 [--odometer 84210] [--date "2026-11-20 14:05"] [--note TEXT] [--vin VIN] [--tank 21.1] [--before "91 E0"]
+icarus fuel list [--vin VIN]
+```
+
+Each vehicle's fill-ups, in `fuel.toml` in its folder (the Garage page's Fuel log card adds and lists them too). The file
+is plain and meant to be edited by hand when I like:
+
+```toml
+tank_gallons = 21.1        # what the tank holds; a 2016-2023 Tacoma's 21.1 is used without it
+
+[[fill]]
+date = "2026-11-20 14:05"  # local time; a date alone counts as the start of that day
+grade = 91                 # octane as the pump shows it (AKI)
+ethanol = 0                # percent by volume (E10 is 10)
+gallons = 14.2
+odometer = 84210           # miles, optional
+note = "after the E15 tank" # optional
+before = "91 E0"           # optional, the first fill-up only: what was in the tank before it
+```
+
+A key the file does not know (a typo such as `ethonal`) is an error, said, and the file is left as it is; nothing is ever
+written over a log that does not read. The window and `icarus fuel add` add a fill-up to the file as it is on disk at that
+moment, the vehicle's folder locked meanwhile, so one added by the other or by hand is kept.
+
+Each fill-up is taken to fill the tank: what was left (the tank's size less the gallons added) keeps the blend before it,
+and the gallons added mix in by volume, octane and ethanol alike (a linear estimate). Before the first fill-up logged the
+leftover is not known, and that is said, not guessed: the estimate is over the part of the tank that is known, with the
+unknown share beside it, and no blend is named while more than 10 % of the tank is unknown. When I know what was in the
+tank before the first fill-up I log, `--before "91 E0"` (the Fuel log card's "In the tank before", shown only then) says
+so: the leftover is taken as that blend, and the line says it was taken as stated. For a vehicle that is not a
+2016-2023 Tacoma, the first `fuel add` asks for `--tank GALLONS` once and keeps it. With `--vin` left out, the one vehicle
+with a folder is meant. A drive recorded (the window's Record drive or `icarus record`) on a vehicle with a fuel log names
+the tank it ran on (the last fill-up at or before its start) and the estimated blend in its first lines:
+
+```
+# fuel: tank 87 E10; filled 2026-11-10 17:30, 15 gal; blend 88 E7 (estimated 88.2 AKI, 7.1 % ethanol)
+```
+
+The line is worked out as each part file begins, so a fill-up logged during a stop for fuel (the engine off, then on
+again: a new part) names the tank the next part runs on. Reading a recording (`logs compare`, `--by-fuel`, an experiment,
+the Logs page's Compare) works the tank out again from the fuel log as it is then, by the recording's `# vehicle:` line
+(or the vehicle's Logs folder it is in) and its `# began:` time, so a fill-up logged at home after the drive counts; the
+`# fuel:` line it was recorded with is used only when that cannot be done (no vehicle line, no fuel log). A fill-up logged
+with a date and no time names no tank for the drives of that day: it is not known whether they were before or after it,
+and that is said. When every recording is scanned (`--by-fuel` with no files, a tag side of an experiment), one that does
+not read or holds no rows is skipped and named, and each drive is read once (a `-redecoded` copy in place of its original).
 
 ## Maintenance log
 

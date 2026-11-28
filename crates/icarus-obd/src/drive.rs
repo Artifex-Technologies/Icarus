@@ -3,7 +3,9 @@
 //!
 //! A recording is a CSV in ~/Documents/Icarus/logs (drivelog reads it): a `# adapter:` line, a `# vehicle:` line naming the
 //! vehicle's garage folder when it has a name (never the VIN), a `# module data:` line when module values are in it, a
-//! `# began:` line (local time, in every part), the header, then one row per sweep. A sweep reads the fast standard values (`FAST`: what fuel
+//! `# began:` line (local time, in every part), a `# fuel:` line when the vehicle has a fuel log (the tank it runs on and
+//! its estimated blend, `fuel::line_for`, ICA-211), the header, then one row per sweep. A sweep reads the fast standard
+//! values (`FAST`: what fuel
 //! trims, timing, air flow, the throttle and the mixture are read from) every time, two of the other values the vehicle
 //! offers in turn, and, no more often than `MODULE_STEP`, one request of the vehicle's module data (ICA-44: transmission
 //! fluid temperature, knock correction... from the set `icarus obd data` would choose), through module data's gates and
@@ -658,6 +660,9 @@ pub struct Plan {
     /// The name of the vehicle's garage folder (`garage::folder_label`: "2017 Toyota Tacoma 3.5L V6", never the VIN), for
     /// the file's `# vehicle:` line, so the shared logs folder's drives can be told apart by vehicle.
     pub vehicle: Option<String>,
+    /// Gives the `# fuel:` line (`fuel::source`: the tank the drive runs on, from the vehicle's fuel log), asked again as
+    /// each part file begins, so a fill-up logged during a stop for fuel names the tank the next part runs on.
+    pub fuel: Option<crate::fuel::FuelSource>,
 }
 
 /// What one sweep did.
@@ -723,6 +728,8 @@ pub struct Recorder {
     rate_said: bool,
     /// After how long (`RATE_AFTER_S`; shorter in tests).
     rate_after: f64,
+    /// The `# fuel:` line's source, asked as each part begins (ICA-211).
+    fuel: Option<crate::fuel::FuelSource>,
 }
 
 impl Recorder {
@@ -826,6 +833,7 @@ impl Recorder {
             rate_from: None,
             rate_said: false,
             rate_after: RATE_AFTER_S,
+            fuel: plan.fuel,
         };
         r.next_part()?;
         Ok(r)
@@ -848,6 +856,11 @@ impl Recorder {
     /// What the gates kept out of the module data, in words.
     pub fn left_out(&self) -> &[String] {
         self.modules.as_ref().map_or(&[][..], |m| &m.left_out)
+    }
+
+    /// Whether each part's `# fuel:` line comes from the vehicle's fuel log (the plan gave it a source).
+    pub fn follows_fuel_log(&self) -> bool {
+        self.fuel.is_some()
     }
 
     /// The part being written.
@@ -899,6 +912,9 @@ impl Recorder {
         let mut head = self.head.clone();
         // when this part began, in every part: a later part's name carries the first part's stamp
         head.push(format!("# began: {}", began_now()));
+        if let Some(line) = self.fuel.as_ref().and_then(|f| f()) {
+            head.push(line.replace(['\r', '\n'], " "));
+        }
         if self.part_no > 1 {
             head.push(format!(
                 "# part {} of the drive that began in drive-{}.csv (the engine started again)",
@@ -1644,7 +1660,117 @@ mod tests {
             keep_awake: false,
             vin: j1979::vin(link).ok().flatten(),
             vehicle: Some("Made-up Truck".into()),
+            fuel: None,
         }
+    }
+
+    /// ICA-211's done: a recording made after two logged fill-ups names the second tank and its estimated blend at its top,
+    /// and a comparison shows it beside the drive's name; a fill-up logged during a stop for fuel names the next part's
+    /// tank.
+    #[test]
+    fn a_recording_names_the_tank_it_runs_on() {
+        let dir = scratch("fuel");
+        let vehicle = dir.join("vehicle");
+        let mut log = crate::fuel::FuelLog::default();
+        for (date, grade, ethanol, gallons) in [
+            ("2026-11-01 09:00", 91.0, 0.0, 21.1),
+            ("2026-11-10 17:30", 87.0, 10.0, 15.0),
+        ] {
+            log.add(crate::fuel::FillUp {
+                date: date.into(),
+                grade,
+                ethanol,
+                gallons,
+                odometer: None,
+                note: String::new(),
+                before: None,
+            })
+            .unwrap();
+        }
+        log.save(&vehicle).unwrap();
+        let tacoma = crate::garage::Described::parse("2017 Toyota Tacoma 3.5L V6");
+        // the clock the fuel line is asked at, moved by the test
+        let clock = Arc::new(Mutex::new("2026-11-12 08:15:00".to_string()));
+        let (v, c, d) = (vehicle.clone(), clock.clone(), tacoma.clone());
+        let engine = Arc::new(AtomicBool::new(true));
+        let e = engine.clone();
+        let car = SimCar::new().with_engine(Arc::new(move || e.load(Ordering::SeqCst)));
+        let mut elm = Elm::connect(Box::new(car)).unwrap();
+        let mut p = plan(&mut elm, &dir, false);
+        p.fuel = Some(Box::new(move || {
+            crate::fuel::line_in(&v, Some(&d), &c.lock().unwrap())
+        }));
+        let mut r = Recorder::start(p).unwrap();
+        assert!(r.follows_fuel_log());
+        r.sweep(&mut elm, &[], 0.0).unwrap();
+        r.sweep(&mut elm, &[], 0.5).unwrap();
+        // a stop for fuel: the engine off, a fill-up of 91 E0 logged, the engine on again
+        engine.store(false, Ordering::SeqCst);
+        r.sweep(&mut elm, &[], 1.0).unwrap();
+        log.add(crate::fuel::FillUp {
+            date: "2026-11-12 09:00".into(),
+            grade: 91.0,
+            ethanol: 0.0,
+            gallons: 15.0,
+            ..Default::default()
+        })
+        .unwrap();
+        log.save(&vehicle).unwrap();
+        *clock.lock().unwrap() = "2026-11-12 09:05:00".into();
+        engine.store(true, Ordering::SeqCst);
+        let s = r.sweep(&mut elm, &[], 1.5).unwrap();
+        assert!(s.new_part.is_some(), "the engine started again: part 2");
+        r.sweep(&mut elm, &[], 2.0).unwrap();
+        let paths = r.close().unwrap();
+        assert_eq!(paths.len(), 2);
+        let part2 = std::fs::read_to_string(&paths[1]).unwrap();
+        assert!(
+            part2.contains("\n# fuel: tank 91 E0; filled 2026-11-12 09:00, 15 gal; blend 90 E2")
+                && part2.contains("# part 2 of the drive"),
+            "{part2}"
+        );
+        let path = paths[0].clone();
+        let text = std::fs::read_to_string(&path).unwrap();
+        // in a stable place: after the adapter, vehicle and began lines
+        let hashes: Vec<&str> = text.lines().take_while(|l| l.starts_with('#')).collect();
+        assert_eq!(hashes.len(), 4, "{hashes:?}");
+        assert!(hashes[0].starts_with("# adapter: ") && hashes[1] == "# vehicle: Made-up Truck");
+        assert!(hashes[2].starts_with("# began: "));
+        let fuel = hashes[3];
+        assert!(
+            fuel.starts_with("# fuel: tank 87 E10; filled 2026-11-10 17:30, 15 gal; blend 88 E7"),
+            "{text}"
+        );
+        let tag = crate::fuel::of_recording(&text).unwrap();
+        assert_eq!(
+            (tag.tank.as_str(), tag.blend.as_deref()),
+            ("87 E10", Some("88 E7"))
+        );
+        assert!(
+            (tag.aki.unwrap() - 88.2).abs() < 0.05 && (tag.ethanol.unwrap() - 7.1).abs() < 0.05
+        );
+        // the rows still read, and compare names the fuel beside the drive
+        let c = drivelog::compare::compare(
+            &[("a.csv".into(), text.clone()), ("b.csv".into(), text)],
+            drivelog::compare::MIN_ROWS,
+        )
+        .unwrap();
+        assert_eq!(
+            c.recordings[0].tag.as_deref(),
+            Some("87 E10 tank, blend 88 E7")
+        );
+        assert!(c.recording_line(0).contains("87 E10 tank, blend 88 E7"));
+        // before the first fill-up: said, not guessed
+        assert_eq!(
+            crate::fuel::line_in(&vehicle, Some(&tacoma), "2026-10-30 08:00:00").as_deref(),
+            Some("# fuel: not known (no fill-up logged before this drive)")
+        );
+        assert_eq!(
+            crate::fuel::line_in(&dir, None, "2026-11-12 08:00:00"),
+            None,
+            "no log, no line"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// ICA-44: standard and module columns side by side, the raw answers kept, and the file decoded again with a changed

@@ -207,6 +207,8 @@ impl Driver for Cli {
             dir: self.dir.clone(),
             keep_awake: true,
             vehicle: vin.as_deref().and_then(icarus_obd::garage::folder_label),
+            // the tank it runs on, from the vehicle's fuel log as each part begins (ICA-211)
+            fuel: Some(icarus_obd::fuel::source(vin.clone())),
             vin,
         })
     }
@@ -285,6 +287,30 @@ fn redecode(args: &Args) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ICA-211: a recording by itself follows the vehicle's fuel log (the simulated vehicle has none, so no line).
+    #[test]
+    fn a_recording_by_itself_follows_the_fuel_log() {
+        let mut cli = Cli {
+            spec: "sim".into(),
+            target: Target::parse("sim").unwrap(),
+            gps: None,
+            auto: false,
+            modules: false,
+            watch: vec![],
+            profiles: vehicles::builtin(),
+            dir: std::env::temp_dir(),
+            pending: vec![],
+            how: None,
+        };
+        let mut link =
+            icarus_obd::elm::Elm::connect(Box::new(icarus_obd::sim::SimCar::new())).unwrap();
+        let plan = cli.plan(&mut link).unwrap();
+        assert_eq!(plan.vin.as_deref(), Some(icarus_obd::sim::VIN));
+        let fuel = plan.fuel.expect("the fuel log followed");
+        assert_eq!(fuel(), None, "the simulated vehicle has no folder");
+        assert_eq!(icarus_obd::fuel::line_for(Some(icarus_obd::sim::VIN)), None);
+    }
 
     fn line(a: &[&str]) -> Args {
         let a: Vec<String> = a.iter().map(|s| s.to_string()).collect();

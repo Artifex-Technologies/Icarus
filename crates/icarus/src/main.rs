@@ -12,6 +12,7 @@ use icarus_obd::{
     sim, slcan, socketcan, uds, vehicles, vin,
 };
 mod data;
+mod fuel;
 mod gps;
 mod maintenance;
 mod mcp;
@@ -169,7 +170,31 @@ Recorded drives (~/Documents/Icarus/logs and each vehicle's Logs folder; only th
                                              running): each bank's total fuel trim by air flow, and timing by engine
                                              speed and load, side by side with each group's row count and the difference
                                              from the first. A group under N rows (10) is thin, never summarized. A
-                                             recording is a file's path or its name in the logs folders
+                                             recording is a file's path or its name in the logs folders; each is shown
+                                             with the fuel it ran on (worked out from the fuel log by its # vehicle: and
+                                             # began: lines; else its # fuel: line)
+  icarus logs compare --by-fuel [A B...] [--vin VIN] [--min-rows N]
+                                             the same with the drives pooled by their estimated blend (91 E0, 88 E8...),
+                                             the highest octane first: the recordings given, else the vehicle's (its
+                                             Logs and the shared folder, another vehicle's drives left out)
+  icarus logs experiment NAME A B [--min-seconds 60] [--vin VIN]
+                                             an A/B question (A and B each a fuel tag, \"91 E0\" or \"87 E10\", matched on
+                                             each drive's estimated blend, or recordings separated by commas), kept in
+                                             the vehicle's folder: for each engine speed and load group, the seconds each
+                                             side has at those conditions and what driving is still missing (\"40 s more
+                                             at 60-80 % load, 1,800-2,600 rpm, on 87 E10\"), or done.
+                                             icarus logs experiment NAME runs it again; without NAME, the kept ones
+
+Fuel (a vehicle's fill-ups, in fuel.toml in its folder; nothing is sent to a vehicle):
+  icarus fuel add [--vin VIN] --grade 87 --ethanol 10 --gallons G [--odometer MI] [--date \"YYYY-MM-DD HH:MM\"]
+                  [--note TEXT] [--tank GALLONS] [--before \"91 E0\"]
+                                             log a fill-up (now unless --date). Each is taken to fill the tank, so the
+                                             blend in it is estimated from the gallons added and what was left; the
+                                             tank's size (--tank, once; a 2016-2023 Tacoma's 21.1 without it) is kept.
+                                             --before, on the first fill-up logged only: what was in the tank before it,
+                                             when I know (else that leftover is said to be unknown).
+                                             A drive recorded after it names that tank and the blend (# fuel: line)
+  icarus fuel list [--vin VIN]               the fill-ups, each with the tank's estimated blend after it
 
 Interfaces:
   icarus devices                             the tuners and interfaces plugged in (SCT, COBB, HP Tuners, CP210x/FTDI
@@ -282,6 +307,7 @@ fn main() -> ExitCode {
         Some("learn") => cmd_learn(&args[1..], icarus_obd::fence::current()),
         Some("tires") => cmd_tires(&args[1..]),
         Some("logs") => cmd_logs(&args[1..]),
+        Some("fuel") => fuel::cmd_fuel(&args[1..]),
         Some("gps") => gps::cmd_gps(&args[1..]),
         Some("recalls") => cmd_recalls(&args[1..]),
         Some("import") => data::cmd_import(&args[1..]),
@@ -342,6 +368,7 @@ fn parse_args(a: &[String], with_value: &[&str]) -> Result<Args, String> {
             "--auto",
             "--quiet",
             "--no-modules",
+            "--by-fuel",
         ]
         .contains(&a[i].as_str())
         {
@@ -2704,16 +2731,22 @@ fn cmd_recalls(a: &[String]) -> Result<(), String> {
 }
 
 const LOGS_USAGE: &str = "usage: icarus logs compare A B [C...] [--min-rows N]   (each a recording's path, or its file name in \
-~/Documents/Icarus/logs or a vehicle's Logs folder; the first is the one the others are measured against)";
+~/Documents/Icarus/logs or a vehicle's Logs folder; the first is the one the others are measured against)
+       icarus logs compare --by-fuel [A B...] [--vin VIN] [--min-rows N]   (pooled by estimated blend)
+       icarus logs experiment NAME [A B] [--min-seconds S] [--vin VIN]";
 
 /// `icarus logs compare`: recorded drives side by side at matching conditions (ICA-210).
 fn cmd_logs(a: &[String]) -> Result<(), String> {
     use icarus_obd::drivelog::{self, compare};
-    let args = parse_args(a, &["min-rows"])?;
+    let args = parse_args(a, &["min-rows", "min-seconds", "vin"])?;
     let Some((what, files)) = args.pos.split_first() else {
         return Err(LOGS_USAGE.into());
     };
-    if what != "compare" || files.len() < 2 {
+    if what == "experiment" {
+        return fuel::cmd_experiment(&args);
+    }
+    let by_fuel = args.opt("by-fuel").is_some();
+    if what != "compare" || (files.len() < 2 && !by_fuel) {
         return Err(LOGS_USAGE.into());
     }
     let min_rows = args
@@ -2726,27 +2759,21 @@ fn cmd_logs(a: &[String]) -> Result<(), String> {
         })
         .transpose()?
         .unwrap_or(compare::MIN_ROWS);
-    let dirs = drivelog::folders();
-    let paths: Vec<std::path::PathBuf> = files
-        .iter()
-        .map(|f| {
-            let p = std::path::PathBuf::from(f);
-            if p.is_file() {
-                Ok(p)
-            } else {
-                drivelog::by_name(&dirs, f).ok_or(format!(
-                    "{f}: no such file, and no recording by that name in the logs folders"
-                ))
-            }
-        })
-        .collect::<Result<_, String>>()?;
-    let refs: Vec<&std::path::Path> = paths.iter().map(|p| p.as_path()).collect();
-    let c = compare::compare_files(&refs, min_rows)?;
     let warm = if icarus_core::moddata::units::us_customary() {
         icarus_obd::units::both("°C", compare::WARM_C, 0)
     } else {
         format!("{:.0} °C", compare::WARM_C)
     };
+    if by_fuel {
+        return fuel::compare_by_fuel(files, args.opt("vin"), min_rows, &warm);
+    }
+    let dirs = drivelog::folders();
+    let paths: Vec<std::path::PathBuf> = files
+        .iter()
+        .map(|f| fuel::resolve(f, &dirs))
+        .collect::<Result<_, String>>()?;
+    let refs: Vec<&std::path::Path> = paths.iter().map(|p| p.as_path()).collect();
+    let c = compare::compare_files(&refs, min_rows)?;
     print!("{}", compare::words(&c, &warm));
     Ok(())
 }
