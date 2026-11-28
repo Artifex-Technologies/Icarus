@@ -136,8 +136,8 @@ after the gates gets no file in the set (it is listed with the reasons).
   the packet; big-endian, or little-endian told by the first record.
 - Inside: HCI ACL fragments put back together into L2CAP packets per connection and direction (without directions, one
   packet open for each side, each fragment given to the one it fits by the side's own fragment size, what is left and
-  the RFCOMM checksum, and when both sides cut fragments of one size, by the turns they take: the packet that has waited
-  longer, so the two sides' fragments may interleave); RFCOMM channels found from
+  the RFCOMM checksum; when both sides cut fragments of one size, a fragment that could be either's is read both ways
+  until what follows tells, so the two sides' fragments may interleave); RFCOMM channels found from
   the L2CAP connection requests (PSM 3) and forgotten at their disconnection, each channel known by the ID its packets
   carry in each direction (the two sides choose their IDs apart, and reuse them: an SDP query and the RFCOMM channel after
   it often both get 0x40), or, for a channel opened before the log began, by RFCOMM frames whose checksums
@@ -169,3 +169,10 @@ after the gates gets no file in the set (it is listed with the reasons).
   their reads, but `icarus obd data` does not reach BMW's gateway yet, and since neither make's built-in profile names an
   airbag module, a module of either gets its reads only once its file gives it a kind (`kind = "body"`).
 - Modules on K-line, J1850 and 29-bit CAN are imported, but `icarus obd data` does not reach them yet.
+- A Bluetooth capture that does not say who sent each packet (pcap link type 187): when the phone and the adapter cut
+  their packets into fragments of the same size and both have one open, a fragment in the middle of a packet could be
+  either side's. Icarus reads it both ways and keeps the reading that each packet's length, its RFCOMM header and its
+  text bear out. When none of them tells (two packets of one length whose text gives no hint), the fragment goes to the
+  side whose turn it is, which can be wrong, and the import's notes say how many times that happened. A capture with
+  directions (link type 201, PacketLogger) never has this problem.
+

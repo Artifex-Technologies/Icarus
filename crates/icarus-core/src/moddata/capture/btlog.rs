@@ -19,7 +19,7 @@
 //! **Layers.** HCI ACL packets (a 12-bit connection handle, a packet-boundary flag: a start or a continuation, and the
 //! length) are put back together into L2CAP packets per connection and direction (L2CAP: a length, a channel ID, the
 //! data); without directions (link type 187) a packet stays open for each side, and a continuation goes to the one it
-//! fits (`pick`: each side's own fragment size, what is left, the RFCOMM checksum, and which has waited longer). The signalling channel's connection requests and answers say which channels are RFCOMM (PSM 3), and its
+//! fits (`picks`: each side's own fragment size, what is left, and the RFCOMM checksum); one that could be either side's is read both ways until a packet's length, RFCOMM header or text tells (`L2cap::undirected`), and by turns, noted, when nothing does. The signalling channel's connection requests and answers say which channels are RFCOMM (PSM 3), and its
 //! disconnections which were closed; each side picks its own channel IDs (a phone's SDP query and its RFCOMM channel often
 //! both get 0x40), so a channel is known by the ID its packets carry in each direction, and an ID used again names the
 //! newer channel. A channel set up before the capture began is tried as RFCOMM, and kept only when its frames' checksums
@@ -358,6 +358,7 @@ type ChanKey = (u16, Option<Dir>, u16);
 
 /// An L2CAP packet being put back together: its bytes so far, how long its first fragment was, and when it last took
 /// one (the ACL packet's number in the capture).
+#[derive(Clone)]
 struct Part {
     buf: Vec<u8>,
     first: usize,
@@ -370,6 +371,46 @@ impl Part {
         (self.buf.len() >= 4)
             .then(|| (4 + u16le(&self.buf) as usize).saturating_sub(self.buf.len()))
     }
+
+    /// Its RFCOMM header so far against its L2CAP length: (whether they disagree, where the data starts). A header not
+    /// in yet agrees.
+    fn header(&self) -> (bool, usize) {
+        let b = &self.buf;
+        if b.len() < 7 {
+            return (false, b.len());
+        }
+        let r = &b[4..];
+        let (len, head) = if r[2] & 1 == 1 {
+            ((r[2] >> 1) as usize, 3)
+        } else {
+            match r.get(3) {
+                Some(hi) => (((r[2] >> 1) as usize) | ((*hi as usize) << 7), 4),
+                None => return (false, b.len()),
+            }
+        };
+        let uih = r[1] & !0x10 == 0xEF;
+        let credit = usize::from(uih && r[1] & 0x10 != 0 && r[0] >> 2 != 0);
+        let wrong = r[0] & 1 == 0 || head + credit + len + 1 != u16le(b) as usize;
+        (wrong, (4 + head + credit).min(b.len()))
+    }
+
+    /// How unlike a phone's command to an adapter its text so far is: any text after its line's end (`\r`), and any prompt
+    /// (`>`, which only the adapter sends). The checksum ending a whole packet is not text.
+    fn odd_command(&self) -> u32 {
+        let (_, at) = self.header();
+        let end = if self.room() == Some(0) {
+            self.buf.len() - 1
+        } else {
+            self.buf.len()
+        };
+        let text = &self.buf[at.min(end)..end];
+        let prompts = text.iter().filter(|c| **c == b'>').count() as u32;
+        let after = text
+            .iter()
+            .position(|c| *c == b'\r')
+            .is_some_and(|k| text[k..].iter().any(|c| *c != b'\r'));
+        prompts + u32::from(after)
+    }
 }
 
 /// A whole L2CAP packet (at least its header and length, more cut off): (handle, channel, data).
@@ -380,15 +421,14 @@ fn whole(handle: u16, mut pdu: Vec<u8>) -> (u16, u16, Vec<u8>) {
     (handle, cid, pdu)
 }
 
-/// Which open packet a continuation fragment belongs to, without directions (each side may have one open). Each side
-/// cuts its packets into fragments of its own size, so a fragment of a packet is as long as the packet's first and
-/// leaves more to come, or is its last, as long as what is left (and no longer than the first); failing that, one it
-/// does not run past. Of two, a last fragment that makes a whole RFCOMM frame (its checksum right) goes first, then
-/// one that leaves more to come. Of two still (both sides cut fragments of one size and the fragment ends neither: ICA-63),
-/// the one that has waited longer for its next fragment: two sides sending at once take turns, so the side that took the
-/// last fragment is not the likelier one to send this (giving it to the older packet put a side's second fragment in a row
-/// on the wrong side).
-fn pick(open: &[Part], frag: &[u8]) -> Option<usize> {
+/// Which open packets a continuation fragment may belong to, without directions (each side may have one open), the
+/// likeliest first, and 1 when it only fits them rather than looks like theirs (0). Each side cuts its packets into
+/// fragments of its own size, so a fragment of a packet is as long as the packet's first and leaves more to come, or is
+/// its last, as long as what is left (and no longer than the first); failing that, one it does not run past. Of two, a
+/// last fragment that makes a whole RFCOMM frame (its checksum right) goes first, then one that leaves more to come.
+/// Two still (both sides cut fragments of one size and the fragment ends neither: ICA-63) are both given, the one that
+/// has waited longer for its next fragment first; `L2cap::undirected` reads on both ways and decides later.
+fn picks(open: &[Part], frag: &[u8]) -> (Vec<usize>, u32) {
     let n = frag.len();
     let likely = |p: &Part| {
         p.room()
@@ -405,18 +445,54 @@ fn pick(open: &[Part], frag: &[u8]) -> Option<usize> {
         _ => 1,
     };
     let best = |of: &dyn Fn(&Part) -> bool| {
-        (0..open.len())
-            .filter(|i| of(&open[*i]))
-            .max_by_key(|i| (rank(&open[*i]), std::cmp::Reverse(open[*i].fed)))
+        let all: Vec<usize> = (0..open.len()).filter(|i| of(&open[*i])).collect();
+        let top = all.iter().map(|i| rank(&open[*i])).max();
+        let mut kept: Vec<usize> = all
+            .into_iter()
+            .filter(|i| Some(rank(&open[*i])) == top)
+            .collect();
+        kept.sort_by_key(|i| open[*i].fed);
+        kept
     };
-    best(&likely).or_else(|| best(&fits))
+    match best(&likely) {
+        l if !l.is_empty() => (l, 0),
+        _ => (best(&fits), 1),
+    }
 }
+
+/// One way of reading a connection's fragments so far without directions: the packets open (one a side), and how many
+/// fragments it gave a packet they only fit (`picks`).
+#[derive(Clone, Default)]
+struct Alt {
+    open: Vec<Part>,
+    odd: u32,
+}
+
+impl Alt {
+    /// How unlikely this reading is, the least first: the fragments that only fit, an RFCOMM header that disagrees with
+    /// its packet's length (4 each), and, of the two packets one being the phone's command, the less odd as one.
+    fn score(&self) -> u32 {
+        let headers: u32 = self.open.iter().map(|p| 4 * u32::from(p.header().0)).sum();
+        let text = if self.open.len() >= 2 {
+            self.open.iter().map(Part::odd_command).min().unwrap_or(0)
+        } else {
+            0
+        };
+        self.odd + headers + text
+    }
+}
+
+/// The most readings kept at once (the likeliest).
+const MAX_ALTS: usize = 32;
 
 /// L2CAP packets put back together from ACL fragments, and which channels are RFCOMM.
 #[derive(Default)]
 struct L2cap {
-    /// Packets open per connection and direction: one a direction; without directions, one for each side (two).
+    /// Packets open per connection and direction (one a direction), with directions.
     partial: HashMap<(u16, Option<Dir>), Vec<Part>>,
+    /// Without directions, per connection: the ways of reading its fragments still open (one, unless a fragment could
+    /// have been either side's).
+    alts: HashMap<u16, Vec<Alt>>,
     /// (handle, the request's direction, signalling identifier) -> the PSM asked for.
     asked: HashMap<(u16, Option<Dir>, u8), u16>,
     /// Channels open now: set up by a connection, closed by a disconnection; a newer connection replaces an older one.
@@ -424,6 +500,8 @@ struct L2cap {
     /// Channels other than RFCOMM set up over the capture (counted, never read).
     others: usize,
     malformed: usize,
+    /// Times two readings of the fragments were equally likely and the one taking turns was kept (no directions).
+    guessed: usize,
     /// ACL packets seen (for `Part::fed`).
     seen: u64,
 }
@@ -445,45 +523,106 @@ impl L2cap {
         };
         self.seen += 1;
         let now = self.seen;
+        if a.dir.is_none() {
+            return self.undirected(handle, start, data, now);
+        }
         let open = self.partial.entry((handle, a.dir)).or_default();
-        let i = if start {
+        if start {
+            // a side's new packet ends its last one (given up)
+            open.clear();
+            open.push(Part {
+                buf: data.to_vec(),
+                first: data.len(),
+                fed: now,
+            });
+        } else if let Some(p) = open.first_mut() {
+            p.buf.extend_from_slice(data);
+            p.fed = now;
+        } else {
+            self.malformed += 1;
+            return None;
+        }
+        // whole once its header's length is in
+        if open[0].room().is_none_or(|r| r > 0) {
+            return None;
+        }
+        Some(whole(handle, open.remove(0).buf))
+    }
+
+    /// The likeliest of `alts` (the first of equals: the one taking turns), counted as a guess when another is as likely.
+    fn settle(&mut self, mut alts: Vec<Alt>) -> Alt {
+        alts.sort_by_key(Alt::score);
+        if alts.len() > 1 && alts[1].score() == alts[0].score() {
+            self.guessed += 1;
+        }
+        alts.into_iter().next().unwrap_or_default()
+    }
+
+    /// One ACL packet on a connection whose capture does not say who sent what: a packet open for each side. A
+    /// continuation that could be either's (`picks`) is read both ways, and the readings are kept until a packet ends in
+    /// the likeliest (`Alt::score`), or a new packet starts: then that one is kept. So a fragment is given by what follows
+    /// it (each packet's length), the RFCOMM headers and the text, and by turns only when none of them tells.
+    fn undirected(
+        &mut self,
+        handle: u16,
+        start: bool,
+        data: &[u8],
+        now: u64,
+    ) -> Option<(u16, u16, Vec<u8>)> {
+        let alts = self.alts.remove(&handle).unwrap_or_default();
+        if start {
+            let mut alt = self.settle(alts);
             let part = Part {
                 buf: data.to_vec(),
                 first: data.len(),
                 fed: now,
             };
-            // with directions, a side's new packet ends its last one (given up)
-            if a.dir.is_some() {
-                open.clear();
-            }
-            if part.room() == Some(0) {
-                return Some(whole(handle, part.buf));
-            }
-            // without, a start while one is open is the other side's: one kept for each side
-            if open.len() >= 2 {
-                open.remove(0);
-            }
-            open.push(part);
-            open.len() - 1
-        } else {
-            let i = if open.len() > 1 {
-                pick(open, data)
+            let out = if part.room() == Some(0) {
+                Some(whole(handle, part.buf))
             } else {
-                (!open.is_empty()).then_some(0)
+                // a start while one is open is the other side's: one kept for each side
+                if alt.open.len() >= 2 {
+                    alt.open.remove(0);
+                }
+                alt.open.push(part);
+                None
             };
-            let Some(i) = i else {
-                self.malformed += 1;
-                return None;
-            };
-            open[i].buf.extend_from_slice(data);
-            open[i].fed = now;
-            i
-        };
-        // whole once its header's length is in
-        if open[i].room().is_none_or(|r| r > 0) {
+            self.alts.insert(handle, vec![alt]);
+            return out;
+        }
+        let mut next: Vec<(Alt, usize)> = Vec::new();
+        for alt in &alts {
+            let (to, odd) = picks(&alt.open, data);
+            for i in to {
+                let mut a = alt.clone();
+                a.open[i].buf.extend_from_slice(data);
+                a.open[i].fed = now;
+                a.odd += odd;
+                next.push((a, i));
+            }
+        }
+        if next.is_empty() {
+            self.malformed += 1;
+            let alt = self.settle(alts);
+            self.alts.insert(handle, vec![alt]);
             return None;
         }
-        Some(whole(handle, open.remove(i).buf))
+        // the likeliest first; of equals, the order they were made in (the side that waited longer first)
+        next.sort_by_key(|(a, _)| a.score());
+        next.truncate(MAX_ALTS);
+        let done = next[0].0.open[next[0].1].room() == Some(0);
+        if !done && next.len() > 1 {
+            self.alts
+                .insert(handle, next.into_iter().map(|(a, _)| a).collect());
+            return None;
+        }
+        if next.len() > 1 && next[1].0.score() == next[0].0.score() {
+            self.guessed += 1;
+        }
+        let (mut alt, i) = next.swap_remove(0);
+        let out = done.then(|| whole(handle, alt.open.remove(i).buf));
+        self.alts.insert(handle, vec![alt]);
+        out
     }
 
     /// The signalling channel, `dir` the way this packet went: which dynamic channels are RFCOMM (PSM 3), which are
@@ -783,6 +922,13 @@ pub fn read(b: &[u8]) -> Result<Read, String> {
             "{adapter_commands} adapter command(s) (AT, ST) followed, not kept"
         ));
     }
+    if l2.guessed > 0 {
+        notes.push(format!(
+            "{} time(s) the file did not say which side sent a fragment and nothing else told: given to the side whose \
+             turn it was (both sides cut their packets into fragments of one size)",
+            l2.guessed
+        ));
+    }
     if l2.malformed > 0 {
         notes.push(format!("{} malformed ACL packet(s) skipped", l2.malformed));
     }
@@ -982,6 +1128,10 @@ mod tests {
             ("6/10", Session::interleaved()),
             ("6/6", Session::interleaved_in(6, 6)),
             ("10/10", Session::interleaved_in(10, 10)),
+            // one side's fragments several in a row while the other's packet is open: taking turns alone would give
+            // the second of them to the other side
+            ("6/6 in bursts", Session::bursts(6)),
+            ("10/10 in bursts", Session::bursts(10)),
         ] {
             for (kind, file) in [
                 ("pcap 187", pcap_file(&s.packets, false)),
@@ -994,6 +1144,24 @@ mod tests {
         }
     }
 
+    /// Two packets of one length cut in fragments of one size, their fragments alternating, and nothing in their bytes
+    /// telling whose a middle one is: the reading taking turns is kept, and the notes say a fragment was given so.
+    #[test]
+    fn fragments_nothing_tells_apart_are_given_by_turns_and_said() {
+        let (answer, command) = (
+            format!("{}\r>", "?".repeat(19)),
+            format!("AT{}\r", "Z".repeat(18)),
+        );
+        let talk = [("ATZ\r", answer.as_str()), (command.as_str(), "OK\r\r>")];
+        let s = Session::talk_in(&talk, 10, 10, false);
+        let guess = |r: &Read| r.notes.iter().any(|n| n.contains("did not say which side"));
+        assert!(guess(&read_ok(&pcap_file(&s.packets, false))));
+        assert!(!guess(&read_ok(&pcap_file(&s.packets, true))));
+        // where the fragments' lengths or headers tell, nothing is said
+        let r = read_ok(&pcap_file(&Session::interleaved_in(6, 6).packets, false));
+        assert!(!guess(&r), "{:?}", r.notes);
+    }
+
     fn interleaved_reads(what: &str, file: &[u8]) {
         let r = read_ok(file);
         let e = &r.exchanges;
@@ -1003,6 +1171,14 @@ mod tests {
             vec!["22 12 34", "21 05", "22 56 78"],
             "{what}: {:?}",
             r.notes
+        );
+        assert!(
+            e.iter().all(|x| !x.replies.is_empty()),
+            "{what}: an answer lost: {:?} {:?}",
+            r.notes,
+            e.iter()
+                .map(|x| (super::super::hex(&x.request), x.replies.len()))
+                .collect::<Vec<_>>()
         );
         assert_eq!(
             e[0].replies[0].data,

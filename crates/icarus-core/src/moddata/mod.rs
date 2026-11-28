@@ -501,8 +501,11 @@ pub struct Imported {
     pub left_out: Vec<(String, String)>,
     /// What the importer assumed (an answer ID, the order of on/off...).
     pub notes: Vec<String>,
-    /// Values the importer corrected from the file, checked on a vehicle (OBDb: `obdb::CORRECTIONS`): what, and why.
+    /// Values the importer corrected from the file, as checked on a vehicle (OBDb: `obdb::CORRECTIONS`): what, the unit
+    /// read in, and why.
     pub corrected: Vec<String>,
+    /// Values found wrong on a vehicle whose right reading is not known yet, imported as plain numbers: what, and why.
+    pub unchecked: Vec<String>,
 }
 
 /// Hex text ("62 1F 01", "621F01") as bytes.

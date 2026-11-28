@@ -199,6 +199,15 @@ fn finish_import(
             println!("  {c}");
         }
     }
+    if !imp.unchecked.is_empty() {
+        println!(
+            "Marked unchecked, found wrong on a vehicle and not known yet ({}):",
+            imp.unchecked.len()
+        );
+        for c in &imp.unchecked {
+            println!("  {c}");
+        }
+    }
     if !imp.notes.is_empty() {
         println!("Assumed ({}; the first few):", imp.notes.len());
         for n in imp.notes.iter().take(8) {

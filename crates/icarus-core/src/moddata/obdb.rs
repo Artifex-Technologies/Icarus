@@ -24,9 +24,10 @@
 //! year from `from` on); `from` or `to` alone is open on the other side; `years` adds single years. A year that is not a
 //! year (above 9999) leaves the command out rather than widening its range.
 //!
-//! A signal found wrong on a vehicle is corrected as it is imported (`CORRECTIONS`: its header, id and OBDb's unit word,
-//! the unit in its place and how it was checked), and listed; once OBDb gives it another unit word, it is imported as
-//! OBDb has it.
+//! A signal found wrong on a vehicle is corrected as it is imported (`CORRECTIONS`: the repository, its header, id and
+//! OBDb's unit word, what is done and how it was checked): read in the unit checked on the vehicle, or, where only OBDb's
+//! unit word is known to be wrong, a plain number marked unchecked; the import lists the two apart. Once OBDb gives it
+//! another unit word, it is imported as OBDb has it.
 
 use super::{
     sha256_hex, validate, Ids, Imported, ModuleDef, ModuleHead, Order, RequestDef, SetInfo, Source,
@@ -200,49 +201,69 @@ fn unit(word: &str) -> UnitOf {
     (u.to_string(), None, None, None)
 }
 
-/// A correction to one OBDb signal, found wrong on a vehicle: the signal as OBDb gives it (its command's header, its id
-/// and its unit word), the unit Icarus gives it instead, and how that was found out. It holds only while OBDb still gives
-/// that unit word: once OBDb corrects the signal, it is imported as OBDb has it.
+/// A correction to one OBDb signal, found wrong on a vehicle: the signal as OBDb gives it (the repository's folder, its
+/// command's header, its id and its unit word), what Icarus does instead, and how that was found out. It holds only while
+/// OBDb still gives that unit word: once OBDb corrects the signal, it is imported as OBDb has it.
 #[derive(Clone, Copy, Debug)]
 pub struct Correction {
+    /// The OBDb repository the set is from (its folder in the file's path, `Toyota-Tacoma`; any case).
+    pub repo: &'static str,
     pub hdr: u32,
     pub id: &'static str,
     /// OBDb's `fmt.unit`, as written.
     pub given: &'static str,
-    /// Icarus's unit in its place (the formula is OBDb's, unchanged).
-    pub unit: &'static str,
+    pub fix: Fix,
     /// The source: how it was checked, and what is still not known.
     pub why: &'static str,
 }
 
-/// The OBDb signals Icarus corrects as it imports them (ICA-82). Each one was checked on a vehicle; a guess never goes in.
+/// What a correction does to a value. The formula stays OBDb's either way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fix {
+    /// The unit, checked on a vehicle: the value is read in it.
+    Unit(&'static str),
+    /// OBDb's unit word is wrong, and the right unit and the scale are not known: a plain number, marked unchecked.
+    Unchecked,
+}
+
+/// The OBDb signals Icarus corrects as it imports them (ICA-82). Each one was checked on a vehicle and a guess never goes
+/// in: where only the unit word is known to be wrong, the value is marked unchecked, not given a unit.
 pub const CORRECTIONS: &[Correction] = &[
     Correction {
+        repo: "Toyota-Tacoma",
         hdr: 0x7E0,
         id: "TACOMA_ODO",
         given: "kilometers",
-        unit: "mi",
-        why: "the odometer counts in the instrument cluster's unit: on my truck, a US one in miles, the raw value is the \
-              miles the cluster shows (checked at the truck, 2026-11-25), and read as kilometers it showed 0.62 of them \
-              in miles. A cluster set to kilometers would count kilometers",
+        fix: Fix::Unit("mi"),
+        why: "the odometer counts in the instrument cluster's unit: on my truck, whose cluster counts miles, the raw value \
+              is the miles the cluster shows (checked at the truck, 2026-11-25), and read as kilometers it showed 0.62 of \
+              them. This correction is for a cluster in miles: a cluster set to kilometers probably counts kilometers \
+              (not checked)",
     },
     Correction {
+        repo: "Toyota-Tacoma",
         hdr: 0x700,
         id: "TACOMA_FUEL_PUMP_DUTY_RATIO",
         given: "kilopascal",
-        unit: "%",
-        why: "a duty ratio is the share of the time the pump is driven, not a pressure (OBDb gives kilopascal, shown as \
-              psi). OBDb's scaling is kept and is not checked against a reading yet",
+        fix: Fix::Unchecked,
+        why: "a duty ratio is a share of the time the pump is driven, not a pressure (OBDb's kilopascal was shown as psi \
+              on my truck, 2026-11-25); its unit and OBDb's scale are not checked against a reading",
     },
 ];
 
-/// The correction for signal `s` of a command sent on `hdr`, from `table`, if one holds.
-fn correction<'a>(table: &'a [Correction], hdr: u32, s: &Value) -> Option<&'a Correction> {
+/// The correction for signal `s` of a command sent on `hdr`, in a set from OBDb repository `repo`, from `table`.
+fn correction<'a>(
+    table: &'a [Correction],
+    repo: Option<&str>,
+    hdr: u32,
+    s: &Value,
+) -> Option<&'a Correction> {
+    let repo = repo?;
     let id = s.get("id")?.as_str()?;
     let given = s.get("fmt")?.get("unit")?.as_str()?;
-    table
-        .iter()
-        .find(|c| c.hdr == hdr && c.id == id && c.given == given)
+    table.iter().find(|c| {
+        c.repo.eq_ignore_ascii_case(repo) && c.hdr == hdr && c.id == id && c.given == given
+    })
 }
 
 /// One signal as a value; Err(reason) when it cannot be imported.
@@ -434,6 +455,7 @@ fn parse_with(text: &str, opts: &Options, table: &[Correction]) -> Result<Import
                 .into(),
         ),
     };
+    let repo_name = repo.as_ref().map(|r| r.0.as_str());
     let (repo_make, repo_model) = repo
         .as_ref()
         .map(|(r, _)| make_and_model(r))
@@ -593,19 +615,32 @@ fn parse_with(text: &str, opts: &Options, table: &[Correction]) -> Result<Import
                     if !v.note.is_empty() {
                         out.notes.push(format!("{what}, {sid}: {}", v.note));
                     }
-                    // a correction changes only the unit word, which check_value does not judge
-                    if let Some(c) = correction(table, tx, s) {
-                        v.unit = c.unit.to_string();
-                        let said = format!(
-                            "OBDb's unit {:?} corrected to {:?}: {}",
-                            c.given, c.unit, c.why
-                        );
+                    // a correction changes only the unit, which check_value does not judge
+                    if let Some(c) = correction(table, repo_name, tx, s) {
+                        let said = match c.fix {
+                            Fix::Unit(u) => {
+                                v.unit = u.to_string();
+                                format!("read in {u}, not OBDb's {:?}: {}", c.given, c.why)
+                            }
+                            Fix::Unchecked => {
+                                v.unit = String::new();
+                                format!(
+                                    "a plain number, unchecked: OBDb's unit, {}, is wrong for it, and its scale is \
+                                     not checked ({})",
+                                    c.given, c.why
+                                )
+                            }
+                        };
                         v.note = if v.note.is_empty() {
                             said.clone()
                         } else {
                             format!("{}; {said}", v.note)
                         };
-                        out.corrected.push(format!("{what}, {sid}: {said}"));
+                        let line = format!("{what}, {sid}: {said}");
+                        match c.fix {
+                            Fix::Unit(_) => out.corrected.push(line),
+                            Fix::Unchecked => out.unchecked.push(line),
+                        }
                     }
                     values.push(v);
                 }
@@ -1172,24 +1207,27 @@ mod tests {
         assert!(files.iter().any(|f| f.0 == "7A6.3C.toml"));
     }
 
-    /// ICA-82: a signal a correction names (its header, id and OBDb's unit word) gets the corrected unit, with the
-    /// correction's source in its note and in the import's list; the same id on another header, or with another unit word
-    /// (OBDb corrected it), is imported as OBDb has it. Made-up signals and a made-up table.
+    /// ICA-82: a signal a correction names (the repository, its header, id and OBDb's unit word) is read in the checked
+    /// unit, or marked unchecked as a plain number where only OBDb's unit word is known wrong, each with the source in its
+    /// note and in the import's own list; the same id in another repository's set, on another header, or with another unit
+    /// word (OBDb corrected it) is imported as OBDb has it. Made-up signals and a made-up table.
     #[test]
     fn a_signal_checked_wrong_on_a_vehicle_is_corrected_as_it_is_imported() {
         const TABLE: &[Correction] = &[
             Correction {
+                repo: "Toy-Truck",
                 hdr: 0x7A0,
                 id: "TOY_DIST",
                 given: "kilometers",
-                unit: "mi",
+                fix: Fix::Unit("mi"),
                 why: "made up: counts miles",
             },
             Correction {
+                repo: "Toy-Truck",
                 hdr: 0x7A0,
                 id: "TOY_DUTY",
                 given: "kilopascal",
-                unit: "%",
+                fix: Fix::Unchecked,
                 why: "made up: a duty",
             },
         ];
@@ -1203,11 +1241,15 @@ mod tests {
           {"hdr": "7A4", "cmd": {"22": "4A12"}, "freq": 1, "signals": [
             {"id": "TOY_DUTY", "name": "Pump duty", "fmt": {"len": 8, "unit": "percent"}}]}
         ]}"#;
-        let opts = Options {
-            path: "Toy-Truck/signalsets/v3/default.json".into(),
-            ..Default::default()
+        let from = |path: &str| {
+            let opts = Options {
+                path: path.into(),
+                name: Some("x".into()),
+                ..Default::default()
+            };
+            parse_with(text, &opts, TABLE).unwrap()
         };
-        let i = parse_with(text, &opts, TABLE).unwrap();
+        let i = from("/somewhere/toy-truck/signalsets/v3/default.json");
         let value = |tx: u32, id: &str| {
             i.modules
                 .iter()
@@ -1220,7 +1262,7 @@ mod tests {
         assert_eq!(dist.unit, "mi");
         assert!(
             dist.note
-                .contains("\"kilometers\" corrected to \"mi\": made up: counts miles"),
+                .contains("read in mi, not OBDb's \"kilometers\": made up: counts miles"),
             "{}",
             dist.note
         );
@@ -1233,32 +1275,68 @@ mod tests {
             crate::moddata::units::shown(&dist.unit, 100_000.0, true),
             (100_000.0, "mi")
         );
+        // a duty with a pressure's unit: a plain number with no unit, OBDb's scale kept, marked unchecked
         let duty = value(0x7A0, "TOY_DUTY");
-        assert_eq!((duty.unit.as_str(), duty.div), ("%", 16.0));
+        assert_eq!((duty.unit.as_str(), duty.div), ("", 16.0));
+        assert!(
+            duty.note.contains(
+                "unchecked: OBDb's unit, kilopascal, is wrong for it, and its scale is not checked"
+            ),
+            "{}",
+            duty.note
+        );
+        assert_eq!(
+            crate::moddata::units::shown(&duty.unit, 50.0, true),
+            (50.0, "")
+        );
         // not named, on another header, or already in OBDb's right unit: as given
         assert_eq!(value(0x7A0, "TOY_KM").unit, "km");
         assert_eq!(value(0x7A2, "TOY_DIST").unit, "km");
         assert_eq!(value(0x7A4, "TOY_DUTY").unit, "%");
         assert!(value(0x7A4, "TOY_DUTY").note.is_empty());
-        assert_eq!(i.corrected.len(), 2, "{:?}", i.corrected);
+        // listed apart: the checked correction, and the one marked unchecked
+        assert_eq!(i.corrected.len(), 1, "{:?}", i.corrected);
         assert!(
-            i.corrected[0].starts_with("7A0 22 4A10, TOY_DIST: "),
+            i.corrected[0].starts_with("7A0 22 4A10, TOY_DIST: read in mi"),
             "{:?}",
             i.corrected
         );
+        assert_eq!(i.unchecked.len(), 1, "{:?}", i.unchecked);
         assert!(
-            i.notes.iter().all(|n| !n.contains("corrected")),
+            i.unchecked[0].starts_with("7A0 22 4A10, TOY_DUTY: a plain number, unchecked"),
+            "{:?}",
+            i.unchecked
+        );
+        assert!(
+            i.notes.iter().all(|n| !n.contains("OBDb's")),
             "{:?}",
             i.notes
         );
+        // another repository's set, or a file from no repository's folder: as OBDb has it
+        for path in ["Toy-Van/signalsets/v3/default.json", "default.json"] {
+            let other = from(path);
+            assert!(
+                other.corrected.is_empty() && other.unchecked.is_empty(),
+                "{path}"
+            );
+            assert_eq!(other.modules[0].requests[0].values[0].unit, "km", "{path}");
+        }
         // without the table, as OBDb has it
-        let plain = parse_with(text, &opts, &[]).unwrap();
-        assert!(plain.corrected.is_empty());
+        let plain = parse_with(
+            text,
+            &Options {
+                path: "Toy-Truck/signalsets/v3/default.json".into(),
+                ..Default::default()
+            },
+            &[],
+        )
+        .unwrap();
+        assert!(plain.corrected.is_empty() && plain.unchecked.is_empty());
         assert_eq!(plain.modules[0].requests[0].values[0].unit, "km");
     }
 
     /// Each of Icarus's own corrections takes hold on a signal as its entry describes it (a one-signal set written from
-    /// the entry), and gives a unit Icarus shows as it is.
+    /// the entry, in its repository's folder), and gives a unit Icarus shows as it is, or none.
     #[test]
     fn each_correction_takes_hold() {
         for c in CORRECTIONS {
@@ -1270,15 +1348,29 @@ mod tests {
             let i = parse(
                 &text,
                 &Options {
-                    path: "Toy-Truck/signalsets/v3/default.json".into(),
+                    path: format!("{}/signalsets/v3/default.json", c.repo),
                     ..Default::default()
                 },
             )
             .unwrap();
             let v = &i.modules[0].requests[0].values[0];
-            assert_eq!(v.unit, c.unit, "{}", c.id);
-            assert_eq!(crate::moddata::units::shown(&v.unit, 1.0, true).1, c.unit);
-            assert!(!c.why.is_empty() && i.corrected.len() == 1, "{}", c.id);
+            let want = match c.fix {
+                Fix::Unit(u) => u,
+                Fix::Unchecked => "",
+            };
+            assert_eq!(v.unit, want, "{}", c.id);
+            assert_eq!(crate::moddata::units::shown(&v.unit, 1.0, true).1, want);
+            assert!(!c.why.is_empty(), "{}", c.id);
+            assert_eq!(
+                (i.corrected.len(), i.unchecked.len()),
+                if c.fix == Fix::Unchecked {
+                    (0, 1)
+                } else {
+                    (1, 0)
+                },
+                "{}",
+                c.id
+            );
         }
     }
 }
