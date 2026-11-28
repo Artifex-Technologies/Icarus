@@ -541,9 +541,6 @@ impl App {
                 c.request_repaint()
             })
         });
-        let c2 = ctx.clone();
-        let repaint: std::sync::Arc<dyn Fn() + Send + Sync> =
-            std::sync::Arc::new(move || c2.request_repaint());
         // the adapter: the one named, the one that last worked, or a paired Bluetooth OBD adapter (autoconn.rs)
         let chosen = autoconn::choose_here(
             start
