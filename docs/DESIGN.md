@@ -110,7 +110,11 @@ A module is bricked when a write stops halfway or puts the wrong thing in. Icaru
     bench gives its donor's VIN, so the switch alone does not cover it. `lock::writes_allowed` asks the floor first,
     before the VIN is read, so the write paths and the links (the ELM327, SocketCAN, the Mongoose, J2534 and so the
     OpenPort) refuse with "session read-only" and nothing sent; the command line refuses `obd clear`, `test`, `service`,
-    `setting` and `setting-undo` before it opens the adapter. Nothing turns the floor off during a run.
+    `setting` and `setting-undo` before it opens the adapter. Nothing turns the floor off during a run. The window takes
+    it from `--read-only` anywhere on its line before the line is read, so a line that does not parse cannot lose it; a
+    window already open is handed it by a later start and answers that it holds it, and a start whose open window does
+    not answer so (an older Icarus) ends with an error rather than leave a writable window behind. The window's worker
+    asks the floor before each write too, so a refused clear sends not even its report's reads.
 11. **One program per adapter.** Two programs on one adapter garble each other's requests and could cut a write or a
     routine in two. A serial port (an ELM327 or STN cable, the OpenPort, the Mongoose, SLCAN, a GPS) is held by the
     program that opened it alone (done: `port::open_serial` locks it with flock and marks it exclusive with TIOCEXCL), so

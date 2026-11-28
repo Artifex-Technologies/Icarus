@@ -1,8 +1,9 @@
 //! The write confirmations waiting for the person's yes: a clear, a service routine, a setting change. Each is tied to the
 //! connection it was asked on (ICA-105). It closes when that connection ends or another one starts (`Disconnected`,
 //! `Connected`) and when anything on the link fails (`Failed`: a live reading that broke off, a connection that did not
-//! come up), so a yes is never given to a vehicle that came on after the question; and the command its yes sends carries the
-//! connection, which the worker checks before anything goes out.
+//! come up; `ClearFailed`: a clear refused or broken off), so a yes is never given to a vehicle that came on after the
+//! question; and the command its yes sends carries the connection, which the worker checks before anything goes out.
+//! `App::events` hands every event from the worker here first.
 
 use crate::worker::{Connection, Event};
 use crate::ClearTarget;
@@ -27,11 +28,12 @@ pub struct Confirms {
 }
 
 impl Confirms {
-    /// Closes every confirmation when the link ends, starts again or fails; anything else leaves them open.
+    /// Closes every confirmation when the link ends, starts again or fails (a clear that failed too, as when it was said
+    /// as `Failed`); anything else leaves them open.
     pub fn on_event(&mut self, e: &Event) {
         if matches!(
             e,
-            Event::Disconnected | Event::Connected(_) | Event::Failed(_)
+            Event::Disconnected | Event::Connected(_) | Event::Failed(_) | Event::ClearFailed(_)
         ) {
             *self = Confirms::default();
         }
@@ -70,7 +72,8 @@ mod tests {
 
     /// ICA-105: the clear, routine and setting dialogs open, then the link drops: each one is gone, so no yes can reach the
     /// vehicle that comes on next. A failure on the link closes them too; a status line leaves them. (A new connection
-    /// closing them is shown with the worker's own Connected event, in worker.rs.)
+    /// closing them is shown with the worker's own Connected event, in worker.rs; the window's own events reaching them,
+    /// in main.rs's `window_writes`.)
     #[test]
     fn the_dialogs_are_gone_after_disconnected() {
         let mut c = all_open();
@@ -85,5 +88,8 @@ mod tests {
         let mut c = all_open();
         c.on_event(&Event::Failed("the adapter stopped answering".into()));
         assert!(none_open(&c), "a failed live link closes them");
+        let mut c = all_open();
+        c.on_event(&Event::ClearFailed("no answer".into()));
+        assert!(none_open(&c), "a clear that broke off closes them");
     }
 }

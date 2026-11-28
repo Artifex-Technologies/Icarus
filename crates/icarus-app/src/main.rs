@@ -252,9 +252,6 @@ struct Start {
     /// `--view cells|2d|3d`: how the Maps page shows a table at start.
     view: Option<View>,
     gps: Option<String>,
-    /// `--read-only`: the session floor (ICA-192): nothing is cleared, tested or changed on any vehicle while the window
-    /// runs, whatever its VIN.
-    read_only: bool,
 }
 
 impl Start {
@@ -264,7 +261,8 @@ impl Start {
         while i < a.len() {
             match a[i].as_str() {
                 "--connect" => s.connect = true,
-                icarus_obd::lock::SESSION_FLAG => s.read_only = true,
+                // the session floor (ICA-192) is taken from the whole line before it is read here (`take_floor`)
+                icarus_obd::lock::SESSION_FLAG => {}
                 "--scan" => s.scan = true,
                 "--module-data" => s.module_data = true,
                 "--live" => s.live = true,
@@ -344,6 +342,51 @@ impl Start {
         }
         Ok(s)
     }
+}
+
+/// Whether a start's line asks for the session floor (ICA-192), held at once through `hold` when it does: `--read-only`
+/// anywhere on it (where an option took it as its value too, and beside an option this window does not know), or
+/// ICARUS_READ_ONLY in this start's environment (`env_on`). It does not wait for the line to be read, so a line that
+/// does not parse cannot lose it.
+fn take_floor(args: &[String], env_on: bool, hold: &dyn Fn()) -> bool {
+    let asked = env_on || args.iter().any(|a| a == icarus_obd::lock::SESSION_FLAG);
+    if asked {
+        hold();
+    }
+    asked
+}
+
+/// A start's line, read: what the window does at start, the line a window already open is handed, and whether the session
+/// floor was asked for.
+struct Begun {
+    start: Start,
+    hand: Vec<String>,
+    read_only: bool,
+}
+
+/// Reads a start's line: the session floor first (`take_floor`, through `hold`), then the options (a line that does not
+/// parse is said by this start, never handed to an open window to be dropped there). ICARUS_READ_ONLY is said as
+/// `--read-only` on the line handed over, so the window already open takes it with the rest.
+fn begin(mut args: Vec<String>, env_on: bool, hold: &dyn Fn()) -> Result<Begun, String> {
+    let read_only = take_floor(&args, env_on, hold);
+    let start = Start::parse(&args)?;
+    if read_only && !args.iter().any(|a| a == icarus_obd::lock::SESSION_FLAG) {
+        args.push(icarus_obd::lock::SESSION_FLAG.into());
+    }
+    Ok(Begun {
+        start,
+        hand: args,
+        read_only,
+    })
+}
+
+/// What the window talks through: the worker's two ends, what later starts hand over (single.rs), and the adapter chosen
+/// with whether to connect to it by itself (autoconn.rs).
+struct Wires {
+    tx: Sender<Cmd>,
+    rx: Receiver<Event>,
+    handed: Receiver<Vec<String>>,
+    chosen: (String, bool),
 }
 
 struct App {
@@ -490,8 +533,6 @@ struct App {
 
 impl App {
     fn new(ctx: &egui::Context, start: Start) -> App {
-        let levels = levels::Levels::load();
-        let (bg_tx, bg_rx) = channel::<Bg>();
         let (tx, wrx) = channel();
         let (wtx, rx) = channel();
         let c = ctx.clone();
@@ -514,9 +555,40 @@ impl App {
         let (handed_tx, handed_rx) = channel::<Vec<String>>();
         let c2 = ctx.clone();
         single::listen(move |args| {
+            // the session floor first, on this thread and whatever the rest of the line says (ICA-192), so the start that
+            // asked for it hears that this window holds it
+            take_floor(&args, false, &icarus_obd::lock::hold_session_read_only);
+            let held = icarus_obd::lock::session_read_only();
             let _ = handed_tx.send(args);
             c2.request_repaint();
+            held
         });
+        App::wired(
+            ctx,
+            start,
+            Wires {
+                tx,
+                rx,
+                handed: handed_rx,
+                chosen,
+            },
+        )
+    }
+
+    /// The window on `wires` (`new` gives the worker's thread, the adapter chosen and the hand-over's socket; a test gives
+    /// its own).
+    fn wired(ctx: &egui::Context, start: Start, wires: Wires) -> App {
+        let Wires {
+            tx,
+            rx,
+            handed: handed_rx,
+            chosen,
+        } = wires;
+        let levels = levels::Levels::load();
+        let (bg_tx, bg_rx) = channel::<Bg>();
+        let c2 = ctx.clone();
+        let repaint: std::sync::Arc<dyn Fn() + Send + Sync> =
+            std::sync::Arc::new(move || c2.request_repaint());
         let mut app = App {
             name_edit: String::new(),
             report_all: true,
@@ -759,11 +831,9 @@ impl App {
     /// A later `icarus-app ARGS`: its page, and its adapter (connecting to it when asked), then to the front.
     fn take_handed(&mut self, ctx: &egui::Context) {
         while let Ok(args) = self.handed.try_recv() {
+            // a later start asking for read-only made this window read-only as it was handed over, before its line was read
+            // (single::listen in `new`); nothing makes it writable again
             if let Ok(st) = Start::parse(&args) {
-                // a later start asking for read-only makes this window read-only (it never makes it writable again)
-                if st.read_only {
-                    icarus_obd::lock::hold_session_read_only();
-                }
                 if st.record {
                     if self.link == Link::On && self.recorder.is_none() {
                         self.start_recording();
@@ -1059,6 +1129,11 @@ impl App {
                 Event::SelfTests(r) => {
                     self.status = format!("{} on-board test results read.", r.len());
                     self.selftests = Some(r);
+                }
+                Event::ClearFailed(m) => {
+                    // said as it is: a refused clear is not the adapter going to sleep (`Failed` under `auto`)
+                    self.status = "The clear did not run to the end.".into();
+                    self.error = Some(m);
                 }
                 Event::Cleared(msg, info) => {
                     self.status = msg;
@@ -1681,6 +1756,15 @@ impl App {
             .and_then(|i| i.vin.as_deref())
             .and_then(icarus_obd::garage::tires)
             .and_then(|t| t.factor().ok().map(|f| (t, f)));
+    }
+
+    /// "Save a report and clear" in the clear's confirmation: the clear goes to the worker with the connection it was asked
+    /// on, and the confirmation closes.
+    fn clear_yes(&mut self, target: ClearTarget, on: worker::Connection) {
+        self.live_on = false;
+        let _ = self.tx.send(Cmd::Clear { target, on });
+        self.status = "Saving a report, then clearing...".into();
+        self.confirms.clear = None;
     }
 
     /// A confirmation of `what` on the connection open now (None when there is none: nothing is asked).
@@ -5252,10 +5336,7 @@ impl eframe::App for App {
                 });
             });
             if go {
-                self.live_on = false;
-                let _ = self.tx.send(Cmd::Clear { target, on });
-                self.status = "Saving a report, then clearing...".into();
-                self.confirms.clear = None;
+                self.clear_yes(target, on);
             } else if cancel || resp.should_close() {
                 self.confirms.clear = None;
             }
@@ -5385,27 +5466,32 @@ impl LearnSetting {
 }
 
 fn main() -> eframe::Result {
-    let mut args: Vec<String> = std::env::args().skip(1).collect();
-    // ICARUS_READ_ONLY=1 is said as --read-only, so a window already open takes it with the rest (ICA-192)
-    if icarus_obd::lock::env_asks_read_only()
-        && !args.iter().any(|a| a == icarus_obd::lock::SESSION_FLAG)
-    {
-        args.push(icarus_obd::lock::SESSION_FLAG.into());
-    }
-    // one Icarus at a time: an open one takes these arguments and comes to the front
-    if single::hand_over(&args) {
-        return Ok(());
-    }
-    let start = match Start::parse(&args) {
-        Ok(s) => s,
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    // the session floor (ICA-192) held from the whole line, then the line read, before anything is handed over
+    let begun = match begin(
+        args,
+        icarus_obd::lock::env_asks_read_only(),
+        &icarus_obd::lock::hold_session_read_only,
+    ) {
+        Ok(b) => b,
         Err(e) => {
             eprintln!("icarus-app: {e}\nusage: icarus-app [--read-only] [--connect] [--adapter A] [--page vehicle|modules|live|logs|tests|settings|learning|bus|maps|garage|tools] [--scan] [--live] [--record] [--learn [--mark TEXT] [--learn-seconds N]] [--maps DEF.xdf|.a2l IMAGE.bin [SECOND.bin|VERSION.version.toml]] [--map NAME [--cell R,C]] [--view cells|2d|3d]");
             std::process::exit(2);
         }
     };
-    if start.read_only {
-        icarus_obd::lock::hold_session_read_only();
+    // one Icarus at a time: an open one takes these arguments and comes to the front
+    match single::hand_over(&begun.hand, begun.read_only) {
+        single::Handed::NoWindow => {}
+        single::Handed::Taken => return Ok(()),
+        single::Handed::NotReadOnly => {
+            eprintln!(
+                "icarus-app: the window already open took this start but did not say it is read-only now (an Icarus from \
+                 before --read-only, maybe), so it may still change a vehicle: close it and start again with --read-only"
+            );
+            std::process::exit(1);
+        }
     }
+    let start = begun.start;
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1180.0, 760.0])
         .with_min_inner_size([760.0, 480.0])
@@ -5744,5 +5830,224 @@ mod bus_dbc {
             .unwrap_or_else(|| panic!("{cell}"));
         assert!((750.0..=830.0).contains(&rpm), "{cell}");
         assert_eq!(other.as_deref(), Some(""), "an ID the DBC does not name");
+    }
+}
+
+#[cfg(test)]
+mod read_only_start {
+    use super::*;
+    use std::cell::Cell;
+
+    fn line(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// ICA-192: the floor is asked for by `--read-only` anywhere on the line (beside an option the window does not know,
+    /// and where `--mark` took it as its text) or by ICARUS_READ_ONLY, and held at once; a line without either holds
+    /// nothing.
+    #[test]
+    fn the_floor_is_taken_from_the_whole_line() {
+        let held = Cell::new(0);
+        let hold = || held.set(held.get() + 1);
+        for (a, env) in [
+            (&["--read-only"][..], false),
+            (&["--page", "live"], true),
+            (&["--read-only", "--page", "modules", "--sacn"], false),
+            (&["--learn", "--mark"], true),
+            (&["--learn", "--mark", "--read-only"], false),
+        ] {
+            held.set(0);
+            assert!(take_floor(&line(a), env, &hold), "{a:?}");
+            assert_eq!(held.get(), 1, "{a:?}: held");
+        }
+        held.set(0);
+        assert!(!take_floor(
+            &line(&["--page", "live", "--mark", "read-only"]),
+            false,
+            &hold
+        ));
+        assert_eq!(held.get(), 0);
+    }
+
+    /// ICA-192 at start: `icarus-app --read-only` and ICARUS_READ_ONLY=1 each hold the floor before the window opens, and
+    /// the line a window already open is handed carries `--read-only` once; a line that does not parse is this start's
+    /// error (it exits 2), not handed over; without either, nothing is held and the line goes as given.
+    #[test]
+    fn a_start_holds_the_floor_and_hands_it_on() {
+        let held = Cell::new(0);
+        let hold = || held.set(held.get() + 1);
+        let b = begin(line(&["--read-only", "--connect"]), false, &hold).unwrap();
+        assert!(b.read_only && b.start.connect);
+        assert_eq!(held.get(), 1);
+        assert_eq!(b.hand, line(&["--read-only", "--connect"]));
+        let b = begin(line(&["--page", "live"]), true, &hold).unwrap();
+        assert!(b.read_only);
+        assert_eq!(held.get(), 2, "ICARUS_READ_ONLY held it");
+        assert_eq!(b.hand, line(&["--page", "live", "--read-only"]));
+        let b = begin(line(&["--read-only"]), true, &hold).unwrap();
+        assert_eq!(b.hand, line(&["--read-only"]), "said once");
+        let e = begin(
+            line(&["--read-only", "--page", "modules", "--sacn"]),
+            false,
+            &hold,
+        )
+        .err()
+        .expect("a line that does not parse");
+        assert_eq!(e, "unknown option --sacn");
+        held.set(0);
+        let b = begin(line(&["--page", "live"]), false, &hold).unwrap();
+        assert!(!b.read_only);
+        assert_eq!(held.get(), 0);
+        assert_eq!(b.hand, line(&["--page", "live"]));
+    }
+}
+
+/// The window itself (`App::events`) on a worker of the test's own, as the window runs it: what reaches its dialogs and
+/// what it says.
+#[cfg(test)]
+mod window_writes {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// The window on a worker of the test's own: the simulated vehicles (`worker::tests::two_vehicles`), `floor` as the
+    /// session floor, and the adapter `other` (the simulated vehicle giving another VIN) chosen as a real adapter is, so
+    /// the window connects by itself and `auto` is on.
+    fn window(floor: fn() -> Result<(), String>) -> (App, std::thread::JoinHandle<()>) {
+        let (tx, wrx) = channel();
+        let (wtx, rx) = channel();
+        let worker = std::thread::spawn(move || {
+            worker::run_with(
+                wrx,
+                wtx,
+                icarus_obd::fence::Fence::default,
+                || {},
+                &worker::tests::two_vehicles,
+                &floor,
+            )
+        });
+        let (_later, handed) = channel();
+        let app = App::wired(
+            &egui::Context::default(),
+            Start::default(),
+            Wires {
+                tx,
+                rx,
+                handed,
+                chosen: ("other".into(), true),
+            },
+        );
+        (app, worker)
+    }
+
+    /// The worker's events taken as the window takes them each frame, until `ok`; panics after 30 s.
+    fn until(app: &mut App, what: &str, ok: impl Fn(&App) -> bool) {
+        let end = Instant::now() + Duration::from_secs(30);
+        loop {
+            app.events();
+            if ok(app) {
+                return;
+            }
+            assert!(Instant::now() < end, "no {what}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn number(app: &App) -> u64 {
+        app.info.as_ref().map_or(0, |i| i.connection.number)
+    }
+
+    /// The clear, routine and setting dialogs, opened on the connection open now as their buttons open them.
+    fn open_all(app: &mut App) {
+        app.confirms.clear =
+            app.ask((None, "every engine and transmission module (OBD-II)".into()));
+        app.confirms.service = app.ask(icarus_obd::sim::services().remove(0));
+        app.confirms.setting = app.ask((icarus_obd::sim::settings().remove(0), Some("off".into())));
+        assert!(!none_open(app), "the dialogs opened");
+    }
+
+    fn none_open(app: &App) -> bool {
+        app.confirms.clear.is_none()
+            && app.confirms.service.is_none()
+            && app.confirms.setting.is_none()
+    }
+
+    /// ICA-105 in the window: its clear, routine and setting dialogs, open on one connection, are gone once the worker
+    /// says the adapter disconnected, once it connected again (the window's events, as each frame takes them), and once a
+    /// connection did not come up.
+    #[test]
+    fn the_windows_dialogs_close_when_their_connection_ends() {
+        let home = TestHome::new("app-ica105");
+        let (mut app, worker) = window(icarus_obd::lock::session_allows_changes);
+        until(&mut app, "the connection", |a| a.link == Link::On);
+        assert_eq!(number(&app), 1);
+        open_all(&mut app);
+        let _ = app.tx.send(Cmd::Disconnect);
+        until(&mut app, "the disconnect", |a| a.link == Link::Off);
+        assert!(none_open(&app), "gone after Disconnected");
+        let _ = app.tx.send(Cmd::Connect("other".into()));
+        until(&mut app, "the second connection", |a| number(a) == 2);
+        open_all(&mut app);
+        // the adapter connects again, to the simulated vehicle's own VIN
+        let _ = app.tx.send(Cmd::Connect("sim".into()));
+        until(&mut app, "the third connection", |a| number(a) == 3);
+        assert!(none_open(&app), "gone after Connected");
+        assert_eq!(
+            app.info.as_ref().and_then(|i| i.vin.as_deref()),
+            Some(icarus_obd::sim::VIN)
+        );
+        open_all(&mut app);
+        let _ = app.tx.send(Cmd::Connect("nowhere".into()));
+        until(&mut app, "the failure", |a| {
+            a.status.starts_with("Waiting for the adapter")
+        });
+        assert!(none_open(&app), "gone after Failed");
+        drop(app);
+        worker.join().unwrap();
+        drop(home);
+    }
+
+    /// A session floor of the test's own that refuses, as `lock::session_allows_changes` does in a read-only run (the floor
+    /// for the whole run would be every test's in this process).
+    fn read_only_floor() -> Result<(), String> {
+        Err("session read-only: this test's own floor".into())
+    }
+
+    /// ICA-192 in the window: on a read-only session with a real adapter (`auto` on), "Save a report and clear" is refused
+    /// with nothing sent, and the window says why ("session read-only"), not that the adapter is asleep; the link stays up.
+    #[test]
+    fn a_refused_clear_is_said_as_it_is() {
+        let home = TestHome::new("app-ica192");
+        let (mut app, worker) = window(read_only_floor);
+        until(&mut app, "the connection", |a| a.link == Link::On);
+        until(&mut app, "the connection's requests", |a| {
+            !a.sent_log.is_empty()
+        });
+        assert!(app.auto, "connected as to a real adapter");
+        app.sent_log.clear();
+        app.confirms.clear =
+            app.ask((None, "every engine and transmission module (OBD-II)".into()));
+        let Some(confirm::Asked {
+            what: (target, _),
+            on,
+        }) = app.confirms.clear.clone()
+        else {
+            panic!("the clear's dialog did not open")
+        };
+        app.clear_yes(target, on);
+        assert!(app.confirms.clear.is_none(), "the yes closed it");
+        until(&mut app, "the refusal", |a| a.error.is_some());
+        let e = app.error.clone().unwrap_or_default();
+        assert!(
+            e.starts_with("not cleared") && e.contains("session read-only"),
+            "{e}"
+        );
+        assert_eq!(app.status, "The clear did not run to the end.");
+        assert!(app.link == Link::On, "the link is still up");
+        let _ = app.tx.send(Cmd::Disconnect);
+        until(&mut app, "the disconnect", |a| a.link == Link::Off);
+        assert!(app.sent_log.is_empty(), "nothing went onto the bus");
+        drop(app);
+        worker.join().unwrap();
+        drop(home);
     }
 }

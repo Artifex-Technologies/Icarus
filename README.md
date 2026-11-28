@@ -114,8 +114,12 @@ vehicle, there is a read-only session: `--read-only` on any command (`icarus obd
 whole run Icarus clears, tests and changes nothing on any vehicle, whatever VIN it gives and whatever the switch says;
 every read works as usual. `obd clear`, `test`, `service`, `setting` and `setting-undo` are refused before the adapter is
 opened, every other write path and the adapter link itself refuse with "session read-only" before anything is sent, and
-`obd info` and the Vehicle page's Writes line say the session is read-only. Nothing turns it off until the run ends; a
-window already open takes `--read-only` from a later start (or `ICARUS_READ_ONLY=1` in its environment) and stays read-only.
+`obd info` and the Vehicle page's Writes line say the session is read-only; in the window a refused clear, routine or
+setting says why on its error line. Nothing turns it off until the run ends. A window already open takes `--read-only`
+(or `ICARUS_READ_ONLY=1`) from a later start, wherever it is on that start's line, stays read-only and answers that it is;
+when it does not answer so (an Icarus from before this), the later start says the window may still change a vehicle and
+ends with an error, and I close that window and start again. A start whose line does not parse says so itself (exit 2)
+and hands nothing to the open window.
 
 A clear, a service routine or a setting change confirmed in the window belongs to the connection it was confirmed on: its
 dialog closes when the adapter disconnects, connects again or fails, and a yes that reaches the vehicle side after the

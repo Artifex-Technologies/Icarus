@@ -79,9 +79,13 @@ pub struct Connection {
     pub vin: Option<String>,
 }
 
-/// Whether a write confirmed on `on` may go to the connection open now (`now`), and the session floor allows it (ICA-192);
-/// why not otherwise. Nothing is sent to ask.
-fn may_write(on: &Connection, now: Option<&Connection>) -> Result<(), String> {
+/// The session floor's answer (ICA-192): `lock::session_allows_changes` in use; a test gives one of its own, since the floor
+/// for the whole run would be every test's.
+type Floor<'a> = &'a dyn Fn() -> Result<(), String>;
+
+/// Whether a write confirmed on `on` may go to the connection open now (`now`), and the session floor (`floor`) allows it
+/// (ICA-192); why not otherwise. Nothing is sent to ask.
+fn may_write(on: &Connection, now: Option<&Connection>, floor: Floor) -> Result<(), String> {
     match now {
         None => Err("the connection it was confirmed on has ended; nothing was sent".into()),
         Some(n) if n.number != on.number => Err(
@@ -92,7 +96,7 @@ fn may_write(on: &Connection, now: Option<&Connection>) -> Result<(), String> {
         Some(n) if n.vin != on.vin => {
             Err("it was confirmed for another vehicle (its VIN differs); nothing was sent".into())
         }
-        Some(_) => icarus_obd::lock::session_allows_changes(),
+        Some(_) => floor(),
     }
 }
 
@@ -215,6 +219,8 @@ pub enum Event {
     Bus(Box<BusView>),
     /// Codes cleared (what was said), and the Vehicle page's information read again.
     Cleared(String, Box<Info>),
+    /// A clear that was refused or did not run to the end (why): shown as it is, never taken for the adapter asleep.
+    ClearFailed(String),
     Settings(Vec<SettingView>),
     /// A setting change (or undo) ended: what was done, or why not.
     SettingDone(Result<String, String>),
@@ -252,7 +258,14 @@ pub fn run(
     fence: fn() -> icarus_obd::fence::Fence,
     repaint: impl Fn() + Send + 'static,
 ) {
-    run_with(rx, tx, fence, repaint, &open)
+    run_with(
+        rx,
+        tx,
+        fence,
+        repaint,
+        &open,
+        &icarus_obd::lock::session_allows_changes,
+    )
 }
 
 /// The adapter `spec` names, opened and set up (`Target::parse`, `connect_target`).
@@ -263,13 +276,15 @@ fn open(spec: &str) -> Result<Elm, String> {
         .map_err(|e| format!("{spec}: {e}"))
 }
 
-/// `run`, with the adapters opened by `open` (a test opens simulated vehicles of its own).
-fn run_with(
+/// `run`, with the adapters opened by `open` and the session floor asked through `floor` (a test gives simulated vehicles
+/// and a floor of its own).
+pub(crate) fn run_with(
     rx: Receiver<Cmd>,
     tx: Sender<Event>,
     fence: fn() -> icarus_obd::fence::Fence,
     repaint: impl Fn() + Send + 'static,
     open: &dyn Fn(&str) -> Result<Elm, String>,
+    floor: Floor,
 ) {
     let send = |e: Event| {
         let _ = tx.send(e);
@@ -366,6 +381,14 @@ fn run_with(
         }
         match cmd {
             Some(Cmd::TestStart { def, value }) => {
+                // a read-only session starts no test, before anything goes out (actuator::start asks it too)
+                if let Err(why) = floor() {
+                    send(Event::TestStopped {
+                        name: def.name.clone(),
+                        why: format!("not started: {why}"),
+                    });
+                    continue;
+                }
                 let Some(e) = elm.as_mut() else { continue };
                 live.clear();
                 match actuator::start(e, &def, value) {
@@ -464,8 +487,8 @@ fn run_with(
             }
             Some(Cmd::Clear { target, on }) => {
                 // before anything goes out, the report's reads included
-                if let Err(why) = may_write(&on, connection.as_ref()) {
-                    send(Event::Failed(format!("not cleared: {why}")));
+                if let Err(why) = may_write(&on, connection.as_ref(), floor) {
+                    send(Event::ClearFailed(format!("not cleared: {why}")));
                     continue;
                 }
                 let Some(e) = elm.as_mut() else { continue };
@@ -477,7 +500,7 @@ fn run_with(
                 let saved = match saved {
                     Ok(p) => p,
                     Err(m) => {
-                        send(Event::Failed(format!(
+                        send(Event::ClearFailed(format!(
                             "not cleared: the report before clearing could not be saved ({m})"
                         )));
                         continue;
@@ -488,8 +511,19 @@ fn run_with(
                     Some((tx, rx, d)) => clear::clear_module(e, tx, rx, d)
                         .map(|_| format!("Cleared module {tx:03X}")),
                 };
-                match result.and_then(|msg| gather(e, &profiles).map(|i| (msg, i))) {
-                    Ok((msg, mut info)) => send(Event::Cleared(
+                let msg = match result {
+                    Ok(msg) => msg,
+                    // the clear's own checks and request: refused (the Read-Only switch, the battery, the engine) or failed
+                    Err(m) => {
+                        send(Event::ClearFailed(format!(
+                            "{m} (the report from before is {})",
+                            saved.display()
+                        )));
+                        continue;
+                    }
+                };
+                match gather(e, &profiles) {
+                    Ok(mut info) => send(Event::Cleared(
                         format!("{msg}. The report from before is {}.", saved.display()),
                         Box::new({
                             info.connection = on;
@@ -534,7 +568,7 @@ fn run_with(
                 send(Event::Status(format!("{} setting(s) read.", defs.len())));
             }
             Some(Cmd::Service { def, on }) => {
-                if let Err(why) = may_write(&on, connection.as_ref()) {
+                if let Err(why) = may_write(&on, connection.as_ref(), floor) {
                     send(Event::ServiceDone(Err(format!(
                         "{} did not run: {why}",
                         def.name
@@ -557,7 +591,7 @@ fn run_with(
             }
             Some(Cmd::SettingChange { def, value, on }) => {
                 // refused before the change and before the settings are read again: nothing goes out
-                if let Err(why) = may_write(&on, connection.as_ref()) {
+                if let Err(why) = may_write(&on, connection.as_ref(), floor) {
                     send(Event::SettingDone(Err(format!(
                         "{} was not changed: {why}",
                         def.name
@@ -980,7 +1014,7 @@ fn scan(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::mpsc;
     use std::time::Duration;
@@ -1049,11 +1083,11 @@ mod tests {
     }
 
     /// Another vehicle's VIN, made up: the adapter comes back on a different vehicle.
-    const OTHER: &str = "5TFICARUSDONOR001";
+    pub(crate) const OTHER: &str = "5TFICARUSDONOR001";
 
     /// The adapters this worker test opens: the simulated vehicle (`sim`, engine off) and the same one giving another VIN
     /// (`other`).
-    fn two_vehicles(spec: &str) -> Result<Elm, String> {
+    pub(crate) fn two_vehicles(spec: &str) -> Result<Elm, String> {
         let car = match spec {
             "sim" => icarus_obd::sim::SimCar::engine_off(),
             "other" => icarus_obd::sim::SimCar::engine_off().with_vin(OTHER),
@@ -1095,6 +1129,7 @@ mod tests {
                 icarus_obd::fence::Fence::default,
                 || {},
                 &two_vehicles,
+                &icarus_obd::lock::session_allows_changes,
             )
         });
         let connected = |erx: &mpsc::Receiver<Event>| -> Connection {
@@ -1167,9 +1202,9 @@ mod tests {
             matches!(e, Event::Disconnected)
         });
         let earlier = |m: &str| m.contains("earlier connection") && m.contains("nothing was sent");
-        assert!(after
-            .iter()
-            .any(|e| matches!(e, Event::Failed(m) if m.starts_with("not cleared") && earlier(m))));
+        assert!(after.iter().any(
+            |e| matches!(e, Event::ClearFailed(m) if m.starts_with("not cleared") && earlier(m))
+        ));
         assert!(after
             .iter()
             .any(|e| matches!(e, Event::ServiceDone(Err(m)) if earlier(m))));
@@ -1221,6 +1256,144 @@ mod tests {
                 .any(|(_, id, b)| *id == 0x7C0 && b.first() == Some(&0x2E)),
             "the write reached the cluster"
         );
+        drop(ctx);
+        worker.join().unwrap();
+        drop(home);
+    }
+
+    /// A session floor of the test's own that refuses, as `lock::session_allows_changes` does in a read-only run (the floor
+    /// for the whole run would be every test's in this process, so it is not turned on here).
+    fn read_only_floor() -> Result<(), String> {
+        Err("session read-only: this test's own floor".into())
+    }
+
+    /// ICA-192 in the window's worker: the session floor on, a donor VIN on the port and no vehicle switched to Read-Only.
+    /// A clear (every module and one), a service routine, a setting change and its undo, each confirmed on the connection
+    /// open now, and an actuator test are refused with "session read-only" before anything goes out: not the clear's
+    /// report reads, not the settings read again after a change. Reads still go, and only reads went onto the bus.
+    #[test]
+    fn the_session_floor_stops_the_windows_writes_before_anything_is_sent() {
+        let home = crate::TestHome::new("worker-ica192");
+        let (ctx, crx) = mpsc::channel();
+        let (etx, erx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            run_with(
+                crx,
+                etx,
+                icarus_obd::fence::Fence::default,
+                || {},
+                &two_vehicles,
+                &read_only_floor,
+            )
+        });
+        ctx.send(Cmd::Connect("other".into())).unwrap();
+        let seen = until(&erx, "the connection", &|e| {
+            matches!(e, Event::Connected(_))
+        });
+        let Some(Event::Connected(info)) = seen.last() else {
+            unreachable!()
+        };
+        let on = info.connection.clone();
+        assert_eq!(on.vin.as_deref(), Some(OTHER));
+        until(&erx, "the connection's requests", &|e| {
+            matches!(e, Event::Sent(_))
+        });
+        let chime = icarus_obd::sim::settings().remove(0);
+        let off = chime.values["off"].clone();
+        for c in [
+            Cmd::Clear {
+                target: None,
+                on: on.clone(),
+            },
+            Cmd::Clear {
+                target: Some((0x7E0, 0x7E8, Dialect::Uds)),
+                on: on.clone(),
+            },
+            Cmd::Service {
+                def: icarus_obd::sim::services().remove(1),
+                on: on.clone(),
+            },
+            Cmd::SettingChange {
+                def: chime.clone(),
+                value: Some(off),
+                on: on.clone(),
+            },
+            Cmd::SettingChange {
+                def: chime,
+                value: None,
+                on,
+            },
+            Cmd::TestStart {
+                def: icarus_obd::sim::tests().remove(0),
+                value: 30.0,
+            },
+            // reads: they go (this VIN has no settings to read; the on-board test results are asked)
+            Cmd::SettingsRead,
+            Cmd::SelfTests,
+            Cmd::Disconnect,
+        ] {
+            ctx.send(c).unwrap();
+        }
+        let after = until(&erx, "the disconnect", &|e| {
+            matches!(e, Event::Disconnected)
+        });
+        let floor = |m: &str| m.contains("session read-only");
+        let count = |f: &dyn Fn(&Event) -> bool| after.iter().filter(|e| f(e)).count();
+        assert_eq!(
+            count(
+                &|e| matches!(e, Event::ClearFailed(m) if m.starts_with("not cleared") && floor(m))
+            ),
+            2,
+            "both clears refused"
+        );
+        assert_eq!(
+            count(&|e| matches!(e, Event::ServiceDone(Err(m)) if floor(m))),
+            1
+        );
+        assert_eq!(
+            count(&|e| matches!(e, Event::SettingDone(Err(m)) if floor(m))),
+            2,
+            "the change and the undo refused"
+        );
+        assert_eq!(
+            count(
+                &|e| matches!(e, Event::TestStopped { why, .. } if why.starts_with("not started") && floor(why))
+            ),
+            1
+        );
+        assert_eq!(
+            count(&|e| matches!(
+                e,
+                Event::Cleared(..)
+                    | Event::TestStarted(_)
+                    | Event::SettingDone(Ok(_))
+                    | Event::ServiceDone(Ok(_))
+            )),
+            0,
+            "nothing was carried out"
+        );
+        // the settings were read once, for SettingsRead: never again after a refused change
+        assert_eq!(count(&|e| matches!(e, Event::Settings(_))), 1);
+        assert_eq!(
+            count(&|e| matches!(e, Event::SelfTests(r) if !r.is_empty())),
+            1,
+            "the on-board test results were read"
+        );
+        let sent: Vec<&Vec<u8>> = after
+            .iter()
+            .filter_map(|e| match e {
+                Event::Sent(v) => Some(v.iter().map(|(_, _, b)| b)),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert!(!sent.is_empty(), "the reads went out");
+        for b in sent {
+            assert!(
+                !icarus_obd::lock::changes_vehicle(b),
+                "{b:02X?} went onto the bus"
+            );
+        }
         drop(ctx);
         worker.join().unwrap();
         drop(home);
