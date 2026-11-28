@@ -1527,10 +1527,10 @@ pub fn catch_stop_signals() {
 /// The adapter used last (`~/.config/icarus/adapter`, kept by the window), when there is one: `icarus record --auto`'s
 /// known adapter when none is named.
 pub fn remembered_adapter() -> Option<String> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
+    let base = crate::env("XDG_CONFIG_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+        .or_else(|| crate::env("HOME").map(|h| PathBuf::from(h).join(".config")))?;
     let t = std::fs::read_to_string(base.join("icarus/adapter")).ok()?;
     let a = t.lines().next()?.trim().to_string();
     (!a.is_empty() && a != "sim").then_some(a)
@@ -1539,10 +1539,10 @@ pub fn remembered_adapter() -> Option<String> {
 /// Where the window keeps the module values a recording watches (ICA-218): `$XDG_CONFIG_HOME/icarus/record-watch`, else
 /// `~/.config/icarus/record-watch`. `icarus record` without `--watch` takes it too, so both record the same way.
 pub fn watch_path() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
+    let base = crate::env("XDG_CONFIG_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+        .or_else(|| crate::env("HOME").map(|h| PathBuf::from(h).join(".config")))?;
     Some(base.join("icarus/record-watch"))
 }
 

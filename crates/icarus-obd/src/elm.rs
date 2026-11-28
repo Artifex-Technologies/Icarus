@@ -369,6 +369,9 @@ pub struct Elm {
     refused: std::collections::HashMap<crate::record::Asked, u8>,
     /// How many requests the record spared on this connection.
     pub spared: usize,
+    /// The make named for a bench ECU on this connection (ICA-222, `benchmake::bind`): kept only when its VIN was blank
+    /// when it was named, and gone with the connection.
+    bench: Option<String>,
 }
 
 /// How many sent requests an adapter keeps for `take_sent`.
@@ -465,6 +468,7 @@ impl Elm {
             outcomes: Vec::new(),
             refused: Default::default(),
             spared: 0,
+            bench: None,
         };
         let named = |r: &[String]| r.iter().any(|l| l.to_uppercase().contains("ELM"));
         let mut reset = match how {
@@ -763,6 +767,16 @@ impl Elm {
             }
         }
         r
+    }
+
+    /// The make named for a bench ECU on this connection (ICA-222), if one is kept (`benchmake::bind`).
+    pub fn bench_make(&self) -> Option<String> {
+        self.bench.clone()
+    }
+
+    /// Keeps (or forgets) the bench make for this connection; `benchmake::bind` is the way in, after the VIN read blank.
+    pub fn keep_bench_make(&mut self, make: Option<String>) {
+        self.bench = make;
     }
 
     /// Learns from the vehicle's record (ICA-71): the reads it refused for good are not sent again on this connection.

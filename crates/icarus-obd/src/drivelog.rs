@@ -612,9 +612,7 @@ pub fn words(name: &str, s: &Summary) -> String {
 
 /// Where recordings are kept: ~/Documents/Icarus/logs and each vehicle's Logs folder.
 pub fn folders() -> Vec<PathBuf> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default();
+    let home = crate::env("HOME").map(PathBuf::from).unwrap_or_default();
     let docs = home.join("Documents/Icarus");
     let mut v = vec![docs.join("logs")];
     if let Ok(rd) = std::fs::read_dir(docs.join("Vehicles")) {

@@ -15,6 +15,9 @@ use std::time::{Duration, Instant};
 
 pub enum Cmd {
     Connect(String),
+    /// The make named for a bench ECU (ICA-222; None: none), for the next connection only: it is kept on that connection
+    /// when its VIN reads blank (`benchmake::bind`), and goes with it.
+    BenchMake(Option<String>),
     Disconnect,
     /// Scan modules: the profile to use (None: from the VIN), and whether to sweep every ID.
     Scan {
@@ -366,6 +369,8 @@ pub(crate) fn run_with(
     let profiles = vehicles::load(vehicles::user_dir().as_deref()).0;
     // a command that arrived while the bus was watched, handled next
     let mut queued: Option<Cmd> = None;
+    // the bench make named for the next connection (ICA-222): taken by it, never by a later one
+    let mut bench: Option<String> = None;
     // what the modules did with each request, kept in the vehicle's record (ICA-70)
     let mut outcomes: Vec<icarus_obd::record::Outcome> = Vec::new();
     let mut last_kept = Instant::now();
@@ -465,20 +470,25 @@ pub(crate) fn run_with(
                     }),
                 }
             }
+            Some(Cmd::BenchMake(m)) => bench = m,
             Some(Cmd::Connect(s)) => {
                 spec = s.clone();
                 let spec = s;
                 elm = None;
                 connection = None;
                 live.clear();
+                let bench = bench.take();
                 // a device set to listen only is never talked through, whoever asks (ICA-80)
                 if let Err(why) = crate::devices::Roles::load().may_talk(&spec) {
                     send(Event::Failed(why));
                     continue;
                 }
                 send(Event::Status(format!("Connecting to {spec}...")));
-                match connect(open, &spec, &profiles) {
+                match connect(open, &spec, &profiles, bench.as_deref()) {
                     Ok((mut e, mut info)) => {
+                        if let Err(why) = &info.make {
+                            send(Event::Status(format!("Bench make not used: {why}")));
+                        }
                         offered = info.live.clone();
                         // a recording goes on through a new connection to the same vehicle, never into another's
                         if recorder.as_ref().is_some_and(|r| r.vin != info.vin) {
@@ -507,6 +517,7 @@ pub(crate) fn run_with(
             }
             Some(Cmd::Disconnect) => {
                 stop_recording(&mut recorder, &mut notifier, &send);
+                bench = None;
                 elm = None;
                 vin = None;
                 connection = None;
@@ -593,13 +604,14 @@ pub(crate) fn run_with(
                     send(Event::ClearFailed(format!("not cleared: {why}")));
                     continue;
                 }
-                // one module: on the make the confirmed connection's VIN picks, or the bench make named for this
-                // session where the VIN gives none (ICA-222); where its profile names no airbag module a module of
+                // one module: on the make the confirmed connection's VIN picks, or the bench make kept on this
+                // connection where its VIN read blank (ICA-222); where its profile names no airbag module a module of
                 // unknown kind could be it (ICA-200); the airbag modules by ID or by the profile
+                let kept = elm.as_ref().and_then(Elm::bench_make);
                 let make = match icarus_obd::benchmake::for_vin(
                     &profiles,
                     Ok(on.vin.clone()),
-                    icarus_obd::benchmake::chosen().as_deref(),
+                    kept.as_deref(),
                 ) {
                     Ok(m) => m,
                     Err(why) => {
@@ -688,13 +700,21 @@ pub(crate) fn run_with(
                 let Some(e) = elm.as_mut() else { continue };
                 live.clear();
                 send(Event::Status(
-                    "Health check: reading codes, monitors and misfires, then sampling the fuel trims...".into(),
+                    "Health check: the module data's misfire counts...".into(),
                 ));
-                let profile = write_profile(&profiles, vin.as_deref());
+                let profile = write_profile(&profiles, vin.as_deref(), e.bench_make().as_deref());
+                // only the misfire counts' requests of the vehicle's module-data set, not the whole set
                 let us = icarus_core::moddata::units::us_customary();
-                let values = icarus_obd::vehicledata::read(e, &profiles, None, us).ok();
+                let values = icarus_obd::vehicledata::read_values(
+                    e,
+                    &profiles,
+                    &icarus_obd::health::misfire_value,
+                    us,
+                )
+                .ok();
+                let mut said = |t: &str| send(Event::Status(t.to_string()));
                 send(Event::Health(
-                    icarus_obd::health::check(e, profile, values.as_ref())
+                    icarus_obd::health::check(e, profile, values.as_ref(), &mut said)
                         .map(|c| Box::new(icarus_obd::health::keep(c)))
                         .map_err(|x| x.to_string()),
                 ));
@@ -704,7 +724,7 @@ pub(crate) fn run_with(
                 live.clear();
                 send(Event::Status("Reading the settings...".into()));
                 let defs = vehicles::settings_for(
-                    write_profile(&profiles, vin.as_deref()),
+                    write_profile(&profiles, vin.as_deref(), e.bench_make().as_deref()),
                     vin.as_deref(),
                 );
                 send(Event::Settings(read_settings(e, &defs, vin.as_deref())));
@@ -763,7 +783,7 @@ pub(crate) fn run_with(
                 });
                 send(Event::SettingDone(said));
                 let defs = vehicles::settings_for(
-                    write_profile(&profiles, vin.as_deref()),
+                    write_profile(&profiles, vin.as_deref(), e.bench_make().as_deref()),
                     vin.as_deref(),
                 );
                 send(Event::Settings(read_settings(e, &defs, vin.as_deref())));
@@ -910,7 +930,8 @@ pub(crate) fn run_with(
                     // going on once it answers (a new connection, so no earlier confirmation carries over)
                     if reopened.elapsed() >= REOPEN && !spec.is_empty() {
                         reopened = Instant::now();
-                        if let Ok((mut e, mut info)) = connect(open, &spec, &profiles) {
+                        // a new connection: no bench make carries over (ICA-222)
+                        if let Ok((mut e, mut info)) = connect(open, &spec, &profiles, None) {
                             if recorder.as_ref().is_some_and(|r| r.vin != info.vin) {
                                 stop_recording(&mut recorder, &mut notifier, &send);
                             }
@@ -1113,41 +1134,45 @@ fn end_test(
     send(Event::TestStopped { name, why });
 }
 
+/// The adapter `spec` opened (`open`), with the bench make `bench` named for it (ICA-222: kept only when its VIN reads
+/// blank; otherwise the Info's make says why not), and the Vehicle page's information.
 fn connect(
     open: &dyn Fn(&str) -> Result<Elm, String>,
     spec: &str,
     profiles: &[Profile],
+    bench: Option<&str>,
 ) -> Result<(Elm, Info), String> {
     let mut elm = open(spec)?;
-    let info = gather(&mut elm, profiles)?;
+    let refused = bench.and_then(|m| icarus_obd::benchmake::bind(&mut elm, profiles, m).err());
+    let mut info = gather(&mut elm, profiles)?;
+    if let Some(why) = refused {
+        info.make = Err(why);
+    }
     Ok((elm, info))
 }
 
-/// Everything the Vehicle page shows, read again (its connection left for the caller to say).
 /// The profile a vehicle with `vin` is written (and its tests, settings and routines listed) as: its VIN's, or the bench
-/// make's named for this session where the VIN gives none (ICA-222); none when the two disagree or neither names one.
-fn write_profile<'a>(profiles: &'a [Profile], vin: Option<&str>) -> Option<&'a Profile> {
-    let m = icarus_obd::benchmake::for_vin(
-        profiles,
-        Ok(vin.map(str::to_string)),
-        icarus_obd::benchmake::chosen().as_deref(),
-    )
-    .ok()?;
+/// make kept on its connection (`bench`) where its VIN reads blank (ICA-222); none when the two disagree or neither names
+/// one.
+fn write_profile<'a>(
+    profiles: &'a [Profile],
+    vin: Option<&str>,
+    bench: Option<&str>,
+) -> Option<&'a Profile> {
+    let m = icarus_obd::benchmake::for_vin(profiles, Ok(vin.map(str::to_string)), bench).ok()?;
     profiles
         .iter()
         .find(|p| Some(p.id.as_str()) == m.make.as_deref())
 }
 
+/// Everything the Vehicle page shows, read again (its connection left for the caller to say).
 fn gather(elm: &mut Elm, profiles: &[Profile]) -> Result<Info, String> {
     let e = |x: ObdError| x.to_string();
     let vin = j1979::vin(elm).map_err(e)?;
     let vin_info = vin.as_deref().and_then(|v| vin::decode(v).ok());
-    let make = icarus_obd::benchmake::for_vin(
-        profiles,
-        Ok(vin.clone()),
-        icarus_obd::benchmake::chosen().as_deref(),
-    );
-    let profile = write_profile(profiles, vin.as_deref()).cloned();
+    let bench = elm.bench_make();
+    let make = icarus_obd::benchmake::for_vin(profiles, Ok(vin.clone()), bench.as_deref());
+    let profile = write_profile(profiles, vin.as_deref(), bench.as_deref()).cloned();
     let mut monitors = Vec::new();
     if let Ok(a) = elm.request(&[0x01, 0x01]) {
         for x in a
@@ -1747,6 +1772,107 @@ pub(crate) mod tests {
     /// module, the window's clear of a module the sweep found and the profile does not name (the ABS module at 7B0) is
     /// refused with module data's reason, and nothing is sent (not even the report's reads); a listed airbag ID is refused
     /// too; the engine, which the profile names with a kind, still clears.
+    #[test]
+    fn a_bench_make_goes_with_its_connection_and_never_reaches_a_friends_car() {
+        // ICA-222 review: toyota named for a bench ECM (blank VIN), then the adapter disconnected and a friend's car of a
+        // make with no profile connected: it gets no bench make (no Toyota profile, its tests or settings), and a clear of
+        // its engine is refused by the caution with nothing sent. A reconnect of the bench ECM starts without it too, and
+        // a bench make named for a well-formed VIN is not used (and said).
+        const FRIEND: &str = "ZZFICARUSFRND0001";
+        let _home = crate::TestHome::new("worker-ica222");
+        let (ctx, crx) = mpsc::channel();
+        let (etx, erx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            run_with(
+                crx,
+                etx,
+                icarus_obd::fence::Fence::default,
+                || {},
+                &|spec: &str| {
+                    let vin = match spec {
+                        "bench" => "",
+                        "friend" => FRIEND,
+                        s => return Err(format!("no adapter {s} in this test")),
+                    };
+                    Elm::connect(Box::new(
+                        icarus_obd::sim::SimCar::engine_off().with_vin(vin),
+                    ))
+                    .map_err(|e| e.to_string())
+                },
+                &icarus_obd::lock::session_allows_changes,
+            )
+        });
+        let connect = |spec: &str| {
+            ctx.send(Cmd::Connect(spec.into())).unwrap();
+            let seen = until(&erx, "the connection", &|e| {
+                matches!(e, Event::Connected(_))
+            });
+            let Some(Event::Connected(info)) = seen.into_iter().last() else {
+                unreachable!()
+            };
+            info
+        };
+        ctx.send(Cmd::BenchMake(Some("toyota".into()))).unwrap();
+        let bench = connect("bench");
+        let made = bench.make.as_ref().unwrap();
+        assert!(made.chosen, "{made:?}");
+        assert_eq!(made.words(), "make chosen by me: toyota, VIN blank");
+        assert_eq!(
+            bench.profile.as_ref().map(|p| p.id.as_str()),
+            Some("toyota")
+        );
+        // the same bench ECM connected again (as an auto-connect or a reconnect does): no make
+        let again = connect("bench");
+        assert!(!again.make.as_ref().unwrap().chosen);
+        assert!(again.profile.is_none());
+        // named again, disconnected before connecting: forgotten
+        ctx.send(Cmd::BenchMake(Some("toyota".into()))).unwrap();
+        ctx.send(Cmd::Disconnect).unwrap();
+        until(&erx, "the disconnect", &|e| {
+            matches!(e, Event::Disconnected)
+        });
+        let friend = connect("friend");
+        let made = friend.make.as_ref().unwrap();
+        assert_eq!((made.make.as_deref(), made.chosen), (None, false));
+        assert!(friend.profile.is_none());
+        assert!(
+            friend.tests.is_empty() && friend.settings.is_empty() && friend.services.is_empty()
+        );
+        until(&erx, "the connection's requests", &|e| {
+            matches!(e, Event::Sent(_))
+        });
+        ctx.send(Cmd::Clear {
+            target: Some((0x7E0, 0x7E8, Dialect::Uds)),
+            on: friend.connection.clone(),
+        })
+        .unwrap();
+        // a bench make named for the friend's car itself: not used, and why said
+        ctx.send(Cmd::BenchMake(Some("toyota".into()))).unwrap();
+        ctx.send(Cmd::Connect("friend".into())).unwrap();
+        let seen = until(&erx, "the second connection", &|e| {
+            matches!(e, Event::Connected(_))
+        });
+        let refused = seen.iter().find_map(|e| match e {
+            Event::ClearFailed(m) => Some(m.clone()),
+            _ => None,
+        });
+        let refused = refused.expect("the clear was refused");
+        assert!(refused.contains("could be the airbag module"), "{refused}");
+        assert!(
+            !seen
+                .iter()
+                .any(|e| matches!(e, Event::Cleared(..) | Event::ReportSaved(_))),
+            "nothing cleared"
+        );
+        assert!(seen.iter().any(|e| matches!(e, Event::Status(s) if s.starts_with("Bench make not used") && s.contains("names no profile"))));
+        let Some(Event::Connected(info)) = seen.last() else {
+            unreachable!()
+        };
+        assert!(info.make.is_err());
+        ctx.send(Cmd::Quit).unwrap();
+        worker.join().unwrap();
+    }
+
     #[test]
     fn a_clear_of_a_module_of_unknown_kind_is_refused_where_the_profile_names_no_airbag_module() {
         const KART: &str = "ZZKICARUSKART0001";

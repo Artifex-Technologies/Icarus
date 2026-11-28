@@ -38,10 +38,10 @@ impl Roles {
 
     /// `$XDG_CONFIG_HOME/icarus/devices.toml`, else `~/.config/icarus/devices.toml`.
     pub fn path() -> Option<PathBuf> {
-        let base = std::env::var_os("XDG_CONFIG_HOME")
+        let base = crate::env("XDG_CONFIG_HOME")
             .filter(|v| !v.is_empty())
             .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+            .or_else(|| crate::env("HOME").map(|h| PathBuf::from(h).join(".config")))?;
         Some(base.join("icarus/devices.toml"))
     }
 

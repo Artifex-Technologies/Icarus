@@ -2,12 +2,10 @@
 //! `~/.local/state/icarus/actions.log`, one line each, with the time. Tests never write to it.
 
 pub fn path() -> Option<std::path::PathBuf> {
-    std::env::var_os("XDG_STATE_HOME")
+    crate::env("XDG_STATE_HOME")
         .map(std::path::PathBuf::from)
         .filter(|p| p.is_absolute())
-        .or_else(|| {
-            std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/state"))
-        })
+        .or_else(|| crate::env("HOME").map(|h| std::path::PathBuf::from(h).join(".local/state")))
         .map(|d| d.join("icarus/actions.log"))
 }
 

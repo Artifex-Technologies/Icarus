@@ -256,6 +256,8 @@ pub struct SimCar {
     csm: bool,
     /// The adapter has an STN chip (an OBDLink): it answers STI, and has its own CAN monitoring mode (STCMM).
     stn: bool,
+    /// The fuel system in open loop (01 PID 03: 04, open loop for driving conditions), for the health check's trims.
+    open_loop: bool,
     /// The STN chip's CAN monitoring mode (STCMM): 0 receive-only (its default), 1 a normal node that acknowledges frames.
     cmm: u8,
     /// Silent monitoring is off when the adapter starts and after every ATZ (ATCSM0, and STCMM1 on an STN chip), as another
@@ -535,6 +537,7 @@ impl SimCar {
             caf: true,
             csm: true,
             stn: false,
+            open_loop: false,
             cmm: 0,
             loud: false,
             acked: false,
@@ -779,6 +782,15 @@ impl SimCar {
     #[cfg(test)]
     pub(crate) fn with_stn(self) -> SimCar {
         SimCar { stn: true, ..self }
+    }
+
+    /// The same vehicle with its fuel system in open loop (the health check keeps no trims then).
+    #[cfg(test)]
+    pub(crate) fn in_open_loop(self) -> SimCar {
+        SimCar {
+            open_loop: true,
+            ..self
+        }
     }
 
     /// The same vehicle with one more module, at request ID `tx` answering from `rx` (not the request ID + 8, for the
@@ -1227,6 +1239,7 @@ impl SimCar {
             // MIL on, 1 code, evaporative test not yet run; after a clear: light off, no codes, every test to run again
             0x01 if self.cleared.contains(&0x7E0) => vec![0x00, 0x07, 0x65, 0x65],
             0x01 => vec![0x81, 0x07, 0x65, 0x04],
+            0x03 if self.open_loop => vec![0x04, 0x00],
             0x03 => vec![0x02, 0x00],
             0x04 => vec![52],
             0x05 => vec![(88 + 40) as u8],

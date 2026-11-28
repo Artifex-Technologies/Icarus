@@ -108,6 +108,16 @@ pub trait Link {
     }
     /// Learns from the vehicle's record (ICA-71): reads it refused for good are not asked again. Links that cannot ignore it.
     fn remember(&mut self, _record: &crate::record::Record) {}
+    /// The make named for a bench ECU on this connection (ICA-222: `benchmake::bind` keeps it only when the VIN was blank
+    /// then); it goes with the connection. None on a link that keeps none.
+    fn bench_make(&self) -> Option<String> {
+        None
+    }
+    /// Keeps (or forgets, None) the bench make for this connection; false when this link cannot keep one (then a bench
+    /// ECU's writes stay refused: `benchmake::bind` says so).
+    fn keep_bench_make(&mut self, _make: Option<String>) -> bool {
+        false
+    }
 }
 
 /// A boxed link is a link (the command line picks the kind of link when it connects: an adapter or a CAN interface).
@@ -150,6 +160,12 @@ impl<L: Link + ?Sized> Link for Box<L> {
     }
     fn remember(&mut self, record: &crate::record::Record) {
         (**self).remember(record)
+    }
+    fn bench_make(&self) -> Option<String> {
+        (**self).bench_make()
+    }
+    fn keep_bench_make(&mut self, make: Option<String>) -> bool {
+        (**self).keep_bench_make(make)
     }
 }
 
@@ -200,5 +216,12 @@ impl Link for Elm {
     }
     fn remember(&mut self, record: &crate::record::Record) {
         Elm::remember(self, record)
+    }
+    fn bench_make(&self) -> Option<String> {
+        Elm::bench_make(self)
+    }
+    fn keep_bench_make(&mut self, make: Option<String>) -> bool {
+        Elm::keep_bench_make(self, make);
+        true
     }
 }

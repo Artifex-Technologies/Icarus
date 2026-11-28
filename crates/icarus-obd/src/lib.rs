@@ -57,3 +57,21 @@ pub mod units;
 pub mod vehicledata;
 pub mod vehicles;
 pub mod vin;
+
+/// The environment variables Icarus's files are found by (HOME, XDG_CONFIG_HOME, XDG_STATE_HOME...): read from the
+/// environment, except in this crate's tests, where HOME is a folder of the test run's own and every XDG variable is
+/// unset, so no test reads or writes the real home or config folder.
+pub(crate) fn env(name: &str) -> Option<std::ffi::OsString> {
+    #[cfg(test)]
+    return (name == "HOME").then(|| test_home().into_os_string());
+    #[cfg(not(test))]
+    std::env::var_os(name)
+}
+
+/// This test run's own home folder (made when first asked), in the system's temporary folder.
+#[cfg(test)]
+pub(crate) fn test_home() -> std::path::PathBuf {
+    let d = std::env::temp_dir().join(format!("icarus-obd-test-home-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&d);
+    d
+}

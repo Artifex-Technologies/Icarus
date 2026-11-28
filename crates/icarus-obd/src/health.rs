@@ -8,13 +8,15 @@
 //!   ones only, as `uds::ModuleCodes` keeps them (a code marked only "not tested" is not a finding);
 //! - the readiness monitors (01 PID 01): which have not run;
 //! - misfire counts: Mode 06's per-cylinder counts (MIDs A1-AD) and, where the vehicle's module-data set has them, its
-//!   values whose name says misfire;
-//! - fuel trims: a short sample of short- and long-term trim per bank (01 PIDs 06-09) with coolant, engine speed and road
-//!   speed, the total (short + long) kept for a warm idle and, when the sample catches one, a cruise; and the gap between
-//!   the banks.
+//!   misfire counts (`is_misfire_count`: not a misfire's engine speed, load or margin), only those values' requests sent
+//!   (`vehicledata::read_values`);
+//! - fuel trims: a short sample of short- and long-term trim per bank (01 PIDs 06-09) with coolant, engine speed, road
+//!   speed and the fuel system's loop (01 PID 03), the total (short + long) kept for a warm idle and, when the sample
+//!   catches a steady one (within 5 mph), a cruise, from closed-loop rows only (open loop: warm-up, enrichment, fuel cut);
+//!   and the gap between the banks (bank 1 minus bank 2, compared signed).
 //!
 //! The history is kept per vehicle, in its folder's `Logs/health-history.jsonl` (the simulated vehicle's, or one with no
-//! folder, in Icarus's state folder): one JSON object a line, one line a health check, oldest first; a line that does not
+//! folder, in Icarus's state folder; none for a blank VIN, which every bench ECU would share): one JSON object a line, one line a health check, oldest first; a line that does not
 //! read is skipped. Its fields (every one but `when` may be missing, read as empty):
 //!
 //! - `when`: "2026-11-21 14:02", local time;
@@ -53,8 +55,9 @@ const WARM_C: f64 = 70.0;
 /// Idle: under 2 km/h (1 mph) and under 1,200 rpm.
 const IDLE_KMH: f64 = 2.0;
 const IDLE_RPM: f64 = 1200.0;
-/// Cruise: 48 km/h (30 mph) or more.
+/// Cruise: 48 km/h (30 mph) or more, steady within 8 km/h (5 mph) over the sample.
 const CRUISE_KMH: f64 = 48.0;
+const STEADY_KMH: f64 = 8.0;
 
 /// Where a trim was sampled.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -202,12 +205,40 @@ fn engine(r: &[crate::j1979::Reading]) -> Option<f64> {
         .map(|x| x.value)
 }
 
+/// Whether a module-data value is a misfire count: its name says misfire, and it is a count (its name says count, or its
+/// unit is none or counts), not a misfire's engine speed, load, margin or temperature.
+pub fn is_misfire_count(name: &str, unit: &str) -> bool {
+    let n = name.to_lowercase();
+    let u = unit.trim().to_lowercase();
+    n.contains("misfire")
+        && ![
+            "rpm",
+            "load",
+            "margin",
+            "speed",
+            "temp",
+            "time",
+            "threshold",
+            "limit",
+        ]
+        .iter()
+        .any(|w| n.contains(w))
+        && (n.contains("count") || u.is_empty() || u.starts_with("count"))
+}
+
+/// The module-data values a health check reads (`vehicledata::read_values`): the misfire counts.
+pub fn misfire_value(v: &icarus_core::moddata::ValueDef) -> bool {
+    is_misfire_count(&v.name, &v.unit)
+}
+
 /// Reads a health check from the vehicle on `link`, on `profile` (its modules' codes are read; None: OBD-II's range),
-/// with the vehicle's module data as already read (`module_values`, for its misfire values; None: none). Reads only.
+/// with the vehicle's module data as already read (`module_values`, for its misfire counts, `misfire_value`; None:
+/// none). `progress` is told what is being read. Reads only.
 pub fn check(
     link: &mut dyn Link,
     profile: Option<&Profile>,
     module_values: Option<&crate::vehicledata::VehicleValues>,
+    progress: &mut dyn FnMut(&str),
 ) -> Result<Check, ObdError> {
     use crate::j1979::{self, DtcKind};
     let mut c = Check {
@@ -243,14 +274,20 @@ pub fn check(
         }
     };
     let protocol = link.protocol();
-    for m in profile
+    let modules = profile
         .map(|p| crate::vehicles::candidates_on(p, protocol))
-        .unwrap_or_default()
-    {
+        .unwrap_or_default();
+    let n = modules.len();
+    for (i, m) in modules.into_iter().enumerate() {
         if m.unreachable(link.reach()).is_some() {
             continue;
         }
         let (tx, rx) = (m.tx, m.rx());
+        progress(&format!(
+            "Health check: module {} of {n}, {} ({tx:03X}): its codes...",
+            i + 1,
+            m.name
+        ));
         let read = crate::uds::at_module(link, &m, |l| {
             if !crate::uds::present(l, tx, rx)? {
                 return Ok(None);
@@ -275,6 +312,7 @@ pub fn check(
         }
     }
     // readiness monitors (the first module that gives them: the engine's, on most vehicles)
+    progress("Health check: readiness monitors and misfire counts...");
     if let Ok(a) = link.request(&[0x01, 0x01]) {
         if let Some(m) = a
             .iter()
@@ -320,14 +358,15 @@ pub fn check(
     if let Some(v) = module_values {
         for m in &v.modules {
             for (name, value, _) in &m.values {
-                if !name.to_lowercase().contains("misfire") {
-                    continue;
-                }
-                let n: String = value
-                    .trim()
+                let v = value.trim();
+                let n: String = v
                     .chars()
                     .take_while(|ch| ch.is_ascii_digit() || *ch == '.' || *ch == '-')
                     .collect();
+                // what follows the number is its unit
+                if !is_misfire_count(name, &v[n.len()..]) {
+                    continue;
+                }
                 if let Ok(count) = n.parse::<f64>() {
                     c.entry.misfires.push(Misfire {
                         name: format!("{} {name}", m.label),
@@ -350,9 +389,26 @@ pub fn check(
         c.notes
             .push("the engine offers no fuel trims (01 PIDs 06-09)".into());
     } else {
+        progress("Health check: sampling the fuel trims (a few seconds)...");
         sample_trims(link, &banks, &mut c)?;
     }
     Ok(c)
+}
+
+/// Whether the fuel system is in closed loop now (01 PID 03: each fuel system's status byte 02, or 00 where there is no
+/// second one): open loop (warm-up, enrichment, fuel cut while coasting) leaves the trims meaning nothing.
+fn closed_loop(link: &mut dyn Link) -> Result<bool, ObdError> {
+    let a = match link.request(&[0x01, 0x03]) {
+        Ok(a) => a,
+        Err(ObdError::NoData) => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    let ok = |x: &crate::elm::Answer| x.data.len() >= 4 && x.data[..2] == [0x41, 0x03];
+    Ok(a.iter()
+        .filter(|x| ok(x))
+        .find(|x| x.from == "7E8")
+        .or(a.iter().find(|x| ok(x)))
+        .is_some_and(|x| x.data[2] == 0x02 && matches!(x.data[3], 0x00 | 0x02)))
 }
 
 /// Samples the trims of `banks` ((bank, short PID, long PID)) with coolant, engine speed and road speed, and keeps each
@@ -369,7 +425,9 @@ fn sample_trims(
     // (condition, bank) -> (short sum, long sum, n)
     let mut sums: std::collections::BTreeMap<(Condition, u8), (f64, f64, usize)> =
         Default::default();
-    let (mut off, mut cold, mut between) = (0usize, None::<f64>, 0usize);
+    let (mut off, mut cold, mut between, mut open) = (0usize, None::<f64>, 0usize, 0usize);
+    // the cruise samples' road speeds: a cruise is kept only when steady
+    let (mut slowest, mut fastest) = (f64::INFINITY, f64::NEG_INFINITY);
     for _ in 0..SAMPLES {
         let r = crate::j1979::read_many(link, &pids)?;
         let v = |p: u8| r.iter().find(|x| x.0 == p).and_then(|x| engine(&x.1));
@@ -392,6 +450,15 @@ fn sample_trims(
             between += 1;
             continue;
         };
+        // open loop (enrichment, fuel cut while coasting): its trims are not the engine's correction
+        if !closed_loop(link)? {
+            open += 1;
+            continue;
+        }
+        if at == Condition::Cruise {
+            slowest = slowest.min(kmh);
+            fastest = fastest.max(kmh);
+        }
         for (bank, s, l) in banks {
             if let (Some(s), Some(l)) = (v(*s), v(*l)) {
                 let e = sums.entry((at, *bank)).or_default();
@@ -401,7 +468,22 @@ fn sample_trims(
             }
         }
     }
+    let unsteady = fastest - slowest > STEADY_KMH;
+    if unsteady {
+        c.notes.push(format!(
+            "the road speed changed by {:.0} mph while sampling: no cruise trims kept (hold a steady speed)",
+            (fastest - slowest) / 1.609_344
+        ));
+    }
+    if open > 0 {
+        c.notes.push(format!(
+            "{open} sample(s) left out: the fuel system was in open loop (warm-up, enrichment or fuel cut)"
+        ));
+    }
     for ((at, bank), (s, l, n)) in sums {
+        if at == Condition::Cruise && unsteady {
+            continue;
+        }
         if n >= AT_LEAST {
             c.entry.trims.push(Trim {
                 bank,
@@ -624,37 +706,25 @@ pub fn compare(now: &Entry, history: &[Entry]) -> Vec<Said> {
             ));
         }
     }
+    // the gap is bank 1's total minus bank 2's, compared signed: +3 to -3 is a move of 6, not steady
     for at in [Condition::WarmIdle, Condition::Cruise] {
         let Some(gap) = now.gap(at) else { continue };
-        let what = format!("bank-to-bank gap ({})", at.words());
+        let what = format!("bank-to-bank gap ({}, bank 1 minus bank 2)", at.words());
         match baseline(history, |e| e.gap(at)) {
-            Some((date, b)) if round1((gap.abs() - b.abs()).abs()) >= DRIFT_POINTS => {
-                out.push(said(
-                    Kind::Drift,
-                    format!(
-                        "{what} {} from {} to {} points since {date}",
-                        if gap.abs() > b.abs() {
-                            "grew"
-                        } else {
-                            "shrank"
-                        },
-                        plain(b.abs()),
-                        plain(gap.abs())
-                    ),
-                ))
-            }
-            Some((date, b)) => out.push(said(
-                Kind::Steady,
+            Some((date, b)) if round1((gap - b).abs()) >= DRIFT_POINTS => out.push(said(
+                Kind::Drift,
                 format!(
-                    "{what} {} points: steady ({} on {date})",
-                    plain(gap.abs()),
-                    plain(b.abs())
+                    "{what} moved from {} to {} since {date}: {} points",
+                    signed(b),
+                    signed(gap),
+                    plain((gap - b).abs())
                 ),
             )),
-            None => out.push(said(
-                Kind::Info,
-                format!("{what} {} points", plain(gap.abs())),
+            Some((date, b)) => out.push(said(
+                Kind::Steady,
+                format!("{what} {}: steady ({} on {date})", signed(gap), signed(b)),
             )),
+            None => out.push(said(Kind::Info, format!("{what} {}", signed(gap)))),
         }
     }
     out
@@ -711,16 +781,24 @@ pub struct Health {
 
 /// `check`'s result kept in the vehicle's history (`path`) and compared with it.
 pub fn keep(c: Check) -> Health {
-    let Some(vin) = c.vin.clone() else {
-        return Health {
-            said: compare(&c.entry, &[]),
-            check: c,
-            kept: Err(
-                "the VIN could not be read, so the check was not kept (it could be any vehicle's)"
-                    .into(),
-            ),
-        };
+    let unkept = |c: Check, why: &str| Health {
+        said: compare(&c.entry, &[]),
+        check: c,
+        kept: Err(why.into()),
     };
+    let Some(vin) = c.vin.clone() else {
+        return unkept(
+            c,
+            "the VIN could not be read, so the check was not kept (it could be any vehicle's)",
+        );
+    };
+    // every blank bench ECU would share one history (and a folder named 00000...)
+    if crate::benchmake::blank(&vin) {
+        return unkept(
+            c,
+            "blank VIN, so the check was not kept (it could be any bench ECU's)",
+        );
+    }
     match path(&vin).and_then(|p| keep_in(&p, &c).map(|s| (p, s))) {
         Ok((p, said)) => Health {
             check: c,
@@ -805,7 +883,7 @@ mod tests {
     fn a_check_on_the_simulated_vehicle_reads_only() {
         let mut e = sim();
         e.take_sent();
-        let c = check(&mut e, Some(&toyota()), None).unwrap();
+        let c = check(&mut e, Some(&toyota()), None, &mut |_| {}).unwrap();
         assert_eq!(c.vin.as_deref(), Some(crate::sim::VIN));
         assert!(
             c.entry.codes.iter().any(|x| x.starts_with("P0171 stored")),
@@ -844,7 +922,7 @@ mod tests {
     /// drift, and one that moved 1 point is steady, not drift. The history goes through its file.
     #[test]
     fn a_trim_that_moved_5_points_is_drift_and_a_steady_one_is_not() {
-        let now = check(&mut sim(), Some(&toyota()), None).unwrap();
+        let now = check(&mut sim(), Some(&toyota()), None, &mut |_| {}).unwrap();
         let total = now.entry.trims[0].total();
         let dir = std::env::temp_dir().join(format!("icarus-health-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -861,7 +939,7 @@ mod tests {
         )
         .unwrap();
         // a fresh simulated vehicle answers just as the first did
-        let c = check(&mut sim(), Some(&toyota()), None).unwrap();
+        let c = check(&mut sim(), Some(&toyota()), None, &mut |_| {}).unwrap();
         assert_eq!(c.entry.trims[0].total(), total);
         let said = keep_in(&drifted, &c).unwrap();
         let drift: Vec<&Said> = said.iter().filter(|s| s.kind == Kind::Drift).collect();
@@ -913,13 +991,14 @@ mod tests {
             .filter(|s| s.kind == Kind::Drift)
             .map(|s| s.text.as_str())
             .collect();
-        // the gap went from 1 to 4.5 points: 3.5, not drift
+        // the gap (bank 1 minus bank 2) went from +1 to -4.5: 5.5 points, compared signed
         assert_eq!(
             text,
-            ["bank 2 total trim (warm idle) moved from -2 to +4 since 2026-11-21: 6 points leaner-correcting (more fuel added)"]
+            [
+                "bank 2 total trim (warm idle) moved from -2 to +4 since 2026-11-21: 6 points leaner-correcting (more fuel added)",
+                "bank-to-bank gap (warm idle, bank 1 minus bank 2) moved from +1 to -4.5 since 2026-11-21: 5.5 points",
+            ]
         );
-        assert!(said.iter().any(|s| s.kind == Kind::Steady
-            && s.text == "bank-to-bank gap (warm idle) 4.5 points: steady (1 on 2026-11-21)"));
         assert!(said.iter().any(|s| s.kind == Kind::Steady
             && s.text == "bank 1 total trim (warm idle) -0.5: steady (-1 on 2026-11-21)"));
         let richer = compare(&before, &[now]);
@@ -938,5 +1017,121 @@ mod tests {
         .unwrap();
         assert_eq!(load_in(&f), vec![before]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Review of ICA-214: a gap from +3 to -3 (the same size, the other bank richer now) is a move of 6, not steady; a
+    /// gap that kept its size and side is steady.
+    #[test]
+    fn the_gap_is_compared_signed() {
+        let before = earlier(
+            "2026-11-21 09:00",
+            vec![trim(1, 0.0, 3.0), trim(2, 0.0, 0.0)],
+        );
+        let flipped = earlier(
+            "2026-11-28 09:00",
+            vec![trim(1, 0.0, 0.0), trim(2, 0.0, 3.0)],
+        );
+        let said = compare(&flipped, std::slice::from_ref(&before));
+        assert!(
+            said.iter().any(|s| s.kind == Kind::Drift
+                && s.text.starts_with("bank-to-bank gap")
+                && s.text.contains("from +3 to -3")
+                && s.text.ends_with("6 points")),
+            "{said:?}"
+        );
+        let same = earlier(
+            "2026-11-28 09:00",
+            vec![trim(1, 1.0, 3.0), trim(2, 1.0, 0.0)],
+        );
+        let said = compare(&same, &[before]);
+        assert!(said.iter().all(|s| s.kind != Kind::Drift), "{said:?}");
+    }
+
+    /// Review of ICA-214: only misfire counts are counted, not a misfire's engine speed, load or margin.
+    #[test]
+    fn only_misfire_counts_count() {
+        assert!(is_misfire_count("Cylinder 3 misfire count", "rpm"));
+        assert!(is_misfire_count("Misfire cylinder 1", ""));
+        assert!(is_misfire_count("Misfires, cylinder 2", "counts"));
+        for (name, unit) in [
+            ("Misfire RPM", "rpm"),
+            ("Misfire RPM", ""),
+            ("Misfire Load", "%"),
+            ("Misfire Margin", ""),
+            ("Misfire cylinder 1", "%"),
+            ("Knock count", ""),
+        ] {
+            assert!(!is_misfire_count(name, unit), "{name} ({unit})");
+        }
+        let values = crate::vehicledata::VehicleValues {
+            set: "t".into(),
+            attribution: String::new(),
+            notes: vec![],
+            modules: vec![crate::vehicledata::ModuleValues {
+                label: "7E0".into(),
+                name: "engine".into(),
+                values: vec![
+                    ("Misfire RPM".into(), "850 rpm".into(), false),
+                    ("Misfire Load".into(), "31 %".into(), false),
+                    ("Cylinder 2 misfire count".into(), "4".into(), false),
+                ],
+                notes: vec![],
+            }],
+        };
+        let c = check(&mut sim(), Some(&toyota()), Some(&values), &mut |_| {}).unwrap();
+        let from_data: Vec<&Misfire> = c
+            .entry
+            .misfires
+            .iter()
+            .filter(|m| m.name.starts_with("7E0"))
+            .collect();
+        assert_eq!(
+            from_data,
+            [&Misfire {
+                name: "7E0 Cylinder 2 misfire count".into(),
+                count: 4.0
+            }]
+        );
+    }
+
+    /// Review of ICA-214: in open loop (warm-up, enrichment, fuel cut) no trim is kept, and that is said. A check is told
+    /// what is being read as it goes.
+    #[test]
+    fn open_loop_keeps_no_trims() {
+        let mut e = Elm::connect(Box::new(SimCar::new().in_open_loop())).unwrap();
+        let mut said = Vec::new();
+        let c = check(&mut e, Some(&toyota()), None, &mut |s| {
+            said.push(s.to_string())
+        })
+        .unwrap();
+        assert!(c.entry.trims.is_empty(), "{:?}", c.entry.trims);
+        assert!(
+            c.notes.iter().any(|n| n.contains("open loop")),
+            "{:?}",
+            c.notes
+        );
+        assert!(said.iter().any(|s| s.contains("module 1 of")), "{said:?}");
+        assert!(
+            said.iter().any(|s| s.contains("sampling the fuel trims")),
+            "{said:?}"
+        );
+    }
+
+    /// Review of ICA-214: a check of a blank bench ECU (no VIN, 17 zeros) is shown, never kept: every such ECU would share
+    /// one history and a folder named 00000...
+    #[test]
+    fn a_blank_vin_is_not_kept() {
+        for vin in [None, Some("00000000000000000".to_string())] {
+            let h = keep(Check {
+                vin: vin.clone(),
+                ..Default::default()
+            });
+            assert!(h.kept.is_err(), "{vin:?}");
+        }
+        let h = keep(Check {
+            vin: Some("00000000000000000".into()),
+            ..Default::default()
+        });
+        assert!(h.kept.unwrap_err().starts_with("blank VIN"));
     }
 }

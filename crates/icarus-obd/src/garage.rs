@@ -209,7 +209,7 @@ pub fn set_details(vin: &str, d: &Details) -> Result<(), String> {
 
 /// The vehicle library: `~/Documents/Icarus/Vehicles`, a folder per vehicle.
 pub fn library() -> PathBuf {
-    std::env::var_os("HOME")
+    crate::env("HOME")
         .map(PathBuf::from)
         .unwrap_or_default()
         .join("Documents/Icarus/Vehicles")

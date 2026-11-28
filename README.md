@@ -74,16 +74,20 @@ units only where the scaling is certain.
 `icarus obd health --adapter A` (or the Health check card on the Vehicle page) answers "how does everything look?" in one
 go, each part beside this vehicle's own earlier checks: the failed codes (OBD-II's stored, pending and permanent, and each
 of the profile's modules' own, a code marked only "not tested" left out), the readiness monitors not yet run, the misfire
-counts (Mode 06's per cylinder, and the module data's values that say misfire where the vehicle's set has them), and the
-total fuel trim (short + long) per bank at a warm idle, and at a cruise (30 mph or more) when the check runs while I
-drive, with the gap between the banks. The trims are a short sample of a few seconds, kept only with the engine warm
-(coolant 158 °F or more). Drift is said in words: a total trim or the bank-to-bank gap that moved 5 points or more since
+counts (Mode 06's per cylinder, and the module data's misfire counts where the vehicle's set has them: only those
+values' requests are sent, and a misfire's engine speed, load or margin is not a count), and the total fuel trim (short +
+long) per bank at a warm idle, and at a cruise (30 mph or more, steady within 5 mph) when the check runs while I drive,
+with the gap between the banks (bank 1 minus bank 2, compared signed, so +3 to -3 is a move of 6). The trims are a short
+sample of a few seconds, kept only with the engine warm (coolant 158 °F or more) and the fuel system in closed loop (rows
+in open loop, warm-up, enrichment or fuel cut, are left out and counted). Every module's codes are read first, so a check
+takes about as long as a module scan; the status line says where it is. Drift is said in words: a total trim or the
+bank-to-bank gap that moved 5 points or more since
 the earliest of the last ten checks is drift ("bank 2 total trim (warm idle) moved from -2 to +4 since 2026-11-21: 6
 points leaner-correcting"), less is steady; a new code, a monitor no longer complete and misfires up by 5 or more are
 said too. It only reads (nothing cleared, nothing written to the vehicle). Each check is one line in the vehicle's folder,
 `Logs/health-history.jsonl` (one JSON object a line: `when`, `codes`, `monitors_incomplete`, `monitors_complete`,
 `misfires` as `{name, count}`, `trims` as `{bank, at: "warm-idle"|"cruise", short, long, samples}`, in percent); with no
-VIN the check is shown, not kept.
+VIN, or a blank one (every bench ECU would share it), the check is shown, not kept.
 
 Clearing (`icarus obd clear [--module ID]`, or Clear codes in the window) asks first, needs the engine off, and saves a
 report before it erases anything: the freeze frame goes with the codes, and every readiness monitor starts over. Only the
@@ -118,7 +122,7 @@ Each vehicle has a Read-Only switch on the Garage page (or `icarus garage read-o
 still reads everything (codes, live data, module values, reports, recordings) and refuses to clear codes, run actuator
 tests or change settings on that vehicle, before anything is sent. Each write reads
 the VIN from the vehicle on the port at that moment, so the switch follows the vehicle; while any vehicle is switched, one
-whose VIN cannot be read is refused too. Under the write features, the adapter link itself refuses any request that would
+whose VIN cannot be read, or is blank (filler such as 17 zeros), is refused too. Under the write features, the adapter link itself refuses any request that would
 change a switched vehicle, whichever part of Icarus sends it: only reads (OBD-II 01-0A, KWP2000 and UDS 18, 19, 1A, 21,
 22), tester present and the requests that hand control back (the default session, an output returned to its module) go,
 so a test already running can always be ended. The Vehicle page's Writes line shows the connected vehicle's switch. The list is
@@ -137,16 +141,21 @@ when it does not answer so (an Icarus from before this), the later start says th
 ends with an error, and I close that window and start again. A start whose line does not parse says so itself (exit 2)
 and hands nothing to the open window.
 
-A spare ECM on the bench with a blank or foreign VIN gives no make, and the airbag caution (a module the make's profile
-does not name could be the airbag module) would then refuse every module write to it. So a bench session names its make
-once: `--make toyota` on `obd clear`, `test`, `service`, `setting` and `setting-undo` (and the lists `tests`, `services`,
-`settings`), or Bench make in the window's connection row (chosen before connecting). It is a profile's own name, never
-guessed; it is used only when the VIN is blank, unreadable or names no profile, and when the VIN names a make, the named
-one must agree or the write is refused with the mismatch said. Every confirmation says the make it follows, the Vehicle
-page's "Make for writes" line too, and the action log keeps it ("make chosen by me: toyota, VIN blank"). It only picks the
-profile the caution follows: the airbag list (Toyota's 780 stays refused) and the key modules' fence hold whatever it
-says. With any vehicle's Read-Only switch on, a blank VIN is still refused by the switch (it cannot tell the bench ECU
-from that vehicle), so the switch goes off for bench work.
+A spare ECM on the bench with a blank VIN gives no make, and the airbag caution (a module the make's profile does not
+name could be the airbag module) would then refuse every module write to it. So a bench connection can be given its make:
+`--make toyota` on `obd clear`, `test`, `service`, `setting` and `setting-undo` (and the lists `tests`, `services`,
+`settings`), or Bench make in the window's connection row (chosen before pressing Connect). It is a profile's own name,
+never guessed, and it fails closed: it is kept only when the VIN reads blank as the connection opens (none, all 0s,
+spaces or F's, or not 17 characters), and only for that connection: disconnecting empties the field, and a reconnect, an
+automatic connection or another vehicle starts without it. A well-formed VIN refuses it: one that names another make
+(the mismatch said), and one that names no profile (a friend's car of a make Icarus has no profile for keeps the
+caution). At each write the VIN is read again: still blank (or unreadable, on that blank connection) takes the bench
+make; anything else is refused. Every confirmation says the make it follows, the Vehicle page's "Make for writes" line
+too, and the action log keeps it ("make chosen by me: toyota, VIN blank"). It only picks the profile the caution follows:
+the airbag list (Toyota's 780 stays refused) and the key modules' fence hold whatever it says. It is kept on ELM327 and
+OBDLink connections; on the other links a bench ECU's module writes stay refused. With any vehicle's Read-Only switch on,
+a blank VIN is refused by the switch too (it cannot tell the bench ECU from that vehicle), so the switch goes off for
+bench work.
 
 A clear, a service routine or a setting change confirmed in the window belongs to the connection it was confirmed on: its
 dialog closes when the adapter disconnects, connects again or fails, and a yes that reaches the vehicle side after the

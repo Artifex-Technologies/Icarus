@@ -436,9 +436,7 @@ pub fn selftest_values(t: &crate::mode06::TestResult) -> String {
 /// In the vehicle's own folder (`~/Documents/Icarus/Vehicles/<vehicle>/Reports/report-2026-11-07-19-40.md`), or
 /// `~/Documents/Icarus/reports` when the vehicle gave no VIN (or is the simulation).
 pub fn default_path(d: &Diagnosis) -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default();
+    let home = crate::env("HOME").map(PathBuf::from).unwrap_or_default();
     let stamp: String = d
         .when
         .chars()

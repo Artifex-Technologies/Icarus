@@ -125,12 +125,15 @@ pub(crate) fn switch_for_test(vins: &[&str]) {
 }
 
 /// The VINs switched to read-only.
+#[cfg(not(test))]
 pub fn read_only() -> BTreeSet<String> {
-    #[cfg(test)]
-    if let Some(l) = FOR_TEST.with(|t| t.borrow().clone()) {
-        return l;
-    }
     path().map(|p| list_in(&p)).unwrap_or_default()
+}
+
+/// In tests: the test's own list (`switch_for_test`), else none switched; never the config folder's file.
+#[cfg(test)]
+pub fn read_only() -> BTreeSet<String> {
+    FOR_TEST.with(|t| t.borrow().clone()).unwrap_or_default()
 }
 
 /// Turns a vehicle's Read-Only switch on or off.
@@ -188,6 +191,17 @@ pub fn writes_allowed(link: &mut dyn Link) -> Result<(), String> {
         return Ok(());
     }
     match crate::j1979::vin(link) {
+        // a blank VIN (all filler, or not 17 characters: a bench ECU) cannot be told from a switched vehicle's
+        Ok(Some(v)) if crate::benchmake::blank(&v) => {
+            crate::audit::log(
+                "write refused: the VIN is blank, so the Read-Only switch cannot be checked",
+            );
+            Err(
+                "read-only: the vehicle's VIN is blank, so Icarus cannot tell whether its Read-Only switch is on, and \
+                 writes nothing"
+                    .into(),
+            )
+        }
         Ok(Some(v)) if !list.contains(&normal(&v)) => Ok(()),
         Ok(Some(v)) => {
             crate::audit::log(&format!(
@@ -238,6 +252,26 @@ mod tests {
         set_in(&f, SWITCHED, false).unwrap();
         assert_eq!(list_in(&f).len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// While any vehicle is switched, a bench ECU's blank VIN (17 zeros, 17 F's, none at all) is refused: it cannot be
+    /// told from the switched vehicle's. With none switched, it is not the switch's business. Without `switch_for_test`
+    /// a test sees no vehicle switched, never the config folder's list.
+    #[test]
+    fn a_blank_vin_is_refused_while_any_vehicle_is_switched() {
+        FOR_TEST.with(|t| *t.borrow_mut() = None);
+        assert!(read_only().is_empty(), "a test never reads the real list");
+        switched(&[SWITCHED]);
+        for vin in ["00000000000000000", "FFFFFFFFFFFFFFFFF", ""] {
+            let mut e = Elm::connect(Box::new(SimCar::engine_off().with_vin(vin))).unwrap();
+            let why = writes_allowed(&mut e).unwrap_err();
+            assert!(why.starts_with("read-only:"), "{vin:?}: {why}");
+            assert!(crate::clear::clear_obd(&mut e).is_err(), "{vin:?}");
+        }
+        switched(&[]);
+        let mut e =
+            Elm::connect(Box::new(SimCar::engine_off().with_vin("00000000000000000"))).unwrap();
+        writes_allowed(&mut e).unwrap();
     }
 
     #[test]

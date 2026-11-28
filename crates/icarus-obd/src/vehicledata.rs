@@ -222,6 +222,27 @@ pub fn read(
     module: Option<&str>,
     us: bool,
 ) -> Result<VehicleValues, String> {
+    read_with(link, profiles, module, None, us)
+}
+
+/// `read`, of only the values `only` takes (the health check's misfire counts, ICA-214): a request none of whose values
+/// it takes is not sent, and a module with none is not asked.
+pub fn read_values(
+    link: &mut dyn Link,
+    profiles: &[Profile],
+    only: &dyn Fn(&icarus_core::moddata::ValueDef) -> bool,
+    us: bool,
+) -> Result<VehicleValues, String> {
+    read_with(link, profiles, None, Some(only), us)
+}
+
+fn read_with(
+    link: &mut dyn Link,
+    profiles: &[Profile],
+    module: Option<&str>,
+    only: Option<&dyn Fn(&icarus_core::moddata::ValueDef) -> bool>,
+    us: bool,
+) -> Result<VehicleValues, String> {
     let Chosen {
         set,
         scope,
@@ -232,7 +253,10 @@ pub fn read(
     } = choose_for(link, profiles)?;
     let today = report::now()[..10].to_string();
     let wanted = |m: &icarus_core::moddata::ModuleDef| match module {
-        None => !m.requests.is_empty(),
+        None => {
+            !m.requests.is_empty()
+                && only.is_none_or(|f| m.requests.iter().any(|r| r.values.iter().any(f)))
+        }
         Some(want) => {
             m.module.label().eq_ignore_ascii_case(want)
                 || u32::from_str_radix(want.trim_start_matches("0x"), 16).ok() == Some(m.module.tx)
@@ -261,7 +285,7 @@ pub fn read(
         {
             mv.notes.push(why);
         }
-        for (r, o) in moddata::read_module(link, &mut pacer, &set.gates, m, &scope, None) {
+        for (r, o) in moddata::read_module(link, &mut pacer, &set.gates, m, &scope, only) {
             changed |= state.record(moddata::key(m, r), &o, &today);
             match o {
                 Outcome::Values(vs) => {

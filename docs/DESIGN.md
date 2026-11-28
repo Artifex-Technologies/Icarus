@@ -10,7 +10,7 @@ bidirectional shop scanner, a tuning suite and a bus analyser: on Linux, for man
 
 | Area | What Icarus has |
 | --- | --- |
-| Codes | every module (UDS, KWP2000), meanings, where to start, parts and look-up links, freeze frame, readiness, reports, clearing (report first), Mode 06 test results (CAN); a health check (`obd health`, the Vehicle page's card; ICA-214): failed codes, monitors, misfires and total fuel trims per bank with the gap between banks, each beside the vehicle's own earlier checks (`Logs/health-history.jsonl`, one JSON line a check), drift said in words (5 points or more), reads only |
+| Codes | every module (UDS, KWP2000), meanings, where to start, parts and look-up links, freeze frame, readiness, reports, clearing (report first), Mode 06 test results (CAN); a health check (`obd health`, the Vehicle page's card; ICA-214): failed codes, monitors, misfire counts and total fuel trims per bank (warm, closed loop; a cruise only when steady) with the signed gap between banks, each beside the vehicle's own earlier checks (`Logs/health-history.jsonl`, one JSON line a check; none for a blank VIN), drift said in words (5 points or more), reads only |
 | Live data | 92 standard values with graphs; recording a drive from the window or with no window (`icarus record`, and `--auto` with its user service `icarus-record`: starts when the engine runs, ends once it has been off a while; ICA-208), one recorder for both (`icarus_obd::drive`): every value the vehicle offers (the fast ones every sweep, the rest in turn) and each module's own values from the vehicle's module-data set through module data's gates and pacer, their raw answers kept so `icarus record redecode` reads old drives with a better set (ICA-44), the watched ones (knock feedback, gear, lock-up, shift lever and sport mode by default, matched as whole words, one request a module and name; `--watch NAME` or the window's Settings) every sweep, two requests a sweep within a 150 ms budget, never waiting on a busy module (one that answers busy is left alone a while), the rest in turn (one every other row while watching), the rows a second said after 10 s (ICA-218); a part file per ignition cycle; laptop kept awake; the adapter held alone; goes on through adapter glitches, opening the adapter again (ICA-112); a tone and a notice when it starts, stalls, resumes and stops (ICA-209); the Logs page (fuel trims by driving condition, charts on one time line, following a recording as it is written; Compare, two drives or more side by side at matching conditions, as `icarus logs compare`, each drive with the fuel it ran on, or pooled by estimated blend with `--by-fuel`, ICA-211); what an A/B question still needs (`icarus logs experiment NAME A B`: seconds each side has in each engine speed and load group, what driving is missing in words, done when every group both sides reached has the minimum; kept in the vehicle's `experiments.toml`, ICA-212); `drive_logs` for assistants |
 | Bidirectional | actuator tests, fenced (hold-to-run, conditions, airbag ban, key modules fenced by address) |
 | Configuration | tires/gears calculator, speedometer check, battery and charging check |
@@ -59,14 +59,19 @@ service routine or a clear aimed at a module the profile does not name is refuse
 profiles load, a learned one is not added to the user's file, and at the moment of the write (the make picked by the VIN
 read then) nothing is sent to the module.
 
-**A bench session's make** (ICA-222, `crates/icarus-obd/src/benchmake.rs`). A spare ECM with a blank or foreign VIN gives
-no make, so the caution above would refuse every module write to it. A session names its make once (`--make NAME` on the
-commands that write, Bench make in the window's connection row): a profile's own id, never a guess, used only when the
-VIN is blank (none, or only filler), unreadable or names no profile; a VIN that names a make must agree, or the write is
-refused and the mismatch said. Every confirmation shows the make (from the VIN, or "make chosen by me: toyota, VIN
-blank"), and the action log keeps it. It picks only the profile the caution follows; the airbag list and the key modules'
-fence do not depend on the make and hold whatever it says, and the Read-Only switch still refuses a blank VIN while any
-vehicle is switched.
+**A bench connection's make** (ICA-222, `crates/icarus-obd/src/benchmake.rs`). A spare ECM with a blank VIN gives no
+make, so the caution above would refuse every module write to it. A connection can be given its make (`--make NAME` on
+the commands that write, Bench make in the window's connection row, sent with the Connect button only): a profile's own
+id, never a guess, kept on the link (`Link::bench_make`) only when the VIN reads blank as it is named (none, only filler,
+or not 17 characters), so it goes with the connection: a reconnect, an automatic connection, another vehicle start
+without it, and the window empties its field on disconnect. A well-formed VIN refuses it, one that names another make
+(the mismatch said) as much as one that names no profile (the caution stays). At each write the VIN is read again: blank,
+or unreadable on that blank connection, takes the kept make; a VIN that names a make must agree; one that names no
+profile is refused. Every confirmation shows the make (from the VIN, or "make chosen by me: toyota, VIN blank"), and the
+action log keeps it. It picks only the profile the caution follows; the airbag list and the key modules' fence do not
+depend on the make and hold whatever it says. Only the ELM327/STN link keeps one; on the others a bench ECU's module
+writes stay refused. The Read-Only switch refuses a blank VIN (none, or filler such as 17 zeros) while any vehicle is
+switched, since it cannot tell a bench ECU from that vehicle.
 
 **The key modules' fence** (ICA-101, `crates/icarus-obd/src/fence.rs`). Immobilizer, smart-key and certification
 modules are fenced by address, whatever a definition calls itself: a profile's `[[module]]` or a module-data file's
@@ -118,7 +123,7 @@ A module is bricked when a write stops halfway or puts the wrong thing in. Icaru
 9. **Logged.** Every write in the action log.
 10. **The Read-Only switch.** Every write path asks `lock::writes_allowed` first: when the vehicle on the port (by the VIN
     read at that moment) has its Read-Only switch on (Garage page, `icarus garage read-only VIN on`), the write is refused;
-    while any vehicle is switched, one whose VIN cannot be read is refused too (done: clearing, actuator tests, settings).
+    while any vehicle is switched, one whose VIN cannot be read or is blank (filler such as 17 zeros) is refused too (done: clearing, actuator tests, settings).
     Under them, `Elm::request` and `request_to` refuse any request `lock::changes_vehicle` names (everything but reads,
     tester present and hand-backs) to a switched vehicle, so a write path that forgets the check still cannot reach it.
     Any other link to a vehicle (a J2534 device, SocketCAN diagnostics) must do the same before it sends (done), and no

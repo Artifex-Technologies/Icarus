@@ -1008,6 +1008,12 @@ impl App {
                 Event::Connected(info) => {
                     self.link = Link::On;
                     self.dropped.clear();
+                    // the field shows the bench make this connection kept (ICA-222), none on any other: a reconnect,
+                    // an auto-connect or another vehicle starts without it
+                    self.bench_make = match &info.make {
+                        Ok(m) if m.chosen => m.make.clone().unwrap_or_default(),
+                        _ => String::new(),
+                    };
                     // the adapter to start with next time, and to come back to when it answers again
                     autoconn::remember(self.adapter.trim());
                     self.auto = self.adapter.trim() != "sim";
@@ -1126,6 +1132,8 @@ impl App {
                 Event::Disconnected => {
                     self.link = Link::Off;
                     self.info = None;
+                    // a bench make belongs to the connection it was named for (ICA-222): gone with it
+                    self.forget_bench_make();
                     self.live_on = false;
                     self.status = "Not connected.".into();
                 }
@@ -1381,7 +1389,7 @@ impl App {
                         self.user_off = false;
                         self.auto = self.adapter.trim() != "sim";
                         self.last_try = std::time::Instant::now();
-                        let _ = self.tx.send(Cmd::Connect(self.adapter.trim().to_string()));
+                        self.connect_with_bench_make();
                     }
                 }
                 Link::Busy => {
@@ -1402,7 +1410,6 @@ impl App {
         );
         // ICA-222: a bench ECU with a blank or foreign VIN gives no make, so every module write to it would be refused;
         // its make is named here, once, before connecting (never guessed: a profile's own name)
-        let before = self.bench_make.clone();
         ui.horizontal(|ui| {
             ui.label("Bench make");
             ui.add_enabled_ui(self.link == Link::Off, |ui| {
@@ -1429,9 +1436,20 @@ impl App {
                 .weak(),
             );
         });
-        if self.bench_make != before {
-            icarus_obd::benchmake::choose(Some(self.bench_make.as_str()));
-        }
+    }
+
+    /// Connect (the button): the bench make chosen (ICA-222) goes with this connection alone; an automatic connection or
+    /// a reconnect sends none.
+    fn connect_with_bench_make(&mut self) {
+        let m = Some(self.bench_make.clone()).filter(|m| !m.is_empty());
+        let _ = self.tx.send(Cmd::BenchMake(m));
+        let _ = self.tx.send(Cmd::Connect(self.adapter.trim().to_string()));
+    }
+
+    /// Forgets the bench make (ICA-222): the field emptied, and the worker told, so no later connection takes it.
+    fn forget_bench_make(&mut self) {
+        self.bench_make.clear();
+        let _ = self.tx.send(Cmd::BenchMake(None));
     }
 
     /// The make writes follow on the connection open now, as every confirmation says it (ICA-222).
@@ -1800,7 +1818,7 @@ impl App {
         });
         let mut check_health = false;
         card(ui, pal, "Health check", |ui| {
-            ui.label(RichText::new("How everything looks, beside this vehicle's own earlier checks: failed codes (every module), monitors not yet run, misfire counts and the total fuel trim per bank (warm idle, and a cruise when driving). Reads only; each check is kept in the vehicle's folder (Logs/health-history.jsonl).").weak());
+            ui.label(RichText::new("How everything looks, beside this vehicle's own earlier checks: failed codes (every module), monitors not yet run, misfire counts and the total fuel trim per bank (warm idle, and a cruise when driving). It reads every module's codes first (as long as a module scan), then samples the fuel trims for a few seconds; the status line says where it is. Reads only; each check is kept in the vehicle's folder (Logs/health-history.jsonl).").weak());
             ui.horizontal(|ui| {
                 if ui
                     .add_enabled(
@@ -1819,7 +1837,7 @@ impl App {
                     ui.spinner();
                     ui.label(
                         RichText::new(
-                            "keep the engine running: the fuel trims are sampled for a few seconds",
+                            "keep the engine running (warm, at idle or a steady cruise): the status line says what is being read",
                         )
                         .small()
                         .weak(),
@@ -5971,8 +5989,20 @@ fn watch_field(names: &[String]) -> String {
 #[cfg(test)]
 pub(crate) struct TestHome {
     pub(crate) dir: std::path::PathBuf,
+    /// The variables as they were before, put back when it ends (the next test, or a test not using it, sees them).
+    before: Vec<(&'static str, Option<std::ffi::OsString>)>,
     _one_at_a_time: std::sync::MutexGuard<'static, ()>,
 }
+
+/// The environment a `TestHome` sets, and puts back.
+#[cfg(test)]
+const TEST_HOME_VARS: [&str; 5] = [
+    "HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_STATE_HOME",
+    "XDG_DATA_HOME",
+    icarus_obd::lock::SESSION_ENV,
+];
 
 #[cfg(test)]
 impl TestHome {
@@ -5989,6 +6019,10 @@ impl TestHome {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        let before = TEST_HOME_VARS
+            .iter()
+            .map(|v| (*v, std::env::var_os(v)))
+            .collect();
         std::env::set_var("HOME", &dir);
         std::env::set_var("XDG_CONFIG_HOME", dir.join("config"));
         std::env::set_var("XDG_STATE_HOME", dir.join("state"));
@@ -5997,6 +6031,7 @@ impl TestHome {
         std::env::remove_var(icarus_obd::lock::SESSION_ENV);
         TestHome {
             dir,
+            before,
             _one_at_a_time: one,
         }
     }
@@ -6005,6 +6040,13 @@ impl TestHome {
 #[cfg(test)]
 impl Drop for TestHome {
     fn drop(&mut self) {
+        // put back while still holding the lock (the guard is dropped after this)
+        for (v, was) in &self.before {
+            match was {
+                Some(x) => std::env::set_var(v, x),
+                None => std::env::remove_var(v),
+            }
+        }
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
@@ -6450,6 +6492,35 @@ mod window_writes {
             a.status.starts_with("Waiting for the adapter")
         });
         assert!(none_open(&app), "gone after Failed");
+        drop(app);
+        worker.join().unwrap();
+        drop(home);
+    }
+
+    /// ICA-222 review: the window's Bench make is emptied when the connection ends, and shows only what the connection
+    /// kept: named for a vehicle whose VIN names its make, it is not kept, and the field says so (empty).
+    #[test]
+    fn the_bench_make_field_goes_with_the_connection() {
+        let home = TestHome::new("app-ica222");
+        let (mut app, worker) = window(icarus_obd::lock::session_allows_changes);
+        until(&mut app, "the connection", |a| a.link == Link::On);
+        app.bench_make = "toyota".into();
+        // as the Disconnect button does: no automatic connection after it
+        app.user_off = true;
+        let _ = app.tx.send(Cmd::Disconnect);
+        until(&mut app, "the disconnect", |a| a.link == Link::Off);
+        assert_eq!(app.bench_make, "", "forgotten with the connection");
+        app.bench_make = "toyota".into();
+        app.adapter = "other".into();
+        app.connect_with_bench_make();
+        until(&mut app, "the second connection", |a| number(a) == 2);
+        assert_eq!(
+            app.bench_make, "",
+            "a VIN that names its make keeps no bench make"
+        );
+        let made = app.info.as_ref().unwrap().make.as_ref().unwrap();
+        assert_eq!((made.make.as_deref(), made.chosen), (Some("toyota"), false));
+        assert_eq!(app.make_words(), "make from the VIN: toyota");
         drop(app);
         worker.join().unwrap();
         drop(home);
