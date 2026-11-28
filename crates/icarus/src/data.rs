@@ -190,6 +190,15 @@ fn finish_import(
             println!("  {n:>4}  {w}");
         }
     }
+    if !imp.corrected.is_empty() {
+        println!(
+            "Corrected, as checked on a vehicle ({}):",
+            imp.corrected.len()
+        );
+        for c in &imp.corrected {
+            println!("  {c}");
+        }
+    }
     if !imp.notes.is_empty() {
         println!("Assumed ({}; the first few):", imp.notes.len());
         for n in imp.notes.iter().take(8) {

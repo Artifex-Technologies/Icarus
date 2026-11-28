@@ -301,6 +301,8 @@ pub struct SimCar {
     brd: bool,
     /// The adapter answers a speed change OK and then stays where it was, saying nothing more (`lying_about_speed`).
     brd_lies: bool,
+    /// The status bits a module supports (`with_availability`), where a test gives it fewer than all (FF).
+    availability: Vec<(u32, u8)>,
 }
 
 /// What the simulated adapter answers ATI (and ATZ).
@@ -370,6 +372,112 @@ const SUPPORTED_ONLY_TRANSMISSION: &[u8] = &[
     0x07, 0x15, 0x00, 0x10, // P0715
     0x07, 0x50, 0x00, 0x40, // P0750
 ];
+
+/// A UDS service the simulated modules know: its identifier, the shortest request it takes (the identifier and, for a
+/// service with sub-functions, the sub-function), its sub-functions (none: a service without them), and whether only the
+/// extended session (10 03) takes it at all.
+struct UdsService {
+    sid: u8,
+    min_len: usize,
+    subs: &'static [u8],
+    extended_only: bool,
+}
+
+/// The services every simulated UDS module takes (diagnostic session control, ECU reset, clearing and reading codes,
+/// reading identifiers, routines, tester present); `module_takes` adds the ones a single module has.
+const UDS_SERVICES: &[UdsService] = &[
+    UdsService {
+        sid: 0x10,
+        min_len: 2,
+        subs: &[0x01, 0x03],
+        extended_only: false,
+    },
+    UdsService {
+        sid: 0x11,
+        min_len: 2,
+        subs: &[0x01, 0x03],
+        extended_only: false,
+    },
+    UdsService {
+        sid: 0x14,
+        min_len: 4,
+        subs: &[],
+        extended_only: false,
+    },
+    UdsService {
+        sid: 0x19,
+        min_len: 2,
+        subs: &[0x02],
+        extended_only: false,
+    },
+    UdsService {
+        sid: 0x22,
+        min_len: 3,
+        subs: &[],
+        extended_only: false,
+    },
+    UdsService {
+        sid: 0x31,
+        min_len: 4,
+        subs: &[0x01, 0x02, 0x03],
+        extended_only: false,
+    },
+    UdsService {
+        sid: 0x3E,
+        min_len: 2,
+        subs: &[0x00],
+        extended_only: false,
+    },
+];
+
+/// The services one module has beside `UDS_SERVICES`: OBD-II's 01 at the engine, a local identifier (21) and output
+/// control (2F) at 7E0, writing identifiers (2E, extended session only) at the cluster.
+fn module_takes(tx: u32, engine: u32, sid: u8) -> Option<UdsService> {
+    let (min_len, extended_only) = match sid {
+        0x01 if tx == engine => (2, false),
+        0x21 if tx == 0x7E0 => (2, false),
+        0x2F if tx == 0x7E0 => (4, false),
+        0x2E if tx == 0x7C0 => (4, true),
+        _ => return None,
+    };
+    Some(UdsService {
+        sid,
+        min_len,
+        subs: &[],
+        extended_only,
+    })
+}
+
+/// Services whose sub-function byte carries ISO 14229-1's "suppress positive response" bit (80): with it set, the module
+/// does what it is asked and answers only a refusal.
+const SUPPRESSIBLE: &[u8] = &[0x10, 0x11, 0x31, 0x3E];
+
+/// How a simulated UDS module refuses `req` before it looks at what is asked, in ISO 14229-1's order of checks (its
+/// general server response behaviour): the service unknown (11); not in the active session (7F); shorter than the service
+/// takes (13); the sub-function unknown (12; 7E would be one known but not in this session, which none of these is);
+/// the message's length wrong for that sub-function or service (13). Security access (33) never comes first: no simulated
+/// service needs it. What a service checks after these, in ISO's order (its conditions 22, the request sequence 24, a
+/// value out of range 31), is its own answer's. `req` has the suppress bit taken off its sub-function already.
+fn iso_refusal(svc: Option<&UdsService>, req: &[u8], extended: bool) -> Option<u8> {
+    let Some(svc) = svc else { return Some(0x11) };
+    if svc.extended_only && !extended {
+        return Some(0x7F);
+    }
+    if req.len() < svc.min_len {
+        return Some(0x13);
+    }
+    if !svc.subs.is_empty() && !svc.subs.contains(&req[1]) {
+        return Some(0x12);
+    }
+    let length_right = match (svc.sid, req.len()) {
+        (0x10 | 0x11 | 0x3E, n) => n == 2,
+        (0x19, n) => n == 3,     // 19 02 and its status mask
+        (0x14, n) => n == 4,     // the group of codes, three bytes
+        (0x22, n) => n % 2 == 1, // identifiers of two bytes each
+        _ => true,
+    };
+    (!length_right).then_some(0x13)
+}
 
 impl Default for SimCar {
     fn default() -> Self {
@@ -446,6 +554,7 @@ impl SimCar {
             busy: false,
             brd: false,
             brd_lies: false,
+            availability: Vec::new(),
         }
     }
 
@@ -702,6 +811,14 @@ impl SimCar {
     #[cfg(test)]
     pub(crate) fn with_no_status_bits(mut self, tx: u32) -> SimCar {
         self.no_status_bits.push(tx);
+        self
+    }
+
+    /// The same vehicle with the module at `tx` supporting only the status bits in `mask` (its availability mask, the
+    /// third byte of `59 02`; every module supports all eight, FF, unless a test says otherwise).
+    #[cfg(test)]
+    pub(crate) fn with_availability(mut self, tx: u32, mask: u8) -> SimCar {
+        self.availability.push((tx, mask));
         self
     }
 
@@ -977,19 +1094,19 @@ impl SimCar {
         let step = t % 400;
         let script: &[&str] = &[
             "7C0 02 10 03",
-            "7C8 02 50 03",
+            "7C8 06 50 03 00 32 01 F4",
             "7C0 03 22 A0 01",
             "7C8 04 62 A0 01 01",
             "7C0 04 2E A0 01 00",
             "7C8 03 6E A0 01",
             "7C0 02 10 01",
-            "7C8 02 50 01",
+            "7C8 06 50 01 00 32 01 F4",
             "7B0 02 21 20",
             "7B8 03 61 20 00",
             "7B0 03 3B 20 01",
             "7B8 02 7B 20",
             "7E0 02 10 03",
-            "7E8 02 50 03",
+            "7E8 06 50 03 00 32 01 F4",
             "7E0 05 2F F0 02 03 4C",
             "7E8 05 6F F0 02 03 4C",
             "7E0 05 2F F0 02 03 80",
@@ -997,7 +1114,7 @@ impl SimCar {
             "7E0 04 2F F0 02 00",
             "7E8 04 6F F0 02 00",
             "7E0 02 10 01",
-            "7E8 02 50 01",
+            "7E8 06 50 01 00 32 01 F4",
             "7B0 04 30 10 07 01",
             "7B8 03 70 10 07",
             "7B0 03 30 10 00",
@@ -1258,8 +1375,9 @@ impl SimCar {
 
     /// One module's answer to a request sent to it alone: the engine and transmission speak UDS (the transmission refuses
     /// the code status mask FF and takes 2F), the ABS only KWP2000 (as many Toyota modules do), the airbag and instrument
-    /// cluster UDS, the air conditioning only ISO 14230's `13` for its codes. Anything else is "not supported" (7F) or
-    /// silence.
+    /// cluster UDS, the air conditioning only ISO 14230's `13` for its codes. A UDS module refuses in ISO 14229-1's order
+    /// (`iso_refusal`, ICA-153) and answers nothing to a request with the suppress-positive bit that it carries out; a
+    /// KWP2000 module refuses anything else as "not supported" (11). Silence where no module is.
     fn module(&mut self, tx: u32, req: &[u8]) -> Option<Vec<u8>> {
         let refuse = |code: u8| Some(vec![0x7F, req[0], code]);
         if self.busy_data == Some(tx) && req.first() == Some(&0x22) {
@@ -1315,6 +1433,22 @@ impl SimCar {
         } else {
             given.as_deref().unwrap_or(codes)
         };
+        if uds {
+            let &sid = req.first()?;
+            // the suppress-positive bit (ISO 14229-1, 80 in the sub-function): done as asked, and only a refusal answered
+            if let [_, sub, ..] = req {
+                if SUPPRESSIBLE.contains(&sid) && sub & 0x80 != 0 {
+                    let mut plain = req.to_vec();
+                    plain[1] &= 0x7F;
+                    return self.module(tx, &plain).filter(|a| a.first() == Some(&0x7F));
+                }
+            }
+            let own = module_takes(tx, engine, sid);
+            let svc = UDS_SERVICES.iter().find(|s| s.sid == sid).or(own.as_ref());
+            if let Some(code) = iso_refusal(svc, req, self.extended.contains(&tx)) {
+                return refuse(code);
+            }
+        }
         // several identifiers in one read (22 hi lo hi lo...: longer than a CAN frame from three on, STPX on an OBDLink):
         // one answer with each identifier the module has and its value, in the order asked
         if uds && req.len() > 3 && req[0] == 0x22 && req.len() % 2 == 1 {
@@ -1340,6 +1474,8 @@ impl SimCar {
                 self.cleared.insert(tx);
                 Some(vec![0x54])
             }
+            // another group of codes than all of them
+            ([0x14, ..], true) => refuse(0x31),
             ([0x10, s @ (0x01 | 0x03)], true) => {
                 if *s == 0x03 {
                     self.extended.insert(tx);
@@ -1347,7 +1483,19 @@ impl SimCar {
                     self.extended.remove(&tx);
                     self.driven.retain(|k, _| k.0 != tx); // leaving the session ends every output test
                 }
-                Some(vec![0x50, *s])
+                // with the session's timing, as ISO 14229-1 has it: P2 50 ms (00 32, in 1 ms) and P2* 5000 ms (01 F4, in
+                // 10 ms)
+                Some(vec![0x50, *s, 0x00, 0x32, 0x01, 0xF4])
+            }
+            // ECU reset (hard 01, soft 03): refused while the engine runs; a reset module is back in its default session
+            ([0x11, r @ (0x01 | 0x03)], true) => {
+                if self.engine_on {
+                    return refuse(0x22);
+                }
+                self.extended.remove(&tx);
+                self.driven.retain(|k, _| k.0 != tx);
+                self.routines.retain(|k| k.0 != tx);
+                Some(vec![0x51, *r])
             }
             ([0x2F, hi, lo, param, state @ ..], true) if tx == 0x7E0 => {
                 let id = u16::from_be_bytes([*hi, *lo]);
@@ -1426,17 +1574,21 @@ impl SimCar {
                 if self.no_status_bits.contains(&tx) {
                     return Some([&[0x59, 0x02, 0x00][..], codes].concat());
                 }
-                // the codes whose status shares a bit with the mask, as ISO 14229-1 has a module answer
-                let matching = codes
-                    .chunks(4)
-                    .filter(|c| c.get(3).is_some_and(|s| s & mask != 0));
-                Some(
-                    [
-                        &[0x59, 0x02, *mask][..],
-                        &matching.collect::<Vec<_>>().concat(),
-                    ]
-                    .concat(),
-                )
+                // as ISO 14229-1 has a module answer: its own availability mask (the status bits it supports, not the
+                // mask asked with), then each code whose status, in the bits it supports, shares one with the mask
+                let available = self
+                    .availability
+                    .iter()
+                    .find(|a| a.0 == tx)
+                    .map_or(0xFF, |a| a.1);
+                let mut out = vec![0x59, 0x02, available];
+                for c in codes.chunks(4).filter(|c| c.len() == 4) {
+                    let status = c[3] & available;
+                    if status & mask != 0 {
+                        out.extend_from_slice(&[c[0], c[1], c[2], status]);
+                    }
+                }
+                Some(out)
             }
             ([0x18, ..], false) => Some([&[0x58, (codes.len() / 3) as u8][..], codes].concat()),
             // settings: the cluster's chime (UDS, changed only in the extended session), the ABS module's buzzer (KWP2000,
@@ -1523,6 +1675,7 @@ impl SimCar {
                 // a KWP2000-style local identifier on the OBD-II address: idle speed control 30 % (x2), a status byte
                 Some(vec![0x61, 0xA7, 60, 0x80])
             }
+            ([0x21, ..], true) => refuse(0x31),
             ([0x22, 0xF1, 0x87], true) => Some([&[0x62, 0xF1, 0x87][..], part].concat()),
             // the tire pressure module behind the gateway: each tire's position (1-4), then pressures in 0.1 psi steps
             ([0x22, 0x20, 0x21], true) if tx == 0x752A => {
@@ -2117,6 +2270,171 @@ mod tests {
             sent.contains("ATSP6") && sent.contains("ATCSM1"),
             "the protocol set, and silent: {sent:?}"
         );
+    }
+
+    /// ICA-153, ICA-152: each simulated UDS module refuses in ISO 14229-1's order (an unknown service 11, a short message
+    /// 13, an unknown sub-function 12, a wrong length 13, a write outside its session 7F, a reset with the engine running
+    /// 22), answers nothing to a request with the suppress-positive bit, and answers 10 with the session's timing.
+    #[test]
+    fn the_simulated_modules_refuse_in_iso_order() {
+        let layouts: [(SimCar, &[u32]); 4] = [
+            (
+                SimCar::new(),
+                &[0x7E0, 0x7E1, 0x700, 0x701, 0x780, 0x7C0, 0x7540, 0x752A],
+            ),
+            (
+                SimCar::honda(),
+                &[
+                    0x18DA_10F1,
+                    0x18DA_18F1,
+                    0x18DA_28F1,
+                    0x18DA_30F1,
+                    0x18DA_60F1,
+                ],
+            ),
+            (SimCar::gm(), &[0x7E0, 0x7E2, 0x241, 0x243]),
+            (SimCar::ford(false), &[0x7E0, 0x760]),
+        ];
+        let no: &[u8] = &[];
+        let table: &[(&[u8], &[u8])] = &[
+            (&[0x10], &[0x7F, 0x10, 0x13]),
+            (&[0x10, 0x05], &[0x7F, 0x10, 0x12]),
+            (&[0x10, 0x02], &[0x7F, 0x10, 0x12]),
+            (&[0x10, 0x03, 0x00], &[0x7F, 0x10, 0x13]),
+            (&[0x85, 0x02], &[0x7F, 0x85, 0x11]),
+            (&[0x27, 0x01], &[0x7F, 0x27, 0x11]),
+            (&[0x3E, 0x80], no),
+            (&[0x3E, 0x00], &[0x7E, 0x00]),
+            (&[0x3E, 0x01], &[0x7F, 0x3E, 0x12]),
+            (&[0x3E, 0x00, 0x00], &[0x7F, 0x3E, 0x13]),
+            (&[0x11], &[0x7F, 0x11, 0x13]),
+            (&[0x11, 0x01], &[0x7F, 0x11, 0x22]),
+            (&[0x11, 0x81], &[0x7F, 0x11, 0x22]),
+            (&[0x19, 0x02], &[0x7F, 0x19, 0x13]),
+            (&[0x19, 0x0A], &[0x7F, 0x19, 0x12]),
+            (&[0x22, 0xF1], &[0x7F, 0x22, 0x13]),
+            (&[0x22, 0xF1, 0x87, 0x00], &[0x7F, 0x22, 0x13]),
+            (&[0x14, 0xFF, 0xFF], &[0x7F, 0x14, 0x13]),
+            (&[0x31, 0x01], &[0x7F, 0x31, 0x13]),
+            (&[0x31, 0x04, 0xFF, 0x00], &[0x7F, 0x31, 0x12]),
+            (&[0x10, 0x03], &[0x50, 0x03, 0x00, 0x32, 0x01, 0xF4]),
+            (&[0x10, 0x81], no),
+            (&[0x10, 0x01], &[0x50, 0x01, 0x00, 0x32, 0x01, 0xF4]),
+        ];
+        for (mut car, modules) in layouts {
+            for &tx in modules {
+                for (req, want) in table {
+                    let got = car.module(tx, req);
+                    assert_eq!(
+                        got.as_deref().unwrap_or_default(),
+                        *want,
+                        "{tx:X} asked {req:02X?}"
+                    );
+                    if want.is_empty() {
+                        assert!(
+                            got.is_none(),
+                            "{tx:X} {req:02X?}: silence, not an empty answer"
+                        );
+                    }
+                }
+                // a suppressed request is still carried out: 10 83 puts the module in the extended session
+                assert_eq!(car.module(tx, &[0x10, 0x83]), None);
+                assert!(car.extended.contains(&tx), "{tx:X}");
+                car.module(tx, &[0x10, 0x01]);
+            }
+        }
+        // a service one module has and another not: 2E at the cluster only, and only in the extended session (7F before
+        // its identifier or its length is looked at), 2F at the engine only
+        let mut car = SimCar::new();
+        assert_eq!(
+            car.module(0x7C0, &[0x2E, 0x99, 0x99, 0x00]),
+            Some(vec![0x7F, 0x2E, 0x7F])
+        );
+        assert_eq!(
+            car.module(0x7C0, &[0x2E, 0xA0]),
+            Some(vec![0x7F, 0x2E, 0x7F])
+        );
+        car.module(0x7C0, &[0x10, 0x03]);
+        assert_eq!(
+            car.module(0x7C0, &[0x2E, 0xA0]),
+            Some(vec![0x7F, 0x2E, 0x13])
+        );
+        assert_eq!(
+            car.module(0x7C0, &[0x2E, 0x99, 0x99, 0x00]),
+            Some(vec![0x7F, 0x2E, 0x31])
+        );
+        assert_eq!(
+            car.module(0x780, &[0x2E, 0xA0, 0x01, 0x00]),
+            Some(vec![0x7F, 0x2E, 0x11])
+        );
+        assert_eq!(
+            car.module(0x7C0, &[0x2F, 0xF0, 0x01, 0x03]),
+            Some(vec![0x7F, 0x2F, 0x11])
+        );
+        // a reset with the engine off: back in the default session
+        let mut car = SimCar::engine_off();
+        car.module(0x7C0, &[0x10, 0x03]);
+        assert_eq!(car.module(0x7C0, &[0x11, 0x01]), Some(vec![0x51, 0x01]));
+        assert!(!car.extended.contains(&0x7C0));
+        assert_eq!(car.module(0x7C0, &[0x11, 0x83]), None, "suppressed");
+    }
+
+    /// ICA-153: `19 02` is answered with the module's own availability mask, not the mask asked with, and lists the codes
+    /// whose status (in the bits it supports) shares a bit with the mask; a pending-only code (04) is found by 04 alone.
+    #[test]
+    fn a_code_read_is_masked_as_iso_has_it() {
+        let codes = [
+            0x01, 0x71, 0x00, 0x09, // P0171 failed, confirmed
+            0x04, 0x20, 0x00, 0x04, // P0420 pending only
+            0x01, 0x00, 0x00, 0x50, // P0100 not tested
+            0x03, 0x01, 0x00,
+            0x81, // P0301 failed, and the warning light bit this module does not support
+        ];
+        let mut car = SimCar::new()
+            .with_codes(0x700, &codes)
+            .with_availability(0x700, 0x7F);
+        let ask = |car: &mut SimCar, mask: u8| car.module(0x700, &[0x19, 0x02, mask]).unwrap();
+        assert_eq!(
+            ask(&mut car, 0xFF),
+            [
+                &[0x59, 0x02, 0x7F][..],
+                &codes[..12],
+                &[0x03, 0x01, 0x00, 0x01]
+            ]
+            .concat()
+        );
+        assert_eq!(
+            ask(&mut car, 0x08),
+            [&[0x59, 0x02, 0x7F][..], &codes[..4]].concat()
+        );
+        assert_eq!(
+            ask(&mut car, 0x04),
+            [&[0x59, 0x02, 0x7F][..], &codes[4..8]].concat()
+        );
+        assert_eq!(ask(&mut car, 0x80), vec![0x59, 0x02, 0x7F]);
+        // every other module supports all eight bits, whatever mask it is asked with
+        let mut car = SimCar::new();
+        assert_eq!(
+            car.module(0x7E0, &[0x19, 0x02, 0x2F]),
+            Some(vec![0x59, 0x02, 0xFF, 0x01, 0x71, 0x00, 0x09])
+        );
+        // the client reads the pending-only code as pending
+        let mut elm = Elm::connect(Box::new(
+            SimCar::new()
+                .with_codes(0x700, &codes)
+                .with_availability(0x700, 0x7F),
+        ))
+        .unwrap();
+        let read = crate::uds::module_dtcs(&mut elm, 0x700, 0x708)
+            .unwrap()
+            .unwrap();
+        let shown: Vec<(&str, u8)> = read
+            .codes
+            .iter()
+            .map(|c| (c.code.as_str(), c.status))
+            .collect();
+        assert_eq!(shown, [("P0171", 0x09), ("P0420", 0x04), ("P0301", 0x01)]);
+        assert_eq!(read.not_failed, 1);
     }
 
     #[test]

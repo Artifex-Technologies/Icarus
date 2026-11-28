@@ -247,6 +247,12 @@ impl Session {
     /// side's own size (the phone's 6 bytes, the adapter's 10) and interleaved: each answer's fragments alternate with
     /// those of the phone's next command.
     pub fn interleaved() -> Session {
+        Session::interleaved_in(6, 10)
+    }
+
+    /// The same conversation with the phone's fragments `phone` bytes long and the adapter's `adapter` (ICA-63: both the
+    /// same size, so only the order the fragments come in tells the two sides apart).
+    pub fn interleaved_in(phone: usize, adapter: usize) -> Session {
         let mut s = Session::new();
         s.connect(0x0B, 1, 3, 0x40, 0x41);
         let talk = [
@@ -260,9 +266,17 @@ impl Session {
             ("2105\r", "7E8 03 61 05 09\r\r>"),
             ("22 5678\r", "7E8 04 62 56 78 0C\r\r>"),
         ];
-        let cmd = |c: &str| Session::frags(true, 0x0B, 0x41, &uih(2, true, false, c.as_bytes()), 6);
-        let ans =
-            |a: &str| Session::frags(false, 0x0B, 0x40, &uih(2, false, false, a.as_bytes()), 10);
+        let cmd =
+            |c: &str| Session::frags(true, 0x0B, 0x41, &uih(2, true, false, c.as_bytes()), phone);
+        let ans = |a: &str| {
+            Session::frags(
+                false,
+                0x0B,
+                0x40,
+                &uih(2, false, false, a.as_bytes()),
+                adapter,
+            )
+        };
         for p in cmd(talk[0].0) {
             s.log(p);
         }

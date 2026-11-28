@@ -19,7 +19,7 @@
 //! **Layers.** HCI ACL packets (a 12-bit connection handle, a packet-boundary flag: a start or a continuation, and the
 //! length) are put back together into L2CAP packets per connection and direction (L2CAP: a length, a channel ID, the
 //! data); without directions (link type 187) a packet stays open for each side, and a continuation goes to the one it
-//! fits (`pick`: each side's own fragment size, what is left, and the RFCOMM checksum). The signalling channel's connection requests and answers say which channels are RFCOMM (PSM 3), and its
+//! fits (`pick`: each side's own fragment size, what is left, the RFCOMM checksum, and which has waited longer). The signalling channel's connection requests and answers say which channels are RFCOMM (PSM 3), and its
 //! disconnections which were closed; each side picks its own channel IDs (a phone's SDP query and its RFCOMM channel often
 //! both get 0x40), so a channel is known by the ID its packets carry in each direction, and an ID used again names the
 //! newer channel. A channel set up before the capture began is tried as RFCOMM, and kept only when its frames' checksums
@@ -356,10 +356,12 @@ fn flip(d: Option<Dir>) -> Option<Dir> {
 /// receives carry its own; the direction tells the two apart (without directions, both share one key).
 type ChanKey = (u16, Option<Dir>, u16);
 
-/// An L2CAP packet being put back together: its bytes so far, and how long its first fragment was.
+/// An L2CAP packet being put back together: its bytes so far, how long its first fragment was, and when it last took
+/// one (the ACL packet's number in the capture).
 struct Part {
     buf: Vec<u8>,
     first: usize,
+    fed: u64,
 }
 
 impl Part {
@@ -382,7 +384,10 @@ fn whole(handle: u16, mut pdu: Vec<u8>) -> (u16, u16, Vec<u8>) {
 /// cuts its packets into fragments of its own size, so a fragment of a packet is as long as the packet's first and
 /// leaves more to come, or is its last, as long as what is left (and no longer than the first); failing that, one it
 /// does not run past. Of two, a last fragment that makes a whole RFCOMM frame (its checksum right) goes first, then
-/// one that leaves more to come, then the older.
+/// one that leaves more to come. Of two still (both sides cut fragments of one size and the fragment ends neither: ICA-63),
+/// the one that has waited longer for its next fragment: two sides sending at once take turns, so the side that took the
+/// last fragment is not the likelier one to send this (giving it to the older packet put a side's second fragment in a row
+/// on the wrong side).
 fn pick(open: &[Part], frag: &[u8]) -> Option<usize> {
     let n = frag.len();
     let likely = |p: &Part| {
@@ -402,8 +407,7 @@ fn pick(open: &[Part], frag: &[u8]) -> Option<usize> {
     let best = |of: &dyn Fn(&Part) -> bool| {
         (0..open.len())
             .filter(|i| of(&open[*i]))
-            .rev()
-            .max_by_key(|i| rank(&open[*i]))
+            .max_by_key(|i| (rank(&open[*i]), std::cmp::Reverse(open[*i].fed)))
     };
     best(&likely).or_else(|| best(&fits))
 }
@@ -420,6 +424,8 @@ struct L2cap {
     /// Channels other than RFCOMM set up over the capture (counted, never read).
     others: usize,
     malformed: usize,
+    /// ACL packets seen (for `Part::fed`).
+    seen: u64,
 }
 
 impl L2cap {
@@ -437,11 +443,14 @@ impl L2cap {
             self.malformed += 1;
             return None;
         };
+        self.seen += 1;
+        let now = self.seen;
         let open = self.partial.entry((handle, a.dir)).or_default();
         let i = if start {
             let part = Part {
                 buf: data.to_vec(),
                 first: data.len(),
+                fed: now,
             };
             // with directions, a side's new packet ends its last one (given up)
             if a.dir.is_some() {
@@ -467,6 +476,7 @@ impl L2cap {
                 return None;
             };
             open[i].buf.extend_from_slice(data);
+            open[i].fed = now;
             i
         };
         // whole once its header's length is in
@@ -966,34 +976,46 @@ mod tests {
 
     #[test]
     fn both_sides_fragments_interleaved_without_directions_are_kept_apart() {
-        let s = Session::interleaved();
-        for (what, file) in [
-            ("pcap 187", pcap_file(&s.packets, false)),
-            ("pcap 201", pcap_file(&s.packets, true)),
-            ("pklg", pklg_file(&s.packets, true)),
+        // each side's own fragment size (the phone's 6 bytes, the adapter's 10), then (ICA-63) both the same size, where
+        // a continuation that ends neither packet fits both and only the turns the two sides take tell them apart
+        for (size, s) in [
+            ("6/10", Session::interleaved()),
+            ("6/6", Session::interleaved_in(6, 6)),
+            ("10/10", Session::interleaved_in(10, 10)),
         ] {
-            let r = read_ok(&file);
-            let e = &r.exchanges;
-            let reqs: Vec<String> = e.iter().map(|x| super::super::hex(&x.request)).collect();
-            assert_eq!(
-                reqs,
-                vec!["22 12 34", "21 05", "22 56 78"],
-                "{what}: {:?}",
-                r.notes
-            );
-            assert_eq!(
-                e[0].replies[0].data,
-                vec![0x62, 0x12, 0x34, 1, 2, 3, 4, 5, 6, 7, 8],
-                "{what}"
-            );
-            assert_eq!(e[1].replies[0].data, vec![0x61, 0x05, 0x09], "{what}");
-            assert_eq!(e[2].replies[0].data, vec![0x62, 0x56, 0x78, 0x0C], "{what}");
-            assert!(
-                r.notes.iter().all(|n| !n.contains("malformed")),
-                "{what}: {:?}",
-                r.notes
-            );
+            for (kind, file) in [
+                ("pcap 187", pcap_file(&s.packets, false)),
+                ("pcap 201", pcap_file(&s.packets, true)),
+                ("pklg", pklg_file(&s.packets, true)),
+            ] {
+                let what = format!("{kind}, fragments {size}");
+                interleaved_reads(&what, &file);
+            }
         }
+    }
+
+    fn interleaved_reads(what: &str, file: &[u8]) {
+        let r = read_ok(file);
+        let e = &r.exchanges;
+        let reqs: Vec<String> = e.iter().map(|x| super::super::hex(&x.request)).collect();
+        assert_eq!(
+            reqs,
+            vec!["22 12 34", "21 05", "22 56 78"],
+            "{what}: {:?}",
+            r.notes
+        );
+        assert_eq!(
+            e[0].replies[0].data,
+            vec![0x62, 0x12, 0x34, 1, 2, 3, 4, 5, 6, 7, 8],
+            "{what}"
+        );
+        assert_eq!(e[1].replies[0].data, vec![0x61, 0x05, 0x09], "{what}");
+        assert_eq!(e[2].replies[0].data, vec![0x62, 0x56, 0x78, 0x0C], "{what}");
+        assert!(
+            r.notes.iter().all(|n| !n.contains("malformed")),
+            "{what}: {:?}",
+            r.notes
+        );
     }
 
     #[test]

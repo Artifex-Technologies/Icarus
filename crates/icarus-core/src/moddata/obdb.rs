@@ -23,6 +23,10 @@
 //! A year filter `{from, to, years}`: from < to is the range from-to; from >= to wraps (every year up to `to`, and every
 //! year from `from` on); `from` or `to` alone is open on the other side; `years` adds single years. A year that is not a
 //! year (above 9999) leaves the command out rather than widening its range.
+//!
+//! A signal found wrong on a vehicle is corrected as it is imported (`CORRECTIONS`: its header, id and OBDb's unit word,
+//! the unit in its place and how it was checked), and listed; once OBDb gives it another unit word, it is imported as
+//! OBDb has it.
 
 use super::{
     sha256_hex, validate, Ids, Imported, ModuleDef, ModuleHead, Order, RequestDef, SetInfo, Source,
@@ -196,6 +200,51 @@ fn unit(word: &str) -> UnitOf {
     (u.to_string(), None, None, None)
 }
 
+/// A correction to one OBDb signal, found wrong on a vehicle: the signal as OBDb gives it (its command's header, its id
+/// and its unit word), the unit Icarus gives it instead, and how that was found out. It holds only while OBDb still gives
+/// that unit word: once OBDb corrects the signal, it is imported as OBDb has it.
+#[derive(Clone, Copy, Debug)]
+pub struct Correction {
+    pub hdr: u32,
+    pub id: &'static str,
+    /// OBDb's `fmt.unit`, as written.
+    pub given: &'static str,
+    /// Icarus's unit in its place (the formula is OBDb's, unchanged).
+    pub unit: &'static str,
+    /// The source: how it was checked, and what is still not known.
+    pub why: &'static str,
+}
+
+/// The OBDb signals Icarus corrects as it imports them (ICA-82). Each one was checked on a vehicle; a guess never goes in.
+pub const CORRECTIONS: &[Correction] = &[
+    Correction {
+        hdr: 0x7E0,
+        id: "TACOMA_ODO",
+        given: "kilometers",
+        unit: "mi",
+        why: "the odometer counts in the instrument cluster's unit: on my truck, a US one in miles, the raw value is the \
+              miles the cluster shows (checked at the truck, 2026-11-25), and read as kilometers it showed 0.62 of them \
+              in miles. A cluster set to kilometers would count kilometers",
+    },
+    Correction {
+        hdr: 0x700,
+        id: "TACOMA_FUEL_PUMP_DUTY_RATIO",
+        given: "kilopascal",
+        unit: "%",
+        why: "a duty ratio is the share of the time the pump is driven, not a pressure (OBDb gives kilopascal, shown as \
+              psi). OBDb's scaling is kept and is not checked against a reading yet",
+    },
+];
+
+/// The correction for signal `s` of a command sent on `hdr`, from `table`, if one holds.
+fn correction<'a>(table: &'a [Correction], hdr: u32, s: &Value) -> Option<&'a Correction> {
+    let id = s.get("id")?.as_str()?;
+    let given = s.get("fmt")?.get("unit")?.as_str()?;
+    table
+        .iter()
+        .find(|c| c.hdr == hdr && c.id == id && c.given == given)
+}
+
 /// One signal as a value; Err(reason) when it cannot be imported.
 fn signal(s: &Value) -> Result<ValueDef, String> {
     let id = s.get("id").and_then(|v| v.as_str()).ok_or("no id")?;
@@ -358,8 +407,13 @@ pub fn make_and_model(repo: &str) -> (String, String) {
     )
 }
 
-/// A signal set's JSON as a set of modules.
+/// A signal set's JSON as a set of modules, with Icarus's corrections (`CORRECTIONS`).
 pub fn parse(text: &str, opts: &Options) -> Result<Imported, String> {
+    parse_with(text, opts, CORRECTIONS)
+}
+
+/// `parse` with the corrections in `table`.
+fn parse_with(text: &str, opts: &Options, table: &[Correction]) -> Result<Imported, String> {
     let root: Value = serde_json::from_str(text).map_err(|e| format!("not OBDb JSON: {e}"))?;
     let commands = root
         .get("commands")
@@ -535,9 +589,23 @@ pub fn parse(text: &str, opts: &Options) -> Result<Imported, String> {
                     format!("{what}, signal {sid}"),
                     "its id is used twice in the command".into(),
                 )),
-                Ok(v) => {
+                Ok(mut v) => {
                     if !v.note.is_empty() {
                         out.notes.push(format!("{what}, {sid}: {}", v.note));
+                    }
+                    // a correction changes only the unit word, which check_value does not judge
+                    if let Some(c) = correction(table, tx, s) {
+                        v.unit = c.unit.to_string();
+                        let said = format!(
+                            "OBDb's unit {:?} corrected to {:?}: {}",
+                            c.given, c.unit, c.why
+                        );
+                        v.note = if v.note.is_empty() {
+                            said.clone()
+                        } else {
+                            format!("{}; {said}", v.note)
+                        };
+                        out.corrected.push(format!("{what}, {sid}: {said}"));
                     }
                     values.push(v);
                 }
@@ -1102,5 +1170,115 @@ mod tests {
             assert!(i.modules.contains(&m), "{name}");
         }
         assert!(files.iter().any(|f| f.0 == "7A6.3C.toml"));
+    }
+
+    /// ICA-82: a signal a correction names (its header, id and OBDb's unit word) gets the corrected unit, with the
+    /// correction's source in its note and in the import's list; the same id on another header, or with another unit word
+    /// (OBDb corrected it), is imported as OBDb has it. Made-up signals and a made-up table.
+    #[test]
+    fn a_signal_checked_wrong_on_a_vehicle_is_corrected_as_it_is_imported() {
+        const TABLE: &[Correction] = &[
+            Correction {
+                hdr: 0x7A0,
+                id: "TOY_DIST",
+                given: "kilometers",
+                unit: "mi",
+                why: "made up: counts miles",
+            },
+            Correction {
+                hdr: 0x7A0,
+                id: "TOY_DUTY",
+                given: "kilopascal",
+                unit: "%",
+                why: "made up: a duty",
+            },
+        ];
+        let text = r#"{"commands": [
+          {"hdr": "7A0", "rax": "7A8", "cmd": {"22": "4A10"}, "freq": 1, "signals": [
+            {"id": "TOY_DIST", "name": "Distance", "fmt": {"len": 24, "unit": "kilometers"}},
+            {"id": "TOY_DUTY", "name": "Pump duty", "fmt": {"bix": 24, "len": 16, "div": 16, "unit": "kilopascal"}},
+            {"id": "TOY_KM", "name": "Other distance", "fmt": {"bix": 40, "len": 8, "unit": "kilometers"}}]},
+          {"hdr": "7A2", "cmd": {"22": "4A11"}, "freq": 1, "signals": [
+            {"id": "TOY_DIST", "name": "Distance", "fmt": {"len": 24, "unit": "kilometers"}}]},
+          {"hdr": "7A4", "cmd": {"22": "4A12"}, "freq": 1, "signals": [
+            {"id": "TOY_DUTY", "name": "Pump duty", "fmt": {"len": 8, "unit": "percent"}}]}
+        ]}"#;
+        let opts = Options {
+            path: "Toy-Truck/signalsets/v3/default.json".into(),
+            ..Default::default()
+        };
+        let i = parse_with(text, &opts, TABLE).unwrap();
+        let value = |tx: u32, id: &str| {
+            i.modules
+                .iter()
+                .find(|m| m.module.tx == tx)
+                .and_then(|m| m.requests[0].values.iter().find(|v| v.id == id))
+                .cloned()
+                .unwrap()
+        };
+        let dist = value(0x7A0, "TOY_DIST");
+        assert_eq!(dist.unit, "mi");
+        assert!(
+            dist.note
+                .contains("\"kilometers\" corrected to \"mi\": made up: counts miles"),
+            "{}",
+            dist.note
+        );
+        // the formula is the file's: 100,000 raw is 100,000 mi, not 62,137
+        assert_eq!(
+            decode(&dist, &[0x01, 0x86, 0xA0, 0, 0, 0]).unwrap().shown,
+            Shown::Number(100_000.0)
+        );
+        assert_eq!(
+            crate::moddata::units::shown(&dist.unit, 100_000.0, true),
+            (100_000.0, "mi")
+        );
+        let duty = value(0x7A0, "TOY_DUTY");
+        assert_eq!((duty.unit.as_str(), duty.div), ("%", 16.0));
+        // not named, on another header, or already in OBDb's right unit: as given
+        assert_eq!(value(0x7A0, "TOY_KM").unit, "km");
+        assert_eq!(value(0x7A2, "TOY_DIST").unit, "km");
+        assert_eq!(value(0x7A4, "TOY_DUTY").unit, "%");
+        assert!(value(0x7A4, "TOY_DUTY").note.is_empty());
+        assert_eq!(i.corrected.len(), 2, "{:?}", i.corrected);
+        assert!(
+            i.corrected[0].starts_with("7A0 22 4A10, TOY_DIST: "),
+            "{:?}",
+            i.corrected
+        );
+        assert!(
+            i.notes.iter().all(|n| !n.contains("corrected")),
+            "{:?}",
+            i.notes
+        );
+        // without the table, as OBDb has it
+        let plain = parse_with(text, &opts, &[]).unwrap();
+        assert!(plain.corrected.is_empty());
+        assert_eq!(plain.modules[0].requests[0].values[0].unit, "km");
+    }
+
+    /// Each of Icarus's own corrections takes hold on a signal as its entry describes it (a one-signal set written from
+    /// the entry), and gives a unit Icarus shows as it is.
+    #[test]
+    fn each_correction_takes_hold() {
+        for c in CORRECTIONS {
+            let text = format!(
+                r#"{{"commands": [{{"hdr": "{:03X}", "cmd": {{"22": "0001"}}, "freq": 1,
+                  "signals": [{{"id": "{}", "name": "x", "fmt": {{"len": 16, "unit": "{}"}}}}]}}]}}"#,
+                c.hdr, c.id, c.given
+            );
+            let i = parse(
+                &text,
+                &Options {
+                    path: "Toy-Truck/signalsets/v3/default.json".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let v = &i.modules[0].requests[0].values[0];
+            assert_eq!(v.unit, c.unit, "{}", c.id);
+            assert_eq!(crate::moddata::units::shown(&v.unit, 1.0, true).1, c.unit);
+            assert!(!c.why.is_empty() && i.corrected.len() == 1, "{}", c.id);
+        }
     }
 }
