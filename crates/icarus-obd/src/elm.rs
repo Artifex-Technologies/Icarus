@@ -54,6 +54,83 @@ pub fn connect_target(target: &crate::port::Target) -> Result<(Elm, Option<Strin
     }
 }
 
+/// What an ELM327 or STN adapter says about itself (ICA-216, `icarus doctor --adapter`): its ID (`ATI`, from the reset),
+/// an STN chip's (`STI`) and its device line (`STDI`, e.g. "OBDLink MX+ r2.3"), the serial speed it answered at, and the
+/// voltage at the OBD port.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AdapterInfo {
+    pub id: String,
+    pub stn: Option<String>,
+    pub device: Option<String>,
+    /// This computer's side of the serial line when it answered (None over Bluetooth, Wi-Fi or the simulated adapter).
+    pub speed: Option<u32>,
+    pub voltage: Option<f64>,
+    /// How the speed was found, when it was not the one given.
+    pub note: Option<String>,
+}
+
+/// Asks the adapter `target` names who it is, and nothing else (`AdapterInfo`): a reset (`ATZ`, which gives its ID), echo
+/// and line feeds off, the STN's `STI` and `STDI`, and `ATRV`. No protocol is set and nothing goes onto the vehicle's bus;
+/// a serial adapter that does not answer at its speed is looked for at the others as `connect_target` does. Only an
+/// ELM327 or STN adapter: a CAN interface, an SLCAN adapter or a J2534 cable has none of these.
+pub fn identify_target(target: &crate::port::Target) -> Result<AdapterInfo, String> {
+    use crate::port::Target;
+    let how = |p: Box<dyn Port>, reset: Reset| Elm::setup(p, "", reset);
+    let (elm, note) = match target {
+        Target::Serial { path, baud } => connect_serial_with(
+            path,
+            *baud,
+            &mut |b| {
+                Target::Serial {
+                    path: path.clone(),
+                    baud: b,
+                }
+                .open()
+            },
+            &how,
+        )?,
+        Target::Sim { .. } | Target::Bluetooth { .. } | Target::Tcp(_) => {
+            return identify_port(target.open().map_err(|e| e.to_string())?);
+        }
+        _ => {
+            return Err(
+                "not an ELM327 or STN adapter (a CAN interface, an SLCAN adapter or a J2534 cable): it has no ATI to \
+                 ask"
+                .into(),
+            )
+        }
+    };
+    Ok(identify_elm(elm, note))
+}
+
+/// `identify_target` on a port opened already (Bluetooth, Wi-Fi, the simulated adapter).
+pub(crate) fn identify_port(port: Box<dyn Port>) -> Result<AdapterInfo, String> {
+    let elm = Elm::setup(port, "", Reset::Full).map_err(|e| e.to_string())?;
+    Ok(identify_elm(elm, None))
+}
+
+/// `identify_target`'s answers from an adapter set up already.
+fn identify_elm(mut elm: Elm, note: Option<String>) -> AdapterInfo {
+    let device = if elm.stn.is_some() {
+        elm.command("STDI", Duration::from_secs(2))
+            .ok()
+            .and_then(|r| {
+                r.into_iter()
+                    .find(|l| !l.is_empty() && l != "?" && l != "OK")
+            })
+    } else {
+        None
+    };
+    AdapterInfo {
+        id: elm.id.clone(),
+        stn: elm.stn.clone(),
+        device,
+        speed: elm.port.speed(),
+        voltage: elm.voltage,
+        note,
+    }
+}
+
 /// Opens the adapter `target` names to listen only (ICA-80): `Elm::listen` on `protocol`, with `connect_target`'s search for
 /// a serial adapter's speed (which speaks only to the adapter). Nothing goes onto the bus.
 pub fn listen_target(
@@ -484,7 +561,11 @@ impl Elm {
             .find(|l| l.to_uppercase().contains("ELM"))
             .cloned()
             .unwrap_or_else(|| reset.join(" "));
-        for c in ["ATE0", "ATL0", "ATS1", "ATH1", sp] {
+        // no protocol command (`sp` empty) when only the adapter's identity is asked (`identify_target`)
+        for c in ["ATE0", "ATL0", "ATS1", "ATH1", sp]
+            .into_iter()
+            .filter(|c| !c.is_empty())
+        {
             let r = elm.command(c, Duration::from_secs(2))?;
             if !r.iter().any(|l| l == "OK") {
                 return Err(ObdError::Adapter(format!("{c} gave {r:?}")));

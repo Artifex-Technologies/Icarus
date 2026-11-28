@@ -611,38 +611,49 @@ impl Procs {
     /// (`PID/fd/N`, links to where each leads) include it, named by `PID/comm`. Only what this user may read: the programs
     /// of other users (ModemManager, gpsd) are not seen.
     pub fn holding(&self, path: &Path) -> Vec<(u32, String)> {
-        let want = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        let Ok(all) = std::fs::read_dir(&self.0) else {
-            return Vec::new();
-        };
-        let mut out = Vec::new();
-        for p in all.flatten() {
-            let Some(pid) = p.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else {
-                continue;
-            };
-            let Ok(fds) = std::fs::read_dir(p.path().join("fd")) else {
-                continue;
-            };
-            if fds
-                .flatten()
-                .any(|f| std::fs::read_link(f.path()).is_ok_and(|to| to == want))
-            {
-                let name = std::fs::read_to_string(p.path().join("comm"))
-                    .map(|c| c.trim().to_string())
-                    .unwrap_or_default();
-                out.push((
-                    pid,
-                    if name.is_empty() {
-                        "a program".into()
-                    } else {
-                        name
-                    },
-                ));
-            }
-        }
-        out.sort();
-        out
+        holding_in(&crate::systree::ThisSystem, &self.0, path)
     }
+}
+
+/// `Procs::holding` with `/proc` at `procs`, read through `tree` (ICA-216: `icarus doctor` and its made-up computer).
+pub fn holding_in(
+    tree: &dyn crate::systree::SystemTree,
+    procs: &Path,
+    path: &Path,
+) -> Vec<(u32, String)> {
+    let want = tree.resolve(path).unwrap_or_else(|| path.to_path_buf());
+    let Some(all) = tree.list(procs) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for p in all {
+        let Ok(pid) = p.parse::<u32>() else {
+            continue;
+        };
+        let dir = procs.join(&p);
+        let Some(fds) = tree.list(&dir.join("fd")) else {
+            continue;
+        };
+        if fds.iter().any(|f| {
+            tree.read_link(&dir.join("fd").join(f))
+                .is_some_and(|to| to == want)
+        }) {
+            let name = tree
+                .read(&dir.join("comm"))
+                .map(|c| c.trim().to_string())
+                .unwrap_or_default();
+            out.push((
+                pid,
+                if name.is_empty() {
+                    "a program".into()
+                } else {
+                    name
+                },
+            ));
+        }
+    }
+    out.sort();
+    out
 }
 
 /// The refusal of a port that is open already: named by `holders` (from `Procs::holding`) when they could be seen, this

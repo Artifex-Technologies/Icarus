@@ -199,6 +199,12 @@ Fuel (a vehicle's fill-ups, in fuel.toml in its folder; nothing is sent to a veh
 Interfaces:
   icarus devices                             the tuners and interfaces plugged in (SCT, COBB, HP Tuners, CP210x/FTDI
                                              cables...), what each is and whether Icarus can open it; nothing is sent
+  icarus doctor [--adapter A]                check my setup in one go: adapters and who may open them (the uucp
+                                             group, the udev rule), Bluetooth and a paired OBD adapter, who holds an
+                                             adapter, notices and tones, the installed version, units, the Read-Only
+                                             list and where the files are; each with a verdict and what to do. With
+                                             --adapter, the adapter's own ID, chip and serial speed (reads only;
+                                             refused while a recording or another program has it). Changes nothing
 
 Tools:
   icarus gps [--gps SOURCE] [--seconds 15] [--position]
@@ -327,6 +333,7 @@ fn main() -> ExitCode {
         Some("record") => record::cmd_record(&args[1..]),
         Some("mcp") => mcp::serve(),
         Some("devices") => cmd_devices(),
+        Some("doctor") => cmd_doctor(&args[1..]),
         Some("-h" | "--help" | "help") | None => {
             println!("{HELP}");
             Ok(())
@@ -3261,8 +3268,72 @@ fn cmd_devices() -> Result<(), String> {
     Ok(())
 }
 
+/// `icarus doctor [--adapter A]` (ICA-216): every setup check (`icarus_obd::doctor`), read from this computer through its
+/// system tree; with `--adapter` (only when given: never `ICARUS_ADAPTER`'s default), the adapter's own identity too. It
+/// changes nothing; it ends with an error when something is to be fixed.
+fn cmd_doctor(a: &[String]) -> Result<(), String> {
+    let tree = icarus_obd::systree::ThisSystem;
+    let report = doctor_report(a, &tree, &icarus_obd::elm::identify_target)?;
+    print!("{}", report.text());
+    match report.count(icarus_obd::doctor::Verdict::Fail) {
+        0 => Ok(()),
+        n => Err(format!("{n} check(s) to fix (above)")),
+    }
+}
+
+/// `icarus doctor`'s report on `tree`, the adapter (when `--adapter` names one) asked through `identify`.
+fn doctor_report(
+    a: &[String],
+    tree: &dyn icarus_obd::systree::SystemTree,
+    identify: &dyn Fn(&Target) -> Result<icarus_obd::elm::AdapterInfo, String>,
+) -> Result<icarus_obd::doctor::Report, String> {
+    use icarus_obd::doctor;
+    let args = parse_args(a, &["adapter"])?;
+    if !args.pos.is_empty() {
+        return Err("usage: icarus doctor [--adapter A]".into());
+    }
+    let mut report = doctor::run(tree);
+    if let Some(spec) = args.opt("adapter") {
+        let target = Target::parse(spec)?;
+        report.push(doctor::adapter_check(tree, spec, &target, identify));
+    }
+    Ok(report)
+}
+
 #[cfg(test)]
 mod tests {
+    /// ICA-216: `icarus doctor` on a made-up computer: every check said, the adapter's only with --adapter, nothing
+    /// else on the line taken.
+    #[test]
+    fn doctor_reports_on_the_computer_it_is_given() {
+        use icarus_obd::systree::MadeUp;
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let tree = MadeUp::new();
+        let id = |_: &super::Target| -> Result<icarus_obd::elm::AdapterInfo, String> {
+            Ok(icarus_obd::elm::AdapterInfo {
+                id: "ELM327 v1.5".into(),
+                speed: Some(115_200),
+                ..Default::default()
+            })
+        };
+        let r = super::doctor_report(&[], &tree, &id).unwrap();
+        assert!(r.get("adapters").is_some() && r.get("adapter").is_none());
+        assert!(
+            r.text().contains("[check] Files: HOME is not set"),
+            "{}",
+            r.text()
+        );
+        let r = super::doctor_report(&s(&["--adapter", "sim"]), &tree, &id).unwrap();
+        let c = r.get("adapter").unwrap();
+        assert!(
+            c.lines
+                .contains(&"serial speed: answered at 115200 baud".to_string()),
+            "{c:?}"
+        );
+        assert!(super::doctor_report(&s(&["extra"]), &tree, &id).is_err());
+        assert!(tree.writes().is_empty());
+    }
+
     /// `--protocol`: hex 1 to C, "A" being J1939 (it was refused: the letter was stripped as a prefix), and the "A6" form.
     #[test]
     fn protocol_numbers_include_j1939() {

@@ -314,6 +314,8 @@ pub struct SimCar {
 const ELM_ID: &str = "ELM327 v1.5";
 /// What the simulated STN chip answers STI.
 const STI: &str = "STN2255 v5.10.3";
+/// What the simulated STN chip answers STDI (its device line).
+pub(crate) const STDI: &str = "OBDLink MX+ r2.3 (simulated)";
 
 /// How many bytes the simulated adapter's transmit buffer holds while it watches. Made up: the ELM327 datasheet gives the
 /// ELM327's as 512 bytes, and I have no published size for the STN's; with this one the simulated EX on a busy bus stops
@@ -1908,6 +1910,7 @@ impl SimCar {
                 return;
             }
             "STI" if self.stn => vec![STI.into()],
+            "STDI" if self.stn => vec![STDI.into()],
             // ATCRA's answer ID stays until ATCRA alone clears it, whatever is said of the pass filters or the filter and
             // mask after it: whether a real ELM327 or STN lets those replace it is not known here, so the simulated
             // adapter takes the case that needs Icarus to clear it (`Elm::probe`)

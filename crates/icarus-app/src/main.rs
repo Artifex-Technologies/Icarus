@@ -88,6 +88,8 @@ enum Bg {
     Sarina(Result<String, String>),
     /// What a GPS receiver said over some seconds.
     Gps(Result<icarus_obd::gps::Fix, String>, f64),
+    /// Check my setup's report (ICA-216).
+    Setup(Box<icarus_obd::doctor::Report>),
 }
 
 /// What a clear removes the codes from: None = every OBD-II module, Some = one module (tx, rx, dialect).
@@ -415,6 +417,9 @@ struct App {
     /// The last health check (ICA-214), and whether one is under way.
     health: Option<Result<icarus_obd::health::Health, String>>,
     checking_health: bool,
+    /// Check my setup's last report (ICA-216, Settings), and whether one is under way.
+    setup: Option<icarus_obd::doctor::Report>,
+    checking_setup: bool,
     /// The bench make named for this session (ICA-222; empty: from the VIN alone), and the profiles' names to pick from.
     bench_make: String,
     make_ids: Vec<String>,
@@ -622,6 +627,8 @@ impl App {
             selftests: None,
             health: None,
             checking_health: false,
+            setup: None,
+            checking_setup: false,
             bench_make: String::new(),
             make_ids: icarus_obd::vehicles::load(icarus_obd::vehicles::user_dir().as_deref())
                 .0
@@ -942,6 +949,17 @@ impl App {
                         }
                         Err(e) => self.error = Some(format!("GPS: {e}")),
                     }
+                }
+                Bg::Setup(r) => {
+                    self.checking_setup = false;
+                    self.status = match (
+                        r.count(icarus_obd::doctor::Verdict::Fail),
+                        r.count(icarus_obd::doctor::Verdict::Warn),
+                    ) {
+                        (0, 0) => "Setup checked: everything Icarus needs is in place.".into(),
+                        (f, w) => format!("Setup checked: {f} to fix, {w} to check (Settings)."),
+                    };
+                    self.setup = Some(*r);
                 }
                 Bg::Sarina(r) => {
                     self.sarina_busy = false;
@@ -2955,6 +2973,64 @@ impl App {
         });
     }
 
+    /// Check my setup (ICA-216): `icarus doctor`'s checks, run on a thread of their own (bluetoothctl can take a few
+    /// seconds), each with its verdict and what to do. Reads only; the adapter itself is asked only by `icarus doctor
+    /// --adapter`, since the window may be connected to it.
+    fn setup_check(&mut self, ui: &mut egui::Ui, pal: &theme::Palette) {
+        use icarus_obd::doctor::Verdict;
+        ui.label(RichText::new("Check my setup").strong());
+        ui.add(egui::Label::new(RichText::new("Whether this computer is ready for Icarus: the adapters and who may open them, Bluetooth and a paired adapter, who holds an adapter, notices and tones, the version, the units, the Read-Only list and where the files are. It only reads: what to do is said, never done. icarus doctor says the same.").weak()).wrap());
+        let label = if self.checking_setup {
+            "Checking..."
+        } else {
+            "Check my setup"
+        };
+        if ui
+            .add_enabled(!self.checking_setup, egui::Button::new(label))
+            .clicked()
+        {
+            self.checking_setup = true;
+            let (tx, c) = (self.bg_tx.clone(), ui.ctx().clone());
+            std::thread::spawn(move || {
+                let r = icarus_obd::doctor::run(&icarus_obd::systree::ThisSystem);
+                let _ = tx.send(Bg::Setup(Box::new(r)));
+                c.request_repaint();
+            });
+        }
+        let Some(r) = &self.setup else {
+            return;
+        };
+        ui.add_space(6.0);
+        for c in &r.checks {
+            let color = match c.verdict {
+                Verdict::Ok => pal.green,
+                Verdict::Note => pal.dim,
+                Verdict::Warn => pal.amber,
+                Verdict::Fail => pal.red,
+            };
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(c.verdict.word()).color(color).strong());
+                ui.label(RichText::new(c.title).strong());
+                ui.label(&c.found);
+            });
+            if let Some(f) = &c.fix {
+                ui.add(
+                    egui::Label::new(RichText::new(format!("What to do: {f}")).color(color)).wrap(),
+                );
+            }
+            if !c.lines.is_empty() {
+                egui::CollapsingHeader::new(RichText::new("Details").small())
+                    .id_salt(("setup-check", c.id))
+                    .show(ui, |ui| {
+                        for l in &c.lines {
+                            ui.add(egui::Label::new(RichText::new(l).small().weak()).wrap());
+                        }
+                    });
+            }
+            ui.add_space(4.0);
+        }
+    }
+
     /// The window's own settings (the gear): the levels (Advanced shows more and unlocks module control; Tuning shows only while
     /// Advanced is on and asks first), the units, the theme, and the adapters, protocols and devices Icarus works with.
     fn page_app(&mut self, ui: &mut egui::Ui, pal: &theme::Palette) {
@@ -3066,6 +3142,8 @@ impl App {
                 }
             }
         }
+        ui.add_space(18.0);
+        self.setup_check(ui, pal);
         ui.add_space(18.0);
 
         // the devices and their roles (ICA-80): talk, or listen only (never sent a request)

@@ -25,6 +25,13 @@ pub enum Happened {
 }
 
 impl Happened {
+    pub const ALL: [Happened; 4] = [
+        Happened::Started,
+        Happened::Stalled,
+        Happened::Resumed,
+        Happened::Stopped,
+    ];
+
     /// The freedesktop sound theme's name for its tone: each its own, so it is told by ear.
     pub fn sound(self) -> &'static str {
         match self {
@@ -83,7 +90,16 @@ impl Desktop for System {
 }
 
 /// Where the freedesktop sound theme keeps its tones.
-const SOUNDS: &str = "/usr/share/sounds/freedesktop/stereo";
+pub const SOUNDS: &str = "/usr/share/sounds/freedesktop/stereo";
+
+/// The players that play the theme's files, first found first (`icarus doctor` checks for the same ones).
+pub const FILE_PLAYERS: [&str; 2] = ["pw-play", "paplay"];
+
+/// The player that plays a tone by its name when no file player has the theme's files.
+pub const NAME_PLAYER: &str = "canberra-gtk-play";
+
+/// The program that shows the notices.
+pub const NOTIFIER: &str = "notify-send";
 
 /// Whether `ICARUS_QUIET` asks for silence.
 pub fn quiet_from_env() -> bool {
@@ -234,16 +250,16 @@ impl Notifier {
     fn tone(&mut self, what: Happened) {
         let file = PathBuf::from(SOUNDS).join(format!("{}.oga", what.sound()));
         let have_file = self.desktop.exists(&file);
-        for player in ["pw-play", "paplay"] {
+        for player in FILE_PLAYERS {
             if have_file && self.desktop.has(player) {
                 self.desktop
                     .run(player, &[file.to_string_lossy().into_owned()]);
                 return;
             }
         }
-        if self.desktop.has("canberra-gtk-play") {
+        if self.desktop.has(NAME_PLAYER) {
             self.desktop.run(
-                "canberra-gtk-play",
+                NAME_PLAYER,
                 &[
                     "-i".into(),
                     what.sound().into(),

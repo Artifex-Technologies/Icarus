@@ -9,6 +9,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::systree::SystemTree;
+
 /// How Linux reaches a device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Access {
@@ -225,7 +227,7 @@ pub fn udev_rule_covers(vendor: u16, product: u16, product_name: &str) -> bool {
 }
 
 /// What a serial port's owner group gives: on Arch and Labyrinth OS, the uucp group owns /dev/ttyUSB* and /dev/ttyACM*.
-const UUCP: &str = "join the uucp group (sudo usermod -aG uucp $USER), then log in again";
+pub const UUCP: &str = "join the uucp group (sudo usermod -aG uucp $USER), then log in again";
 
 impl Found {
     /// Whether Icarus can use it now, and if not, what to do: the udev rule where it covers the device (and the uucp group
@@ -264,65 +266,54 @@ impl Found {
     }
 }
 
-fn hex(root: &Path, dev: &str, file: &str) -> Option<u16> {
-    u16::from_str_radix(
-        std::fs::read_to_string(root.join(dev).join(file))
-            .ok()?
-            .trim(),
-        16,
-    )
-    .ok()
+fn hex(tree: &dyn SystemTree, root: &Path, dev: &str, file: &str) -> Option<u16> {
+    u16::from_str_radix(tree.read(&root.join(dev).join(file))?.trim(), 16).ok()
 }
 
-fn text(root: &Path, dev: &str, file: &str) -> String {
-    std::fs::read_to_string(root.join(dev).join(file))
+fn text(tree: &dyn SystemTree, root: &Path, dev: &str, file: &str) -> String {
+    tree.read(&root.join(dev).join(file))
         .map(|s| s.trim().to_string())
         .unwrap_or_default()
 }
 
 /// The recognised devices plugged in now, read from `root` (`/sys/bus/usb/devices`).
 pub fn scan(root: &Path) -> Vec<Found> {
-    let Ok(entries) = std::fs::read_dir(root) else {
+    scan_in(&crate::systree::ThisSystem, root)
+}
+
+/// `scan`, reading through `tree` (ICA-216: `icarus doctor` and its tests' made-up computer). A device's serial number
+/// (its `serial` file) is never read.
+pub fn scan_in(tree: &dyn SystemTree, root: &Path) -> Vec<Found> {
+    let Some(names) = tree.list(root) else {
         return vec![];
     };
-    let mut names: Vec<String> = entries
-        .flatten()
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
-    names.sort();
     let mut out = Vec::new();
     for dev in names.iter().filter(|n| !n.contains(':')) {
-        let (Some(vendor), Some(product)) =
-            (hex(root, dev, "idVendor"), hex(root, dev, "idProduct"))
-        else {
+        let (Some(vendor), Some(product)) = (
+            hex(tree, root, dev, "idVendor"),
+            hex(tree, root, dev, "idProduct"),
+        ) else {
             continue;
         };
         let Some(known) = identify(vendor, product) else {
             continue;
         };
-        let product_name = text(root, dev, "product");
-        let label = [text(root, dev, "manufacturer"), product_name.clone()]
+        let product_name = text(tree, root, dev, "product");
+        let label = [text(tree, root, dev, "manufacturer"), product_name.clone()]
             .into_iter()
             .filter(|s| !s.is_empty())
             .collect::<Vec<_>>()
             .join(" ");
-        let bus: u32 = text(root, dev, "busnum").parse().unwrap_or(0);
-        let num: u32 = text(root, dev, "devnum").parse().unwrap_or(0);
+        let bus: u32 = text(tree, root, dev, "busnum").parse().unwrap_or(0);
+        let num: u32 = text(tree, root, dev, "devnum").parse().unwrap_or(0);
         let mut ports = Vec::new();
         for iface in names.iter().filter(|n| n.starts_with(&format!("{dev}:"))) {
             let d = root.join(iface);
-            for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
-                let n = e.file_name().to_string_lossy().into_owned();
+            for n in tree.list(&d).unwrap_or_default() {
                 if n.starts_with("ttyUSB") {
                     ports.push(n);
                 } else if n == "tty" {
-                    ports.extend(
-                        std::fs::read_dir(e.path())
-                            .into_iter()
-                            .flatten()
-                            .flatten()
-                            .map(|t| t.file_name().to_string_lossy().into_owned()),
-                    );
+                    ports.extend(tree.list(&d.join("tty")).unwrap_or_default());
                 }
             }
         }

@@ -19,6 +19,7 @@ bidirectional shop scanner, a tuning suite and a bus analyser: on Linux, for man
 | Vehicle info | VIN decoder, make profiles, named vehicles, vehicle folders, NHTSA model/engine (asks first) and recalls; a fuel log per vehicle (`icarus fuel add/list`, the Garage page's Fuel log card; `fuel.toml` in its folder, ICA-211): each fill-up taken to fill the tank, the blend in it estimated by volume from what was left and the gallons added (the tank's size set once, a 2016-2023 Tacoma's 21.1 without it), the leftover from before the first fill-up said, not guessed (or stated on it, `--before "91 E0"`); a fill-up added to the file as it is on disk, the folder locked; a recording names the tank it ran on and its estimated blend in a `# fuel:` line at the start of each part file, and reading it works the tank out again from the log by its `# vehicle:` and `# began:` lines (a fill-up with a date only: no tank for that day's drives, said) |
 | Bus | monitor (OBDLink monitor mode, Linux SocketCAN): ID table with changing bytes, diagnostics in words, tests learned from another tool; a USB adapter's serial link sped up for the watch and put back after (STBR/ATBRD, ICA-213; tested on the simulated adapter only) |
 | Hardware | ELM327/STN over USB, Bluetooth, Wi-Fi |
+| Setup | `icarus doctor` and the window's Check my setup (ICA-216): adapters and who may open them, the serial ports' group, the udev rule, Bluetooth and a paired OBD adapter, rfcomm, who holds an adapter, notices and tones, the installed version, units, the Read-Only list's vehicles by name, where the files are; with `--adapter`, the adapter's ID, chip, device line and serial speed. Each with a verdict and what to do; it changes nothing |
 | Vehicles | 12 makes + generic, addresses from public sources |
 
 ## The foundation (2026-11-07)
@@ -161,6 +162,30 @@ A module is bricked when a write stops halfway or puts the wrong thing in. Icaru
 3. After: read back and compare; a tested way back to the stock image.
 4. Wired interface only: Bluetooth (the MX+) is for reading and logging, never flashing (a dropped link mid-write can brick
    the module).
+
+## Checking the setup (ICA-216)
+
+`crates/icarus-obd/src/doctor.rs` checks this computer and says, for each check, a verdict and what to do; the command
+(`icarus doctor`) and the window (Settings, Check my setup) show the same report. The rules it keeps:
+
+- **Reads only, and through one door.** Every read of the computer goes through a `systree::SystemTree`: file reads,
+  folder listings, symlinks, access(2) (which opens nothing), the PATH, environment variables and a few commands' output.
+  It has no write. The commands are only those `systree::read_only_command` lists (listing and asking about Bluetooth
+  devices, `rfcomm` with nothing after it, `pacman -Q`); `ThisSystem` refuses any other before it starts, and ends a
+  command of its own that has not answered in a few seconds (bluetoothctl waiting for a daemon), nothing else.
+  `devices::scan_in` and `port::holding_in` read through it too, so the doctor sees what the rest of Icarus sees.
+- **Advice, never action.** No sudo, no group change, no install, no pairing or binding, no program stopped: what to do is
+  text ("sudo usermod -aG uucp $USER, then log in again").
+- **Nothing private in full.** Every line goes through `doctor::scrub`: a MAC address keeps its maker's half, a VIN is
+  masked as `vin::masked` does, a Bluetooth name's serial digits are hidden, a device's serial number is never read, and the
+  Read-Only list is said by the vehicles' names.
+- **The adapter only when asked.** `--adapter A` (never the default adapter) asks the adapter who it is
+  (`elm::identify_target`: a reset, ATI, STI, STDI, ATRV; no protocol set, nothing onto the bus), and not at all while an
+  `icarus record` that may use it runs or /proc shows another program with its port open. The window does not offer it,
+  since it may be connected to that adapter itself.
+- **Tests on a made-up computer.** `systree::MadeUp` holds files, links, devices, programs and commands' answers in memory;
+  the tests run every check on a healthy one (all pass) and on each broken one (named with what to do), and hold every
+  run to no write and no command off the read-only list. No test reads the real computer.
 
 ## Known limitations
 

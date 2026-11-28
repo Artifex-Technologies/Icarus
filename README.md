@@ -43,6 +43,44 @@ bash scripts/install-local.sh            # builds, puts icarus and icarus-app in
 bash scripts/install-local.sh --remove   # takes that out again (do this before installing the package: ~/.local/bin comes first)
 ```
 
+## Checking your setup
+
+`icarus doctor` (or Check my setup on the window's Settings page) looks over this computer in one go, so a setup problem
+is found before it stops a drive, not one at a time by hand. Each check gets a verdict (`ok`, `note`, `check` or `fix`) and,
+when something is to be done, what to do:
+
+| Check | What it looks at |
+| --- | --- |
+| Adapters | the tuners and cables plugged in (as `icarus devices` lists them) and the serial ports, each yours to open or not |
+| Serial ports' group | whether I am in the group that owns them (uucp on Arch), only added and not yet logged in again, or not at all |
+| udev rule | `70-icarus-tuners.rules` in `/etc/udev/rules.d` or the package's `/usr/lib/udev/rules.d`, and whether it is this build's |
+| Bluetooth | a controller, not blocked (rfkill), bluetoothd running, bluetoothctl there, the controller on |
+| Bluetooth adapter | an OBD adapter (an OBDLink MX+ and the like, by its name) paired, trusted, connected now |
+| rfcomm | any `/dev/rfcomm` port bound (none is needed: `bt:ADDRESS` reaches the adapter directly) |
+| Who has an adapter | a serial port another program has open, named (an Icarus window, a recording...), and the Icarus programs running |
+| Notices and tones | notify-send, and a player for a recording's tones (pw-play or paplay with the sound theme, or canberra) |
+| Version | the installed icarus-git against this build, this program and the `icarus` on the PATH |
+| Units | what the window shows (its Settings, or the locale) |
+| Read-Only list | the vehicles switched to Read-Only, by their names (never their VINs), and `ICARUS_READ_ONLY` |
+| Files | where the settings, the action log, the garage, the recordings and the reports are |
+
+```sh
+icarus doctor                       # everything above; ends with an error when something is to fix
+icarus doctor --adapter bt:AA:BB:CC:DD:EE:FF
+                                    # and the adapter itself: its ID (ATI), an STN's chip and device line (STI, STDI),
+                                    # the serial speed it answered at and the voltage at the port
+```
+
+It changes nothing: no sudo, no group changes, no installs, no pairing or binding, and it stops no program. What to do is
+advice for me to follow ("sudo usermod -aG uucp $USER, then log in again"). It runs only commands that read
+(`bluetoothctl devices Paired`, `info` and `show`, `rfcomm` with nothing after it, `pacman -Q icarus-git`), and gives each
+a few seconds. `--adapter` is asked only when given (never `ICARUS_ADAPTER`'s default), speaks only to the adapter (a reset,
+then ATI, STI, STDI and ATRV: no protocol is set and nothing goes onto the vehicle's bus), and is refused while a recording
+or another program may have that adapter. A MAC address shows its maker's half only (`00:04:3E:**:**:**`), a VIN its
+serial part masked, an MX+'s serial digits in its name as `*`, and a device's serial number is never read. A program of
+another user (ModemManager, gpsd) cannot be seen holding a port, and a port's exclusive mark shows only to a program that
+opens it, which the doctor does not.
+
 ## Trouble codes
 
 Every code comes explained: what it means (standard codes in Icarus's own words, the maker's own codes from the vehicle

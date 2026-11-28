@@ -100,14 +100,20 @@ fn normal(vin: &str) -> String {
 
 /// The VINs switched to read-only in `file` (none when it is missing or cannot be read).
 pub fn list_in(file: &Path) -> BTreeSet<String> {
+    std::fs::read_to_string(file)
+        .map(|t| parse_list(&t))
+        .unwrap_or_default()
+}
+
+/// The VINs a `read-only.toml`'s text switches (none when it does not read).
+pub fn parse_list(text: &str) -> BTreeSet<String> {
     #[derive(serde::Deserialize)]
     struct List {
         #[serde(default)]
         vins: Vec<String>,
     }
-    std::fs::read_to_string(file)
+    toml::from_str::<List>(text)
         .ok()
-        .and_then(|t| toml::from_str::<List>(&t).ok())
         .map(|m| m.vins.iter().map(|v| normal(v)).collect())
         .unwrap_or_default()
 }
