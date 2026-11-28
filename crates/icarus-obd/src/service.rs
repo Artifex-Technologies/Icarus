@@ -254,8 +254,10 @@ pub fn run(link: &mut dyn Link, s: &ServiceDef, wired: bool) -> Result<String, S
 /// A `[[service]]` entry for a vehicle profile.
 pub fn to_toml(s: &ServiceDef) -> String {
     let mut t = format!(
-        "[[service]]\nname = {:?}\nmodule = 0x{:03X}\nroutine = 0x{:04X}\n",
-        s.name, s.module, s.routine
+        "[[service]]\nname = {}\nmodule = 0x{:03X}\nroutine = 0x{:04X}\n",
+        crate::vehicles::toml_string(&s.name),
+        s.module,
+        s.routine
     );
     if let Some(rx) = s.rx {
         t += &format!("rx = 0x{rx:03X}\n");
@@ -292,7 +294,7 @@ pub fn to_toml(s: &ServiceDef) -> String {
         t += "wired = true\n";
     }
     if !s.warning.is_empty() {
-        t += &format!("warning = {:?}\n", s.warning);
+        t += &format!("warning = {}\n", crate::vehicles::toml_string(&s.warning));
     }
     t += &format!("checked = {}\n", s.checked);
     t

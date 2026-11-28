@@ -71,10 +71,7 @@ pub fn shown(unit: &str, v: f64) -> (f64, &str) {
 }
 
 pub fn shown_in(u: crate::levels::Units, unit: &str, v: f64) -> (f64, &str) {
-    match customary(unit, v) {
-        Some(c) if customary_first(u) => c,
-        _ => (v, unit),
-    }
+    shown_by(customary_first(u), unit, v)
 }
 
 /// A value as text in the chosen units, the other unit after it in parentheses when both are chosen: "44.7 mph",
@@ -104,10 +101,22 @@ pub fn pid_value_text_in(
 }
 
 fn text_in(u: crate::levels::Units, absolute: bool, unit: &str, v: f64, dec: usize) -> String {
+    text_by(
+        customary_first(u),
+        u == crate::levels::Units::Both,
+        absolute,
+        unit,
+        v,
+        dec,
+    )
+}
+
+/// `text_in` with the order given: the customary unit first or the metric one, and the other after it or not.
+fn text_by(us_first: bool, both: bool, absolute: bool, unit: &str, v: f64, dec: usize) -> String {
     let label = |x: &str| icarus_obd::units::unit_label(x, absolute);
-    let (x, xu) = shown_in(u, unit, v);
+    let (x, xu) = shown_by(us_first, unit, v);
     let first = format!("{x:.dec$} {}", label(xu)).trim_end().to_string();
-    match also_in(u, unit, v) {
+    match both.then(|| also_by(us_first, unit, v)).flatten() {
         Some((y, yu)) => format!("{first} ({y:.dec$} {})", label(yu)),
         None => first,
     }
@@ -128,7 +137,16 @@ pub fn pid_also(pid: u8, unit: &str, v: f64) -> Option<(f64, String)> {
 }
 
 pub fn pid_also_in(u: crate::levels::Units, pid: u8, unit: &str, v: f64) -> Option<(f64, String)> {
-    let (y, yu) = also_in(u, unit, v)?;
+    if u != crate::levels::Units::Both {
+        return None;
+    }
+    pid_also_by(customary_first(u), pid, unit, v)
+}
+
+/// `pid_also_in` with both units chosen and the order given (`us_first`: the customary unit first, so the metric one is
+/// the other).
+fn pid_also_by(us_first: bool, pid: u8, unit: &str, v: f64) -> Option<(f64, String)> {
+    let (y, yu) = also_by(us_first, unit, v)?;
     Some((
         y,
         icarus_obd::units::unit_label(yu, icarus_obd::units::absolute(pid)),
@@ -136,12 +154,27 @@ pub fn pid_also_in(u: crate::levels::Units, pid: u8, unit: &str, v: f64) -> Opti
 }
 
 /// With both units chosen: the value in the other unit, shown beside the first (None otherwise, or for a unit with no other).
-pub fn also_in(u: crate::levels::Units, unit: &str, v: f64) -> Option<(f64, &str)> {
+/// The window uses `pid_also_in` and `text_in`, which come to the same; the tests check this one.
+#[cfg(test)]
+fn also_in(u: crate::levels::Units, unit: &str, v: f64) -> Option<(f64, &str)> {
     if u != crate::levels::Units::Both {
         return None;
     }
+    also_by(customary_first(u), unit, v)
+}
+
+/// The other unit's value, the first being the customary one (`us_first`) or the metric one.
+fn also_by(us_first: bool, unit: &str, v: f64) -> Option<(f64, &str)> {
     let c = customary(unit, v)?;
-    Some(if customary_first(u) { (v, unit) } else { c })
+    Some(if us_first { (v, unit) } else { c })
+}
+
+/// The first unit's value, the customary one (`us_first`) where the unit has one, else the vehicle's own.
+fn shown_by(us_first: bool, unit: &str, v: f64) -> (f64, &str) {
+    match customary(unit, v) {
+        Some(c) if us_first => c,
+        _ => (v, unit),
+    }
 }
 
 /// The unit in a recording's column name (`"Vehicle speed [km/h]"`).
@@ -958,11 +991,23 @@ mod tests {
         assert_eq!(t(Units::Imperial, 0x0A, 300.0), "43.5 psi", "gauge");
         assert_eq!(t(Units::Imperial, 0x23, 300.0), "43.5 psi", "gauge rail");
         assert_eq!(t(Units::Metric, 0x0B, 48.0), "48.0 kPa");
-        let both = t(Units::Both, 0x0B, 48.0);
-        assert!(
-            both == "7.0 psi absolute (48.0 kPa)" || both == "48.0 kPa (7.0 psi absolute)",
-            "{both}"
+        // both units, in each order (the customary unit first, as in the US, or the metric one): exact either way
+        assert_eq!(
+            text_by(true, true, true, "kPa", 48.0, 1),
+            "7.0 psi absolute (48.0 kPa)"
         );
+        assert_eq!(
+            text_by(false, true, true, "kPa", 48.0, 1),
+            "48.0 kPa (7.0 psi absolute)"
+        );
+        assert_eq!(
+            text_by(false, true, false, "kPa", 300.0, 1),
+            "300.0 kPa (43.5 psi)",
+            "gauge"
+        );
+        // Both through the window's own path: one of the two orders above, as this system's custom picks
+        let both = t(Units::Both, 0x0B, 48.0);
+        assert_eq!(both, text_by(us_units(), true, true, "kPa", 48.0, 1));
         // not a pressure: as before
         assert_eq!(
             pid_value_text_in(Units::Imperial, 0x0D, "km/h", 72.0, 1),
@@ -972,8 +1017,26 @@ mod tests {
         assert_eq!(pid_unit_in(Units::Imperial, 0x0B, "kPa"), "psi absolute");
         assert_eq!(pid_unit_in(Units::Imperial, 0x0A, "kPa"), "psi");
         assert_eq!(pid_unit_in(Units::Metric, 0x33, "kPa"), "kPa");
-        let other = pid_also_in(Units::Both, 0x33, "kPa", 101.0).unwrap().1;
-        assert!(other == "psi absolute" || other == "kPa", "{other}");
+        let r = |x: Option<(f64, String)>| x.map(|(v, u)| ((v * 10.0).round() / 10.0, u));
+        assert_eq!(
+            r(pid_also_by(false, 0x33, "kPa", 101.0)),
+            Some((14.6, "psi absolute".to_string())),
+            "metric first: the other is psi, absolute"
+        );
+        assert_eq!(
+            r(pid_also_by(true, 0x33, "kPa", 101.0)),
+            Some((101.0, "kPa".to_string())),
+            "customary first: the other is kPa"
+        );
+        assert_eq!(
+            r(pid_also_by(false, 0x0A, "kPa", 300.0)),
+            Some((43.5, "psi".to_string())),
+            "gauge: plain psi"
+        );
+        assert_eq!(
+            pid_also_in(Units::Both, 0x33, "kPa", 101.0),
+            pid_also_by(us_units(), 0x33, "kPa", 101.0)
+        );
         assert_eq!(pid_also_in(Units::Imperial, 0x33, "kPa", 101.0), None);
     }
 

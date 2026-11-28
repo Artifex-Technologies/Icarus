@@ -597,23 +597,156 @@ fn add_entry_in(
         return Err(format!("the new entry: {why}"));
     }
     // a learned entry on a make whose profile names no airbag module, aimed at a module it does not name (ICA-200)
-    if let Some((what, name, why)) = cautioned_entries(&new, &current()).into_iter().next() {
+    let profiles = current();
+    if let Some((what, name, why)) = cautioned_entries(&new, &profiles).into_iter().next() {
         return Err(format!("the new entry: {what} \"{name}\": {why}"));
+    }
+    // a name with a control or format character (a zero-width space, a soft hyphen) reads like another name
+    if let Some(why) = names_of(&new).into_iter().find_map(|(what, n)| {
+        name_refused(&n).map(|why| format!("the new entry: {what} {n:?}: {why}"))
+    }) {
+        return Err(why);
+    }
+    // a name the make's profile already uses for that kind: merging replaces by name, so one would drop the other
+    if let Some(p) = profiles.iter().find(|p| p.id == profile_id) {
+        let source = if p.source == "built in" {
+            format!("Icarus's built-in {profile_id} profile")
+        } else {
+            p.source.clone()
+        };
+        name_taken(&new, p, &source)?;
     }
     let dir = dir().ok_or("no config folder")?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let p = dir.join(format!("{profile_id}.toml"));
-    let mut text = std::fs::read_to_string(&p).unwrap_or_else(|_| {
-        format!("# My additions to Icarus's {profile_id} profile (merged into the built-in one).\n")
-    });
+    // only a file that is not there yet starts from the header: one that cannot be read (not UTF-8, no permission) is
+    // left as it is, never overwritten
+    let mut text = match std::fs::read_to_string(&p) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => format!(
+            "# My additions to Icarus's {profile_id} profile (merged into the built-in one).\n"
+        ),
+        Err(e) => {
+            return Err(format!(
+                "{}: {e}; the file was left as it is, nothing added",
+                p.display()
+            ))
+        }
+    };
+    // the file as it is now (the profiles above may be a few seconds old)
+    let source = p.display().to_string();
+    name_taken(&new, &parse(profile_id, &source, &text)?, &source)?;
     if !text.ends_with('\n') {
         text.push('\n');
     }
     text.push('\n');
     text.push_str(entry);
-    parse(profile_id, &p.display().to_string(), &text)?;
-    std::fs::write(&p, text).map_err(|e| format!("{}: {e}", p.display()))?;
+    parse(profile_id, &source, &text)?;
+    write_replacing(&p, &text)?;
     Ok(p)
+}
+
+/// Each test's, setting's (and its values') and service routine's name in `p`: (what, the name).
+fn names_of(p: &Profile) -> Vec<(&'static str, String)> {
+    let mut n: Vec<(&'static str, String)> =
+        p.tests.iter().map(|t| ("test", t.name.clone())).collect();
+    for s in &p.settings {
+        n.push(("setting", s.name.clone()));
+        n.extend(s.values.keys().map(|k| ("setting value", k.clone())));
+    }
+    n.extend(p.services.iter().map(|s| ("service", s.name.clone())));
+    n
+}
+
+/// Why a name is refused, if it is: empty, or with a control character or an invisible format character in it.
+pub fn name_refused(name: &str) -> Option<String> {
+    if name.trim().is_empty() {
+        return Some("a name is needed".into());
+    }
+    // Unicode's format characters (category Cf): invisible, or changing the text's direction
+    let format = |c: char| {
+        matches!(c as u32,
+            0xAD | 0x600..=0x605 | 0x61C | 0x6DD | 0x70F | 0x890..=0x891 | 0x8E2 | 0x180E | 0x200B..=0x200F
+            | 0x202A..=0x202E | 0x2060..=0x2064 | 0x2066..=0x206F | 0xFEFF | 0xFFF9..=0xFFFB | 0x110BD
+            | 0x110CD | 0x13430..=0x1343F | 0x1BCA0..=0x1BCA3 | 0x1D173..=0x1D17A | 0xE0001 | 0xE0020..=0xE007F)
+    };
+    let bad = name.chars().find(|c| c.is_control() || format(*c))?;
+    Some(format!(
+        "a name may not hold a control or invisible character (U+{:04X}): type it again with letters, digits and spaces",
+        bad as u32
+    ))
+}
+
+/// Refuses a new entry whose name (trimmed, in any case) an entry of the same kind in `have` already uses.
+fn name_taken(new: &Profile, have: &Profile, source: &str) -> Result<(), String> {
+    let same = |a: &str, b: &str| a.trim().to_lowercase() == b.trim().to_lowercase();
+    let taken = |what: &str, name: &str| -> Result<(), String> {
+        Err(format!(
+            "the new entry: the {what} name \"{}\" is taken by a {what} in {source}: give it another name",
+            name.trim()
+        ))
+    };
+    for t in &new.tests {
+        if have.tests.iter().any(|h| same(&h.name, &t.name)) {
+            return taken("test", &t.name);
+        }
+    }
+    for s in &new.settings {
+        if have.settings.iter().any(|h| same(&h.name, &s.name)) {
+            return taken("setting", &s.name);
+        }
+    }
+    for s in &new.services {
+        if have.services.iter().any(|h| same(&h.name, &s.name)) {
+            return taken("service", &s.name);
+        }
+    }
+    Ok(())
+}
+
+/// Writes `text` to `p` whole or not at all: into a new file in the same folder, flushed to the disk, then renamed over
+/// `p`, so a crash or a full disk midway leaves the old file as it was.
+fn write_replacing(p: &Path, text: &str) -> Result<(), String> {
+    use std::io::Write;
+    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("profile");
+    let tmp = p.with_file_name(format!(".{name}.new-{}", std::process::id()));
+    let written = (|| {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(text.as_bytes())?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, p)
+    })();
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("{}: {e}", p.display()));
+    }
+    // the rename itself, on the disk
+    if let Some(d) = p.parent().and_then(|d| std::fs::File::open(d).ok()) {
+        let _ = d.sync_all();
+    }
+    Ok(())
+}
+
+/// `s` as a TOML basic string, with TOML's own escapes (not Rust's `{:?}`, whose `\0` and `\u{200b}` TOML rejects): a
+/// value or a quoted key in the entries Icarus writes.
+pub fn toml_string(s: &str) -> String {
+    let mut t = String::with_capacity(s.len() + 2);
+    t.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => t.push_str("\\\""),
+            '\\' => t.push_str("\\\\"),
+            '\n' => t.push_str("\\n"),
+            '\t' => t.push_str("\\t"),
+            '\r' => t.push_str("\\r"),
+            c if (c as u32) < 0x20 || c as u32 == 0x7F => {
+                t.push_str(&format!("\\u{:04X}", c as u32))
+            }
+            c => t.push(c),
+        }
+    }
+    t.push('"');
+    t
 }
 
 /// The profile for a VIN: the longest matching manufacturer prefix wins (5TF before 5T).
@@ -843,6 +976,181 @@ fn with_profile(mut v: Vec<ModuleAddr>, p: &Profile) -> Vec<ModuleAddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review of ICA-220: what adding an entry to the user's file refuses, each with nothing written. A name of the same
+    /// kind already used by the make's profile (trimmed, in any case), whether the profiles as loaded hold it or only the
+    /// file on the disk does, since merging replaces by name and one entry would drop the other; a name with a control
+    /// or invisible character; and a file that cannot be read (not UTF-8), which is left exactly as it was rather than
+    /// started again from the header. A write goes through a new file renamed into place (none left behind).
+    #[test]
+    fn adding_refuses_a_taken_name_an_invisible_character_and_an_unreadable_file() {
+        use crate::service::ServiceDef;
+        let dir =
+            std::env::temp_dir().join(format!("icarus-vehicles-review220-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::fence::fence_for_test(Some(crate::fence::Fence::default()));
+        let verified = "[[service]]\nname = \"Throttle relearn\"\nmodule = 0x7E0\nroutine = 0x0101\nchecked = true\n";
+        let file = dir.join("toyota.toml");
+        std::fs::write(&file, verified).unwrap();
+        let learned = ServiceDef {
+            name: "  throttle RELEARN ".into(),
+            module: 0x7E0,
+            rx: None,
+            routine: 0xFF00,
+            params: vec![],
+            extended: true,
+            results: true,
+            conditions: vec![],
+            max_seconds: 30,
+            wired: true,
+            warning: String::new(),
+            checked: false,
+        };
+        let asked = std::cell::Cell::new(0);
+        let folder = || {
+            asked.set(asked.get() + 1);
+            Some(dir.clone())
+        };
+        // 1. the profiles as loaded know the verified routine: refused before the folder is asked for
+        profiles_for_test(Some(load(Some(&dir)).0));
+        let why = add_service_in("toyota", &learned, folder).unwrap_err();
+        assert!(
+            why.contains("the service name \"throttle RELEARN\" is taken"),
+            "{why}"
+        );
+        assert_eq!(asked.get(), 0);
+        // only the file knows it (the profiles a few seconds old): refused once it is read, nothing written
+        profiles_for_test(None);
+        let why = add_service_in("toyota", &learned, folder).unwrap_err();
+        assert!(
+            why.contains("is taken") && why.contains("toyota.toml"),
+            "{why}"
+        );
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), verified);
+        // a test or a setting of that name is another kind: added
+        let test = "[[test]]\nname = \"Throttle relearn\"\nmodule = 0x7E0\nprotocol = \"uds\"\nid = 0x2001\n";
+        add_entry_in("toyota", test, folder).unwrap();
+        let (all, problems) = load(Some(&dir));
+        assert!(problems.is_empty(), "{problems:?}");
+        let t = find(&all, "toyota").unwrap();
+        assert_eq!(
+            (t.services.len(), t.services[0].checked, t.tests.len()),
+            (1, true, 1),
+            "the verified routine is still there"
+        );
+        // and a second test of that name is refused
+        let why = add_entry_in("toyota", test, folder).unwrap_err();
+        assert!(
+            why.contains("the test name \"Throttle relearn\" is taken"),
+            "{why}"
+        );
+        let before = std::fs::read_to_string(&file).unwrap();
+
+        // 4. control and invisible characters in a name: written as TOML reads them, then refused in words
+        for s in [
+            "a\0b",
+            "Oil\u{200B}reset",
+            "soft\u{AD}hyphen",
+            "two\nlines",
+            "quote \" and \\ back",
+            "tab\there",
+        ] {
+            let back: toml::Table = toml::from_str(&format!("x = {}", toml_string(s))).unwrap();
+            assert_eq!(back["x"].as_str(), Some(s), "{s:?}");
+            // as a quoted key (a setting's value names) too
+            let back: toml::Table = toml::from_str(&format!("{} = 1", toml_string(s))).unwrap();
+            assert!(back.contains_key(s), "{s:?}");
+        }
+        assert_eq!(toml_string("a\0b"), "\"a\\u0000b\"");
+        assert_eq!(toml_string("q\"\\"), "\"q\\\"\\\\\"");
+        asked.set(0);
+        for (name, at) in [
+            ("Oil\u{200B}reset", "U+200B"),
+            ("soft\u{AD}hyphen", "U+00AD"),
+            ("nul\0here", "U+0000"),
+            ("Right\u{202E}left", "U+202E"),
+        ] {
+            let s = ServiceDef {
+                name: name.into(),
+                ..learned.clone()
+            };
+            let why = add_service_in("toyota", &s, folder).unwrap_err();
+            assert!(
+                why.contains("control or invisible character") && why.contains(at),
+                "{name:?}: {why}"
+            );
+            let t = crate::bus::to_toml(&crate::actuator::TestDef {
+                name: name.into(),
+                ..crate::sim::tests().remove(0)
+            });
+            let why = add_entry_in("toyota", &t, folder).unwrap_err();
+            assert!(why.contains(at), "{name:?}: {why}");
+            let mut setting = crate::sim::settings().remove(0);
+            setting.name = name.into();
+            let why =
+                add_entry_in("toyota", &crate::settings::to_toml(&setting), folder).unwrap_err();
+            assert!(why.contains(at), "{name:?}: {why}");
+            // a value's name too
+            let mut setting = crate::sim::settings().remove(0);
+            let (k, v) = setting.values.pop_first().unwrap();
+            setting.values.insert(format!("{k}{name}"), v);
+            let why =
+                add_entry_in("toyota", &crate::settings::to_toml(&setting), folder).unwrap_err();
+            assert!(
+                why.contains("setting value") && why.contains(at),
+                "{name:?}: {why}"
+            );
+        }
+        assert_eq!(asked.get(), 0, "refused before the folder was asked for");
+        // a plain name in a quote is fine
+        let quoted = ServiceDef {
+            name: "Idle \"base\" relearn".into(),
+            ..learned.clone()
+        };
+        add_service_in("toyota", &quoted, folder).unwrap();
+        let (all, _) = load(Some(&dir));
+        assert!(find(&all, "toyota")
+            .unwrap()
+            .services
+            .iter()
+            .any(|s| s.name == "Idle \"base\" relearn"));
+        let before_bytes = std::fs::read(&file).unwrap();
+        assert_ne!(before_bytes, before.as_bytes());
+
+        // 2. a file that is not UTF-8: left exactly as it was, the error said
+        let mut broken = before_bytes.clone();
+        broken.extend(b"# caf\xE9\n");
+        std::fs::write(&file, &broken).unwrap();
+        let other = ServiceDef {
+            name: "Oil life reset".into(),
+            routine: 0x0203,
+            ..learned.clone()
+        };
+        let why = add_service_in("toyota", &other, folder).unwrap_err();
+        assert!(
+            why.contains("toyota.toml") && why.contains("left as it is"),
+            "{why}"
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), broken, "not overwritten");
+        // a missing file starts from the header
+        std::fs::remove_file(&file).unwrap();
+        add_service_in("toyota", &other, folder).unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(
+            text.starts_with("# My additions") && text.contains("Oil life reset"),
+            "{text}"
+        );
+        // no new file left beside it
+        let left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(left, ["toyota.toml"]);
+        crate::fence::fence_for_test(None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// ICA-220: a learned routine goes into the user's file (a scratch folder here) as an unchecked `[[service]]` entry
     /// with the learner's cautious conditions, even when they were loosened on the way; one aimed at an airbag module, a

@@ -493,8 +493,9 @@ pub fn undo(link: &mut dyn Link, s: &SettingDef, log: &Path) -> Result<Option<Ch
 /// A `[[setting]]` entry for a vehicle profile.
 pub fn to_toml(s: &SettingDef) -> String {
     let mut t = format!(
-        "[[setting]]\nname = {:?}\nmodule = 0x{:03X}\n",
-        s.name, s.module
+        "[[setting]]\nname = {}\nmodule = 0x{:03X}\n",
+        crate::vehicles::toml_string(&s.name),
+        s.module
     );
     if let Some(rx) = s.rx {
         t += &format!("rx = 0x{rx:03X}\n");
@@ -548,7 +549,7 @@ pub fn to_toml(s: &SettingDef) -> String {
         t += &format!("conditions = [{}]\n", c.join(", "));
     }
     if !s.note.is_empty() {
-        t += &format!("note = {:?}\n", s.note);
+        t += &format!("note = {}\n", crate::vehicles::toml_string(&s.note));
     }
     t += &format!("checked = {}\n", s.checked);
     t
@@ -561,7 +562,7 @@ fn toml_key(k: &str) -> String {
     {
         k.to_string()
     } else {
-        format!("{k:?}")
+        crate::vehicles::toml_string(k)
     }
 }
 

@@ -1034,7 +1034,11 @@ impl Analyzer {
 /// A `[[test]]` entry for a vehicle profile.
 pub fn to_toml(t: &TestDef) -> String {
     let mut s = String::from("[[test]]\n");
-    s += &format!("name = {:?}\nmodule = 0x{:03X}\n", t.name, t.module);
+    s += &format!(
+        "name = {}\nmodule = 0x{:03X}\n",
+        crate::vehicles::toml_string(&t.name),
+        t.module
+    );
     if let Some(rx) = t.rx {
         s += &format!("rx = 0x{rx:03X}\n");
     }
@@ -1076,10 +1080,10 @@ pub fn to_toml(t: &TestDef) -> String {
         })
         .collect();
     s += &format!(
-        "conditions = [{}]\nmax_seconds = {}\nwarning = {:?}\n",
+        "conditions = [{}]\nmax_seconds = {}\nwarning = {}\n",
         conds.join(", "),
         t.max_seconds,
-        t.warning
+        crate::vehicles::toml_string(&t.warning)
     );
     if let Some(w) = t.watch {
         s += &format!("watch = 0x{w:02X}\n");
