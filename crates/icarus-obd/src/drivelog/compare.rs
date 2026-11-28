@@ -36,7 +36,7 @@ pub struct Recording {
     /// The adapter its first line names (`# adapter: ...`), when it does.
     pub adapter: Option<String>,
     /// The fuel or calibration it was driven on (91 E0, 87, a tune's name), shown under the name when there is one. Not
-    /// recorded yet (ICA-113 and ICA-211 will set it), so None for now.
+    /// recorded yet (ICA-113 and ICA-211 will set it); a side of drives pooled (`compare_pooled`) says how many it holds.
     pub tag: Option<String>,
     /// Its rows, and how many of them are at the conditions compared.
     pub rows: usize,
@@ -208,13 +208,79 @@ pub fn compare(recordings: &[(String, String)], min_rows: usize) -> Result<Compa
     if recordings.len() < 2 {
         return Err("comparing needs two recordings or more".into());
     }
+    let parts = recordings
+        .iter()
+        .map(|(name, text)| one(name, text))
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(assemble(parts, min_rows))
+}
+
+/// Several recordings as one (a side of a before-and-after, ICA-215): their rows pooled into the same groups, named `name`.
+/// What every one of them lacks is said; the adapters they name are listed once each.
+fn pool(name: &str, recordings: &[(String, String)]) -> Result<(Recording, Cells, Cells), String> {
+    if recordings.is_empty() {
+        return Err(format!("{name}: no recordings"));
+    }
+    let mut r = Recording {
+        name: name.to_string(),
+        tag: Some(format!(
+            "{} drive{}",
+            recordings.len(),
+            if recordings.len() == 1 { "" } else { "s" }
+        )),
+        ..Default::default()
+    };
+    let (mut air, mut speed) = (Cells::new(), Cells::new());
+    let mut adapters: Vec<String> = vec![];
+    for (i, (n, text)) in recordings.iter().enumerate() {
+        let (one_r, a, s) = one(n, text)?;
+        r.rows += one_r.rows;
+        r.kept += one_r.kept;
+        r.lacking = if i == 0 {
+            one_r.lacking
+        } else {
+            r.lacking
+                .into_iter()
+                .filter(|l| one_r.lacking.contains(l))
+                .collect()
+        };
+        if let Some(ad) = one_r.adapter.filter(|ad| !adapters.contains(ad)) {
+            adapters.push(ad);
+        }
+        for (to, from) in [(&mut air, a), (&mut speed, s)] {
+            for (k, c) in from {
+                to.entry(k).or_default().add(&c);
+            }
+        }
+    }
+    r.adapter = (!adapters.is_empty()).then(|| adapters.join(", "));
+    Ok((r, air, speed))
+}
+
+/// Compares sides of recordings pooled, each given as (its name, its recordings as (name, text)): the first side is the one
+/// the others are measured against (ICA-215: the drives before a service, then the drives after it).
+pub fn compare_pooled(
+    sides: &[(String, Vec<(String, String)>)],
+    min_rows: usize,
+) -> Result<Comparison, String> {
+    if sides.len() < 2 {
+        return Err("comparing needs two sides or more".into());
+    }
+    let parts = sides
+        .iter()
+        .map(|(name, recs)| pool(name, recs))
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(assemble(parts, min_rows))
+}
+
+/// The comparison of recordings already sorted into their groups.
+fn assemble(parts: Vec<(Recording, Cells, Cells)>, min_rows: usize) -> Comparison {
     let mut c = Comparison {
         min_rows,
         ..Default::default()
     };
     let (mut air, mut speed) = (vec![], vec![]);
-    for (name, text) in recordings {
-        let (r, a, s) = one(name, text)?;
+    for (r, a, s) in parts {
         c.recordings.push(r);
         air.push(a);
         speed.push(s);
@@ -227,7 +293,34 @@ pub fn compare(recordings: &[(String, String)], min_rows: usize) -> Result<Compa
             band(LOAD, k[1], 100.0)
         )
     });
-    Ok(c)
+    c
+}
+
+/// The misfire values a recording carries (columns whose name says misfire, such as a module's "Cylinder #1 misfire
+/// count"; the standard values have none) and how much each rose over the recording: every step up between one reading
+/// and the next added, so a counter that starts again (a new drive cycle) is still counted. With the recording's length
+/// in seconds. No such column: an empty list.
+pub fn misfires(text: &str) -> Result<(Vec<(String, f64)>, f64), String> {
+    let s = series(text)?;
+    let seconds = s.t.last().copied().unwrap_or(0.0) - s.t.first().copied().unwrap_or(0.0);
+    let mut out = vec![];
+    for (name, col) in s.names.iter().zip(&s.cols) {
+        if !name.to_lowercase().contains("misfire") || name.ends_with("[hex]") {
+            continue;
+        }
+        let mut rise = 0.0;
+        let mut last: Option<f64> = None;
+        for v in col.iter().flatten().filter(|v| v.is_finite()) {
+            if let Some(l) = last {
+                if *v > l {
+                    rise += v - l;
+                }
+            }
+            last = Some(*v);
+        }
+        out.push((name.clone(), rise));
+    }
+    Ok((out, seconds.max(0.0)))
 }
 
 /// Compares recording files, the first the one the others are measured against.

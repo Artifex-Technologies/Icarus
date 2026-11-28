@@ -28,6 +28,7 @@ pub mod learning;
 pub mod link;
 pub mod lock;
 pub mod lookup;
+pub mod maintenance;
 pub mod moddata;
 pub mod mode06;
 pub mod mongoose;

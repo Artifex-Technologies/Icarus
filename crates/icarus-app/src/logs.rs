@@ -315,7 +315,7 @@ impl CompareView {
 }
 
 /// One of the comparison's tables: the group, each recording's cell (thin ones dimmed), each difference from the first.
-fn compare_table(ui: &mut egui::Ui, pal: &theme::Palette, c: &Comparison, t: Table) {
+pub(crate) fn compare_table(ui: &mut egui::Ui, pal: &theme::Palette, c: &Comparison, t: Table) {
     let n = c.recordings.len();
     egui::Grid::new(("compare", t.by()))
         .striped(true)

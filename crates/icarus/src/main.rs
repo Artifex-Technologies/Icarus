@@ -13,6 +13,7 @@ use icarus_obd::{
 };
 mod data;
 mod gps;
+mod maintenance;
 mod mcp;
 mod record;
 
@@ -205,6 +206,20 @@ Vehicles:
                                              codes is kept in its folder, Logs/codes-history.tsv)
   icarus garage read-only VIN on|off         a vehicle's Read-Only switch: on, Icarus clears, tests and changes nothing
                                              on it (the same switch as on the Garage page)
+  icarus garage service [VIN] add KIND [--miles N] [--date YYYY-MM-DD[ HH:MM]] [--note TEXT]
+                                             log a service in the vehicle's maintenance.toml (KIND: oil, spark-plugs,
+                                             air-filter, fluids, brakes, tire-rotation, sensor, fuel, other with a note);
+                                             the VIN may be left out when the garage holds one vehicle
+  icarus garage service [VIN] list | interval KIND --miles N --months M | due [--miles N]
+                                             the services logged; a kind's interval (KIND off: none); what is due by
+                                             miles or months
+  icarus garage service [VIN] compare KIND|DATE [--drives 3] [--min-rows 10]
+                                             the last drives recorded before a service against the first ones after it
+                                             (as logs compare: trims by air flow, timing by speed and load; misfire
+                                             counts when the recordings carry them)
+  icarus garage service [VIN] odometer [--adapter A]
+                                             odometer readings to confirm (a recording's; the vehicle's own with
+                                             --adapter: A6 or its module-data set's). Read only, never changed
 
 Trouble codes:
   icarus dtc CODE... [--vehicle \"2017 Toyota Tacoma 3.5L V6\"] [--make toyota]
@@ -2847,6 +2862,7 @@ fn cmd_garage(a: &[String]) -> Result<(), String> {
             }
             Ok(())
         }
+        [what, rest @ ..] if what == "service" => maintenance::cmd_service(rest),
         [what, v, on] if what == "read-only" && (on == "on" || on == "off") => {
             let i = vin::decode(v)?;
             lock::set(&i.vin, on == "on")?;

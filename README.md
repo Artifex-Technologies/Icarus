@@ -93,7 +93,7 @@ battery type, set by "battery registration": a per-make configuration change for
 
 Every vehicle connected (with a VIN) gets a folder in `~/Documents/Icarus/Vehicles/`, named after the name it was given
 (else its VIN; renaming the vehicle renames the folder): **OEM tunes**, **Custom tunes**, **Definitions**, **Reports**
-(the vehicle's reports go here) and **Logs**. A stock image imported as OEM is copied in read-only and never replaced: it is
+(the vehicle's reports go here) and **Logs**, and its maintenance log (`maintenance.toml`, below). A stock image imported as OEM is copied in read-only and never replaced: it is
 the way back.
 
 ## The Read-Only switch
@@ -138,6 +138,57 @@ recording's column headed by its file name and the adapter it names, with each g
 the first recording. A group under the minimum count is marked thin and never summarized, and no difference is given
 beside it. The recordings may hold different columns in a different order; each is found by its name. A recording is a
 path, or a file name in `~/Documents/Icarus/logs` or a vehicle's Logs folder. The Logs page's Compare view shows the same.
+
+## Maintenance log
+
+```sh
+icarus garage service [VIN] add KIND [--miles N] [--date 2026-11-29[ 14:30]] [--note TEXT]
+icarus garage service [VIN] list
+icarus garage service [VIN] interval KIND [--miles N] [--months M]     # KIND off: no interval
+icarus garage service [VIN] due [--miles N]
+icarus garage service [VIN] compare KIND|DATE [--drives 3] [--min-rows 10]
+icarus garage service [VIN] odometer [--adapter A]
+```
+
+Each vehicle keeps the services done in `maintenance.toml` in its folder, a plain file I can read and edit by hand. The
+VIN may be left out while the garage holds one vehicle. Kinds: `oil` (oil and filter), `spark-plugs`, `air-filter`,
+`fluids`, `brakes`, `tire-rotation`, `sensor`, `fuel` (a fuel change) and `other` (which needs a `--note`); a few plain
+words are taken too ("spark plugs", "plugs", "oil and filter"). The date is today's unless given; giving the time as well
+(`--date "2026-11-29 14:30"`) places the drives of that day before or after it. The file:
+
+```toml
+[intervals.oil]          # whichever comes first
+miles = 5000
+months = 6
+
+[[service]]
+kind = "spark-plugs"
+date = "2026-11-29 14:30" # or "2026-11-29"
+miles = 84213             # the odometer then, in miles (optional)
+note = "NGK"              # optional; other needs one
+```
+
+`due` gives each kind with an interval against the odometer now (`--miles`, else the highest one logged or the Garage
+page's miles, said which) and today's date: overdue, due soon (within 500 miles or 30 days), ok, or none logged yet. The
+odometer is always typed in. A reading the vehicle gives is only offered for me to confirm: `odometer` lists the newest
+recording's odometer column (standard value A6, or the module-data set's odometer, in km or mi; a value of unknown unit is
+never offered) and, with `--adapter`, reads the vehicle's own (A6 and the set's odometer value, from the vehicle whose VIN
+it is only); `add` without `--miles` asks about the newest recording's reading at a terminal and only says it otherwise.
+Icarus reads an odometer and never changes one.
+
+`compare` runs the drive comparison (Comparing drives, above) around a service: the last 3 recordings before it (by when each began, from
+its `drive-2026-11-27_183005.csv` name) pooled as "Before spark plugs" against the first 3 after it as "After spark
+plugs", with misfire counts before and after when the recordings carry them (a module-data value named misfire, recorded
+with the module data; how much each rose over the drives, and the hours driven). A side with fewer rows at matching
+conditions than the minimum is said plainly, and a service with no time leaves its own day's drives out, said too. It
+reads the vehicle's own Logs folder and `~/Documents/Icarus/logs`; those recordings do not say which vehicle they are from,
+so with more than one vehicle in the garage it says so. KIND is the latest service of that kind; DATE the services that
+day.
+
+The Garage page's **Maintenance** card does the same for the vehicle shown: what is due (colored by how soon), a service
+logged with its date, odometer and note (with **Use this reading** beside a reading offered: live A6 or the Modules page's
+odometer from the connected vehicle when it is this one, else the newest recording's), each kind's interval, the services
+logged, and **Before and after** on each one with the Compare view's tables under the service's name.
 
 ## Tires and gears
 

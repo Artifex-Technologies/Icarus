@@ -186,6 +186,18 @@ impl Cell {
     pub fn count(&self, k: usize) -> usize {
         self.sums.get(k).map_or(0, |s| s.1)
     }
+
+    /// Adds another cell's rows and sums to this one (the same cell of several recordings, pooled).
+    pub fn add(&mut self, other: &Cell) {
+        self.rows += other.rows;
+        if self.sums.len() < other.sums.len() {
+            self.sums.resize(other.sums.len(), (0.0, 0));
+        }
+        for (a, b) in self.sums.iter_mut().zip(&other.sums) {
+            a.0 += b.0;
+            a.1 += b.1;
+        }
+    }
 }
 
 /// One value of a row, worked out from the row's columns (a column itself, or short + long-term trim).

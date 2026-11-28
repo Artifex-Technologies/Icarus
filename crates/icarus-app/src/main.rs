@@ -9,6 +9,7 @@ mod gauges;
 mod levels;
 mod listen;
 mod logs;
+mod maintenance;
 mod single;
 mod surface;
 mod worker;
@@ -453,6 +454,8 @@ struct App {
     /// Each vehicle's details (its own name, sub-model ...), by VIN, as saved; and the shown one's fields being edited.
     garage_details: std::collections::BTreeMap<String, garage::Details>,
     garage_edit: Option<GarageEdit>,
+    /// The Garage page's Maintenance card (maintenance.rs, ICA-185).
+    maintenance: maintenance::Card,
     /// The VINs whose Read-only switch is on (`icarus_obd::lock`).
     read_only: std::collections::BTreeSet<String>,
     import_path: String,
@@ -639,6 +642,7 @@ impl App {
             garage_sel: None,
             garage_details: Default::default(),
             garage_edit: None,
+            maintenance: Default::default(),
             read_only: icarus_obd::lock::read_only(),
             import_path: String::new(),
             t_stock: "P265/65R17".into(),
@@ -3599,6 +3603,7 @@ impl App {
                 self.read_only = icarus_obd::lock::read_only();
                 self.garage_details.clear();
                 self.garage_edit = None;
+                self.maintenance = Default::default();
             }
         });
         for (vin, _, _) in &self.garage {
@@ -3726,6 +3731,16 @@ impl App {
                     }
                 });
             }
+            // the maintenance log: an odometer the window read live is offered only when it is this vehicle's
+            let live = (self.info.as_ref().and_then(|i| i.vin.as_deref()) == Some(vin.as_str()))
+                .then(|| {
+                    maintenance::live_offer(
+                        self.history.get(&0xA6).and_then(|h| h.back()).map(|x| x.1),
+                        self.module_data.as_ref().and_then(|r| r.as_ref().ok()),
+                    )
+                })
+                .flatten();
+            self.maintenance.show(ui, pal, &dir, live);
             card(ui, pal, "Add a file", |ui| {
                 ui.add(egui::TextEdit::singleline(&mut self.import_path).hint_text("/path/to/file.bin, .xdf or .a2l").desired_width(f32::INFINITY));
                 ui.horizontal(|ui| {
