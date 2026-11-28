@@ -189,6 +189,23 @@ impl Notifier {
         );
     }
 
+    /// A notice of something else about the recording (it goes on without the GPS): shown, no tone; nothing when quiet.
+    pub fn notice(&mut self, title: &str, body: &str) {
+        if self.quiet || !self.desktop.has("notify-send") {
+            return;
+        }
+        self.desktop.run(
+            "notify-send",
+            &[
+                "--app-name=Icarus".into(),
+                "--icon=icarus".into(),
+                "--urgency=normal".into(),
+                title.into(),
+                body.into(),
+            ],
+        );
+    }
+
     fn say(&mut self, what: Happened, title: &str, body: &str) {
         if self.quiet {
             return;

@@ -256,6 +256,9 @@ pub struct Plan {
     pub modules: Option<Modules>,
     /// A GPS receiver followed, its columns after the values (only in the file).
     pub gps: Option<String>,
+    /// A GPS that does not open is gone without (said in `gps_missing`) rather than stopping the recording: a recording
+    /// by itself must not wait on a receiver left at home.
+    pub gps_optional: bool,
     /// Where the files go (~/Documents/Icarus/logs: `drivelog::folders`).
     pub dir: PathBuf,
     /// Keep the computer from sleeping (the lid closed included) while recording (false in tests).
@@ -315,18 +318,33 @@ pub struct Recorder {
     pub vin: Option<String>,
     /// Kept while recording: the computer does not sleep.
     _awake: Option<crate::power_guard::Inhibit>,
+    /// Why the computer could not be kept awake, when it could not (said once, when the recording starts).
+    pub awake_missing: Option<String>,
+    /// Why the GPS asked for is not followed (`Plan::gps_optional`), when it is not.
+    pub gps_missing: Option<String>,
 }
 
 impl Recorder {
     /// Starts a recording: its first part is created at once (`dir` made if needed). A GPS source that does not open stops
-    /// it before a file is made.
+    /// it before a file is made, unless the plan lets it go on without (`gps_optional`).
     pub fn start(plan: Plan) -> Result<Recorder, String> {
         Recorder::start_pruning(plan, prune::WATCH_S)
     }
 
     /// `start`, with a value read in turn that never answers in its first `prune_after` seconds no longer asked (ICA-87).
     pub fn start_pruning(plan: Plan, prune_after: f64) -> Result<Recorder, String> {
-        let gps = plan.gps.as_deref().map(gps::Follower::start).transpose()?;
+        let mut gps_missing = None;
+        let gps = match plan.gps.as_deref().map(gps::Follower::start).transpose() {
+            Ok(g) => g,
+            Err(e) if plan.gps_optional => {
+                gps_missing = Some(format!(
+                    "the GPS ({}) did not open ({e}): recording without positions",
+                    plan.gps.as_deref().unwrap_or("")
+                ));
+                None
+            }
+            Err(e) => return Err(e),
+        };
         let (fast, rest) = drive_set(&plan.offered);
         let pids: Vec<u8> = fast
             .iter()
@@ -360,10 +378,19 @@ impl Recorder {
                 names.push(raw_name(m, r));
             }
         }
-        let awake = plan
-            .keep_awake
-            .then(|| crate::power_guard::Inhibit::recording("Recording a drive").ok())
-            .flatten();
+        let (awake, awake_missing) = if plan.keep_awake {
+            match crate::power_guard::Inhibit::recording("Recording a drive") {
+                Ok(i) => (Some(i), None),
+                Err(e) => (
+                    None,
+                    Some(format!(
+                        "{e}: recording anyway, but the computer may sleep (the lid closed) and stop it"
+                    )),
+                ),
+            }
+        } else {
+            (None, None)
+        };
         let mut r = Recorder {
             fast,
             rest,
@@ -385,6 +412,8 @@ impl Recorder {
             stopped: false,
             vin: plan.vin,
             _awake: awake,
+            awake_missing,
+            gps_missing,
         };
         r.next_part()?;
         Ok(r)
@@ -856,8 +885,20 @@ pub fn run(cfg: &Config, d: &mut dyn Driver, n: &mut Notifier) -> Result<Vec<Pat
             if last_try.is_none_or(|t| t.elapsed() >= cfg.retry) {
                 last_try = Some(Instant::now());
                 match d.open() {
-                    Ok(l) => {
+                    Ok(mut l) => {
                         d.say(&format!("Connected: {}.", l.adapter()));
+                        // the same recording goes on only with the same vehicle: another VIN ends it (a new one starts)
+                        if let Some(r) = rec.as_ref() {
+                            if let Ok(now_vin) = j1979::vin(&mut *l) {
+                                if now_vin != r.vin {
+                                    d.say(&format!(
+                                        "The adapter came back on another vehicle ({}): this recording ends here.",
+                                        now_vin.as_deref().unwrap_or("no VIN")
+                                    ));
+                                    finish(rec.take(), d, n, &mut written)?;
+                                }
+                            }
+                        }
                         link = Some(l);
                         glitches = 0;
                         last_err = None;
@@ -929,6 +970,13 @@ pub fn run(cfg: &Config, d: &mut dyn Driver, n: &mut Notifier) -> Result<Vec<Pat
                     for w in r.left_out() {
                         d.say(&format!("Module data left out: {w}"));
                     }
+                    if let Some(w) = &r.awake_missing {
+                        d.say(&format!("Note: {w}."));
+                    }
+                    if let Some(w) = &r.gps_missing {
+                        d.say(&format!("Note: {w}."));
+                        n.notice("Recording without GPS", &format!("{w}."));
+                    }
                     rec = Some(r);
                 }
                 Err(e) => {
@@ -998,11 +1046,12 @@ pub fn run(cfg: &Config, d: &mut dyn Driver, n: &mut Notifier) -> Result<Vec<Pat
     Ok(written)
 }
 
-/// Ctrl+C and SIGTERM (what `systemctl stop` sends) only mark the process interrupted (`actuator::interrupted`), so the
-/// recording ends between two sweeps and its file is closed.
+/// Ctrl+C, SIGTERM (what `systemctl stop` sends) and SIGHUP (the terminal closed) only mark the process interrupted
+/// (`actuator::interrupted`), so the recording ends between two sweeps and its file is closed.
 pub fn catch_stop_signals() {
     crate::actuator::catch_interrupt();
     crate::actuator::catch_terminate();
+    crate::actuator::catch_hangup();
 }
 
 /// The adapter used last (`~/.config/icarus/adapter`, kept by the window), when there is one: `icarus record --auto`'s
@@ -1080,9 +1129,10 @@ mod tests {
             adapter: link.adapter(),
             modules: modules.then(sim_modules),
             gps: None,
+            gps_optional: false,
             dir: dir.to_path_buf(),
             keep_awake: false,
-            vin: Some(crate::sim::VIN.into()),
+            vin: j1979::vin(link).ok().flatten(),
         }
     }
 
@@ -1208,6 +1258,10 @@ mod tests {
         refuse: Arc<AtomicBool>,
         /// The adapter's first connection dies after this many commands (a glitch: ICA-112).
         die_after: Option<u32>,
+        /// The adapter comes back on a vehicle with this VIN (connections after the first).
+        later_vin: Option<&'static str>,
+        /// A GPS asked for, allowed to be missing (as `--auto` allows it).
+        gps: Option<String>,
         stop_at: Instant,
         said: Arc<Mutex<Vec<String>>>,
     }
@@ -1224,13 +1278,18 @@ mod tests {
                 if let Some(k) = self.die_after {
                     car = car.dying_after(k);
                 }
+            } else if let Some(v) = self.later_vin {
+                car = car.with_vin(v);
             }
             Elm::connect(Box::new(car))
                 .map(|e| Box::new(e) as Box<dyn Link>)
                 .map_err(|e| e.to_string())
         }
         fn plan(&mut self, link: &mut dyn Link) -> Result<Plan, String> {
-            Ok(plan(link, &self.dir, true))
+            let mut p = plan(link, &self.dir, true);
+            p.gps = self.gps.clone();
+            p.gps_optional = true;
+            Ok(p)
         }
         fn stop(&self) -> Option<String> {
             (Instant::now() >= self.stop_at).then(|| "the test is over".into())
@@ -1265,6 +1324,8 @@ mod tests {
             opens: Default::default(),
             refuse: Default::default(),
             die_after: None,
+            later_vin: None,
+            gps: None,
             stop_at: Instant::now() + Duration::from_secs(8),
             said: said.clone(),
         };
@@ -1330,6 +1391,8 @@ mod tests {
             opens: Default::default(),
             refuse: Default::default(),
             die_after: None,
+            later_vin: None,
+            gps: None,
             stop_at: Instant::now() + Duration::from_secs(3),
             said: Default::default(),
         };
@@ -1370,6 +1433,8 @@ mod tests {
             opens: opens.clone(),
             refuse: refuse.clone(),
             die_after: Some(120),
+            later_vin: None,
+            gps: None,
             stop_at: Instant::now() + Duration::from_secs(6),
             said: said.clone(),
         };
@@ -1417,6 +1482,88 @@ mod tests {
             gap > 1.0,
             "rows before and after the gap, in one file: {gap}"
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Review of ICA-208: the adapter comes back on another vehicle (its VIN differs) after dropping mid-recording: the
+    /// recording ends there, and the next one (a file of its own) is that vehicle's.
+    #[test]
+    fn another_vehicle_after_the_adapter_drops_ends_the_recording() {
+        let dir = scratch("vin");
+        let said = Arc::new(Mutex::new(Vec::new()));
+        let mut bench = Bench {
+            engine: Arc::new(AtomicBool::new(true)),
+            dir: dir.clone(),
+            opens: Default::default(),
+            refuse: Default::default(),
+            die_after: Some(120),
+            later_vin: Some("5TFICARUSDONOR001"),
+            gps: None,
+            stop_at: Instant::now() + Duration::from_secs(3),
+            said: said.clone(),
+        };
+        let desk = StandIn::every();
+        let mut n = Notifier::new(false, Box::new(desk.clone()));
+        let files = run(&quick(false), &mut bench, &mut n).unwrap();
+        assert_eq!(files.len(), 2, "{files:?}");
+        let said = said.lock().unwrap();
+        assert!(
+            said.iter()
+                .any(|l| l.contains("another vehicle (5TFICARUSDONOR001)")),
+            "{said:?}"
+        );
+        let titles: Vec<String> = desk.shown().into_iter().map(|x| x.0).collect();
+        assert_eq!(
+            titles.iter().filter(|t| *t == "Recording stopped").count(),
+            2,
+            "{titles:?}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Review of ICA-208: by itself (`--auto`), a GPS that does not open is gone without: the drive is recorded with no
+    /// position columns, and that is said and shown once.
+    #[test]
+    fn a_missing_gps_does_not_hold_up_a_drive() {
+        let dir = scratch("gps");
+        let said = Arc::new(Mutex::new(Vec::new()));
+        let mut bench = Bench {
+            engine: Arc::new(AtomicBool::new(true)),
+            dir: dir.clone(),
+            opens: Default::default(),
+            refuse: Default::default(),
+            die_after: None,
+            later_vin: None,
+            gps: Some("/nonexistent-icarus-test/ttyGPS".into()),
+            stop_at: Instant::now() + Duration::from_millis(1500),
+            said: said.clone(),
+        };
+        let desk = StandIn::every();
+        let mut n = Notifier::new(false, Box::new(desk.clone()));
+        let files = run(&quick(true), &mut bench, &mut n).unwrap();
+        assert_eq!(files.len(), 1);
+        let s = drivelog::series(&std::fs::read_to_string(&files[0]).unwrap()).unwrap();
+        assert!(!s.t.is_empty() && s.find(&["gps latitude"]).is_none());
+        let said = said.lock().unwrap();
+        assert!(
+            said.iter()
+                .any(|l| l.contains("the GPS (/nonexistent-icarus-test/ttyGPS) did not open")),
+            "{said:?}"
+        );
+        let titles: Vec<String> = desk.shown().into_iter().map(|x| x.0).collect();
+        assert_eq!(
+            titles,
+            [
+                "Recording started",
+                "Recording without GPS",
+                "Recording stopped"
+            ]
+        );
+        // asked for by hand (the window's tick), it stops the recording before a file is made
+        let mut elm = Elm::connect(Box::new(SimCar::new())).unwrap();
+        let mut p = plan(&mut elm, &dir, false);
+        p.gps = Some("/nonexistent-icarus-test/ttyGPS".into());
+        assert!(Recorder::start(p).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

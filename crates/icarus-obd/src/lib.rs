@@ -42,6 +42,7 @@ pub mod power_guard;
 pub mod prune;
 pub mod record;
 pub mod report;
+pub mod roles;
 pub mod service;
 pub mod settings;
 pub mod sim;

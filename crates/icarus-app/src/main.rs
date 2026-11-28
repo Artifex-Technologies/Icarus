@@ -537,11 +537,15 @@ impl App {
         let (tx, wrx) = channel();
         let (wtx, rx) = channel();
         let c = ctx.clone();
-        std::thread::spawn(move || {
+        let handle = std::thread::spawn(move || {
             worker::run(wrx, wtx, icarus_obd::fence::current, move || {
                 c.request_repaint()
             })
         });
+        // kept for the end: a recording still going when the window closes is stopped and its file closed (`wind_down`)
+        if let Ok(mut w) = WORKER.lock() {
+            *w = Some((tx.clone(), handle));
+        }
         // the adapter: the one named, the one that last worked, or a paired Bluetooth OBD adapter (autoconn.rs)
         let chosen = autoconn::choose_here(
             start
@@ -5539,11 +5543,35 @@ fn main() -> eframe::Result {
         viewport,
         ..Default::default()
     };
-    eframe::run_native(
+    let r = eframe::run_native(
         "Icarus",
         options,
         Box::new(|cc| Ok(Box::new(App::new(&cc.egui_ctx, start)))),
-    )
+    );
+    wind_down(std::time::Duration::from_secs(5));
+    r
+}
+
+/// The worker of the window that is open, kept so the window's end waits for it (`wind_down`).
+type WorkerSlot = Option<(std::sync::mpsc::Sender<Cmd>, std::thread::JoinHandle<()>)>;
+static WORKER: std::sync::Mutex<WorkerSlot> = std::sync::Mutex::new(None);
+
+/// The window has closed: the worker is told to end (`Cmd::Quit`: a running test handed back, a recording stopped, its
+/// file flushed and synced, the stopped notice given, the computer let sleep again) and waited for, up to `most` (a sweep
+/// in progress ends first).
+fn wind_down(most: std::time::Duration) {
+    let Some((tx, handle)) = WORKER.lock().ok().and_then(|mut w| w.take()) else {
+        return;
+    };
+    let _ = tx.send(Cmd::Quit);
+    drop(tx);
+    let end = std::time::Instant::now() + most;
+    while !handle.is_finished() && std::time::Instant::now() < end {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    if handle.is_finished() {
+        let _ = handle.join();
+    }
 }
 
 /// What the Live data page shows of a recording the worker writes.

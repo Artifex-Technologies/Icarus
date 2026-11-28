@@ -70,6 +70,8 @@ pub enum Cmd {
     },
     TestHold,
     TestStop,
+    /// The window is closing: hand back a running test, stop a recording (its file closed), and end the worker.
+    Quit,
 }
 
 /// How a recording is started from the window.
@@ -338,6 +340,9 @@ pub(crate) fn run_with(
     let mut notifier = icarus_obd::notify::Notifier::system(false);
     let mut glitches = 0u32;
     let mut reopened = Instant::now();
+    // the adapter dropped while recording and has not come back: when the recording stops, the window is told the
+    // connection is gone, so it connects again by itself rather than show a link that is not there
+    let mut lost = false;
     let mut test: Option<actuator::Running> = None;
     let mut last_hold = Instant::now();
     let mut last_watch = Instant::now();
@@ -403,6 +408,11 @@ pub(crate) fn run_with(
             }
         };
         match cmd {
+            Some(Cmd::Quit) => {
+                end_test(&mut elm, &mut test, "the window closed", &send);
+                stop_recording(&mut recorder, &mut notifier, &send);
+                return;
+            }
             Some(Cmd::TestHold) => {
                 last_hold = Instant::now();
                 continue;
@@ -473,6 +483,7 @@ pub(crate) fn run_with(
                             }
                         }
                         elm = Some(e);
+                        lost = false;
                         send(Event::Connected(Box::new(info)));
                     }
                     Err(m) => send(Event::Failed(m)),
@@ -501,7 +512,14 @@ pub(crate) fn run_with(
                 live = pids;
             }
             Some(Cmd::RecordQuiet(q)) => notifier.quiet = q,
-            Some(Cmd::Record(None)) => stop_recording(&mut recorder, &mut notifier, &send),
+            Some(Cmd::Record(None)) => {
+                if std::mem::take(&mut lost) && elm.is_none() {
+                    vin = None;
+                    live.clear();
+                    send(Event::Disconnected);
+                }
+                stop_recording(&mut recorder, &mut notifier, &send);
+            }
             Some(Cmd::Record(Some(how))) => {
                 if recorder.is_some() {
                     continue;
@@ -788,7 +806,7 @@ pub(crate) fn run_with(
                 }
             }
             Some(Cmd::BusStop) => {}
-            Some(Cmd::TestHold) | Some(Cmd::TestStop) => {}
+            Some(Cmd::TestHold) | Some(Cmd::TestStop) | Some(Cmd::Quit) => {}
             None if test.is_some() => {
                 if last_hold.elapsed() > Duration::from_millis(500) {
                     end_test(&mut elm, &mut test, "the button was let go", &send);
@@ -841,6 +859,7 @@ pub(crate) fn run_with(
                             }
                             glitches = 0;
                             elm = Some(e);
+                            lost = false;
                             send(Event::Connected(Box::new(info)));
                         }
                     } else {
@@ -887,6 +906,7 @@ pub(crate) fn run_with(
                         if matches!(err, ObdError::Io(_)) || glitches >= GLITCHES {
                             elm = None;
                             connection = None;
+                            lost = true;
                             reopened = Instant::now();
                             send(Event::Status(format!(
                                 "The adapter stopped answering ({err}): the recording goes on once it is back."
@@ -964,6 +984,8 @@ fn start_recording(
         adapter: icarus_obd::link::Link::adapter(e),
         modules,
         gps: how.gps.clone(),
+        // asked for by hand: a GPS that does not open stops the recording before it starts, and says why
+        gps_optional: false,
         dir,
         keep_awake: !cfg!(test),
         vin,
@@ -1279,6 +1301,64 @@ pub(crate) mod tests {
         assert!(opens.load(std::sync::atomic::Ordering::SeqCst) >= 2);
         drop(ctx);
         worker.join().unwrap();
+        drop(home);
+    }
+
+    /// Review of ICA-208: the adapter drops while recording and stays away; Stop then ends the recording and tells the window
+    /// the connection is gone (Disconnected, before the rows are said), so it connects again by itself instead of showing
+    /// a link with frozen values. Quit (the window closing) ends the worker.
+    #[test]
+    fn stopping_a_recording_whose_adapter_is_gone_says_disconnected() {
+        let home = crate::TestHome::new("worker-lost");
+        let (ctx, crx) = mpsc::channel();
+        let (etx, erx) = mpsc::channel();
+        let opens = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let o = opens.clone();
+        let worker = std::thread::spawn(move || {
+            let open = move |_: &str| -> Result<Elm, String> {
+                if o.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0 {
+                    return Err("no adapter".into());
+                }
+                Elm::connect(Box::new(icarus_obd::sim::SimCar::new().dying_after(400)))
+                    .map_err(|e| e.to_string())
+            };
+            run_with(
+                crx,
+                etx,
+                icarus_obd::fence::Fence::default,
+                || {},
+                &open,
+                &|| Ok(()),
+            )
+        });
+        ctx.send(Cmd::Connect("sim".into())).unwrap();
+        until(&erx, "connection", &|e| matches!(e, Event::Connected(_)));
+        ctx.send(Cmd::Record(Some(RecordStart {
+            gps: None,
+            quiet: true,
+        })))
+        .unwrap();
+        until(
+            &erx,
+            "the drop",
+            &|e| matches!(e, Event::Status(s) if s.contains("stopped answering")),
+        );
+        ctx.send(Cmd::Record(None)).unwrap();
+        let seen = until(&erx, "the end", &|e| {
+            matches!(e, Event::Recording(Rec::Stopped { .. }))
+        });
+        let at = |f: &dyn Fn(&Event) -> bool| seen.iter().position(f);
+        let gone = at(&|e| matches!(e, Event::Disconnected)).expect("disconnected");
+        let stopped = at(&|e| matches!(e, Event::Recording(Rec::Stopped { .. }))).unwrap();
+        assert!(gone < stopped, "the link said gone first, then the rows");
+        ctx.send(Cmd::Quit).unwrap();
+        let end = Instant::now() + Duration::from_secs(5);
+        while !worker.is_finished() {
+            assert!(Instant::now() < end, "Quit ends the worker");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        worker.join().unwrap();
+        drop(ctx);
         drop(home);
     }
 

@@ -59,6 +59,7 @@ pub fn cmd_record(a: &[String]) -> Result<(), String> {
         spec: spec.clone(),
         target,
         gps: args.opt("gps").map(str::to_string),
+        auto,
         modules: args.opt("no-modules").is_none(),
         profiles: vehicles::load(vehicles::user_dir().as_deref()).0,
         dir,
@@ -94,6 +95,7 @@ struct Cli {
     spec: String,
     target: Target,
     gps: Option<String>,
+    auto: bool,
     modules: bool,
     profiles: Vec<vehicles::Profile>,
     dir: PathBuf,
@@ -131,6 +133,8 @@ fn pacer() -> Pacer {
 
 impl Driver for Cli {
     fn open(&mut self) -> Result<Box<dyn Link>, String> {
+        // a device set to listen only (the window's Settings) is never talked through, whoever opens it (ICA-80)
+        icarus_obd::roles::Roles::load().may_talk(&self.spec)?;
         let (link, note) = open_link(&self.spec, &self.target)?;
         if let Some(n) = note {
             self.say(&format!("Note: {n}"));
@@ -179,6 +183,8 @@ impl Driver for Cli {
             adapter: link.adapter(),
             modules,
             gps: self.gps.clone(),
+            // by itself, a GPS left unplugged does not hold the drive up: recorded without positions, said
+            gps_optional: self.auto,
             dir: self.dir.clone(),
             keep_awake: true,
             vin,
@@ -186,7 +192,7 @@ impl Driver for Cli {
     }
 
     fn stop(&self) -> Option<String> {
-        actuator::interrupted().then(|| "stopped (Ctrl+C or SIGTERM)".to_string())
+        actuator::interrupted().then(|| "stopped (Ctrl+C, SIGTERM or SIGHUP)".to_string())
     }
 
     fn say(&mut self, line: &str) {

@@ -359,6 +359,16 @@ pub fn catch_terminate() {
     }
 }
 
+/// The same for SIGHUP (the terminal a recording runs in closed).
+pub fn catch_hangup() {
+    unsafe {
+        libc::signal(
+            libc::SIGHUP,
+            on_interrupt as *const () as libc::sighandler_t,
+        );
+    }
+}
+
 pub fn interrupted() -> bool {
     INTERRUPTED.load(std::sync::atomic::Ordering::SeqCst)
 }
