@@ -287,6 +287,8 @@ pub struct SimCar {
     /// The engine refuses every output test it is asked to start with this code (`refusing_outputs`), past Icarus's own
     /// checks: a condition only the module knows (not in Park, the engine running).
     outputs_refused: Option<u8>,
+    /// Modules that support no status bits (`with_no_status_bits`): they answer `19 02` with availability 00 and every code.
+    no_status_bits: Vec<u32>,
 }
 
 /// The simulated engine's codes at 700 (UDS, `19 02 FF`): codes it can set, none failed (made up; ICA-207).
@@ -376,6 +378,7 @@ impl SimCar {
             wide_deaf: false,
             codes_for: Vec::new(),
             outputs_refused: None,
+            no_status_bits: Vec::new(),
         }
     }
 
@@ -516,6 +519,14 @@ impl SimCar {
     #[cfg(test)]
     pub(crate) fn with_codes(mut self, tx: u32, codes: &[u8]) -> SimCar {
         self.codes_for.push((tx, codes.to_vec()));
+        self
+    }
+
+    /// The same vehicle with the module at `tx` supporting no status bits: `19 02` gets `59 02 00` and every code it has,
+    /// whatever their status.
+    #[cfg(test)]
+    pub(crate) fn with_no_status_bits(mut self, tx: u32) -> SimCar {
+        self.no_status_bits.push(tx);
         self
     }
 
@@ -1212,6 +1223,10 @@ impl SimCar {
                 if tx == 0x7C0 && self.meter_busy {
                     self.meter_busy = false;
                     return refuse(0x78);
+                }
+                // a module that supports no status bits (`with_no_status_bits`): availability 00, every code it has
+                if self.no_status_bits.contains(&tx) {
+                    return Some([&[0x59, 0x02, 0x00][..], codes].concat());
                 }
                 // the codes whose status shares a bit with the mask, as ISO 14229-1 has a module answer
                 let matching = codes

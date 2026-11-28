@@ -496,7 +496,8 @@ the saved file is for study only. No family's description ships yet: each needs 
 `icarus mcp` is a Model Context Protocol server on stdin/stdout with seven read-only tools: `explain_code` (what a code
 means, where to start, the parts), `vehicle_check` (identity, check-engine light, readiness, codes explained, freeze frame,
 current values, on-board test results; the VIN's last 6 characters, its serial number, hidden unless `show_vin` is true),
-`vehicle_modules` (every module's codes), `module_data` (each module's own values; never the VIN or a module's serial
+`vehicle_modules` (every module's failed codes; a module that lists only codes it can set says "no trouble codes (N it
+can set, none failed)"), `module_data` (each module's own values; never the VIN or a module's serial
 number, which no set reads), `learning_sessions` (what Icarus saved while watching another tool, the VIN and serial numbers
 masked), `drive_logs` (recorded drives summarized) and `tires_gears`. What a tool says may go on to a model in the cloud,
 so no tool gives the whole VIN unless asked for it, nor any module's serial number. Nothing that clears
@@ -648,6 +649,10 @@ simulator only (`elm::STN_UNVERIFIED`).
 A module's codes are asked for in every read-only form in turn (UDS `19 02` with the status masks FF, 2F, 09 and 08;
 KWP2000 `18` with status 02 and 00; ISO 14230 `13` with and without the group), since modules refuse the forms they do not
 support; when none gives them, Icarus shows what each request got (no answer, or the module's refusal and its reason).
+A UDS code whose status has none of the failure bits (failing now, failed this cycle, pending, confirmed, failed since
+codes were cleared, warning light) is counted, not listed: many modules (my Tacoma's engine and transmission among them)
+answer `19 02 FF` with every code they can set, marked only "not tested", and such a module shows "no trouble codes (N it
+can set, none failed)". A module whose status bits include none of the failure bits has every code it lists shown.
 
 **Vehicles.** Icarus is for any make: what it knows about each one (where its modules answer, its quirks) is a small TOML
 file in `crates/icarus-obd/vehicles/`, picked by the VIN. Built in: Toyota/Lexus, Subaru, Ford/Lincoln, GM, Stellantis,

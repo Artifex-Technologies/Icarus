@@ -2996,6 +2996,7 @@ mod tests {
         };
         let mixed = uds::ModuleCodes::split(
             uds::Dialect::Uds,
+            Some(0xFF),
             vec![
                 code("P0100", 0x50),
                 code("P0301", 0x08),

@@ -8,6 +8,9 @@ What other projects may rely on from Icarus, and what it uses from them. One sec
 
 stdin/stdout, seven read-only tools: `explain_code`, `vehicle_check`, `vehicle_modules`, `module_data`, `learning_sessions`,
 `drive_logs`, `tires_gears`.
+`vehicle_modules` gives each module's codes that failed (UDS status with a failure bit; every KWP2000 code); a module that
+lists only codes it can set, none failed, is one line, "`<ID> <name>`: no trouble codes (N it can set, none failed).", and
+one with failed codes and others ends with "and N more it can set, none failed.".
 `vehicle_check` gives the VIN with its last 6 characters (the serial number) as `******` unless it is called with
 `show_vin: true`. No tool gives a module's serial number: `learning_sessions` gives sessions with the VIN and serial
 numbers masked (bytes as `2A`, the line marked `[VIN masked]` or `[serial number masked]`), and `module_data` never reads

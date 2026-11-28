@@ -55,9 +55,12 @@ pub fn check_read_only(data: &[u8]) -> Result<(), ObdError> {
     )))
 }
 
-/// What a negative response code (`7F <service> <code>`) means, in words that say what to do where there is something to
-/// do: ISO 14229-1's codes (UDS), with ISO 14230-3's own 23 and 80 (KWP2000). Only the codes both leave reserved are
-/// "another refusal".
+/// What a negative response code (`7F <service> <code>`) means, in words that say what to do where there is something
+/// safe to do. The meanings are ISO 14229-1's (UDS), with ISO 14230-3's own 23 and 80 (KWP2000); KWP2000 gives some of
+/// the others other meanings (40-43 and 50-53 download and upload refusals, 72 a transfer stopped, 9A-EF and FA-FE the
+/// maker's or supplier's own), so the words for those ranges stay general. Only the codes UDS leaves reserved are
+/// "another refusal". These words reach the owner through actuator tests, settings and service routines, which Icarus runs
+/// only parked: a vehicle condition is stated, never an instruction to drive, engage a gear or rev the engine.
 pub fn nrc(code: u8) -> &'static str {
     match code {
         0x10 => "general reject",
@@ -78,34 +81,33 @@ pub fn nrc(code: u8) -> &'static str {
         0x35 => "invalid key",
         0x36 => "too many wrong keys: leave the ignition on and wait before trying again",
         0x37 => "the module's wait after a wrong key has not run out: wait (often 10 seconds or more) and try again",
-        0x38..=0x4F => "refused by the module's secure-link rules (extended data link security)",
-        0x50..=0x5D => "authentication failed: the module did not accept the certificate or proof offered",
+        0x38..=0x5D => "security or authentication refused",
         0x70 => "upload or download not accepted (programming refused)",
         0x71 => "transfer suspended (programming stopped)",
-        0x72 => "programming failed: the module could not erase or write its memory",
+        0x72 => "programming failed or the transfer was stopped",
         0x73 => "programming block out of sequence (wrong block counter)",
         0x78 => "response pending",
         0x7E => "sub-function not supported in this session",
         0x7F => "service not supported in this session",
         // KWP2000 (ISO 14230-3): the service needs another diagnostic session
         0x80 => "service not supported in this diagnostic session",
-        // the vehicle-condition codes: what the module wants changed first
+        // the vehicle-condition codes: what the module wants, with something to do only where it is safe parked
         0x81 => "engine speed too high: let it idle",
-        0x82 => "engine speed too low: start the engine or raise the idle",
+        0x82 => "engine speed too low (the module wants a higher engine speed)",
         0x83 => "the engine is running: turn the engine off (ignition on)",
-        0x84 => "the engine is not running: start the engine",
-        0x85 => "the engine has not run long enough: let it run a while",
+        0x84 => "the engine is not running (the module wants it running): start it only in Park with the parking brake set",
+        0x85 => "the engine has not run long enough: let it idle a while in Park",
         0x86 => "temperature too high: let it cool down",
-        0x87 => "temperature too low: let the engine warm up",
-        0x88 => "vehicle speed too high: stop the vehicle",
-        0x89 => "vehicle speed too low: this needs the vehicle moving",
+        0x87 => "temperature too low: let the engine warm up, idling in Park",
+        0x88 => "vehicle speed too high: stop the vehicle somewhere safe",
+        0x89 => "the module wants the vehicle moving: Icarus does not run this while driving",
         0x8A => "throttle or accelerator pedal too far down: take your foot off",
-        0x8B => "throttle or accelerator pedal not down far enough: press the pedal",
-        0x8C => "transmission not in Neutral: put it in Neutral",
-        0x8D => "transmission not in gear: put it in gear",
+        0x8B => "throttle or accelerator pedal not down far enough (the module wants it pressed)",
+        0x8C => "transmission not in Neutral (the module wants Neutral)",
+        0x8D => "transmission not in gear (the module wants a gear engaged)",
         0x8F => "brake not applied: press the brake pedal",
         0x90 => "shift lever not in Park: put it in Park",
-        0x91 => "torque converter clutch locked: slow down or stop so it releases",
+        0x91 => "the torque converter clutch is locked",
         0x92 => "voltage too high: check the charger or the charging system",
         0x93 => "voltage too low: connect a battery charger",
         0x94 => "a resource the module needs is busy for now: try again in a moment",
@@ -260,7 +262,8 @@ fn uds_states(s: u8) -> Vec<&'static str> {
         .collect()
 }
 
-/// UDS `19 02` answer: `59 02 <availability> (<3 bytes DTC> <status>)*`.
+/// UDS `19 02` answer: `59 02 <availability> (<3 bytes DTC> <status>)*`. The availability byte (the status bits the
+/// module supports) is taken by `module_dtcs` and given to `ModuleCodes::split`.
 pub fn parse_uds_dtcs(d: &[u8]) -> Option<Vec<ModuleDtc>> {
     if d.len() < 3 || d[0] != 0x59 || d[1] != 0x02 {
         return None;
@@ -381,11 +384,15 @@ pub struct ModuleCodes {
 }
 
 impl ModuleCodes {
-    /// Codes as a module listed them, split: on UDS a code with none of the failure bits is counted, not kept.
-    pub fn split(dialect: Dialect, all: Vec<ModuleDtc>) -> ModuleCodes {
+    /// Codes as a module listed them, split: on UDS a code with none of the failure bits is counted, not kept. `availability`
+    /// is UDS's status availability mask (the third byte of `59 02`): the status bits the module supports. One that
+    /// supports none of the failure bits (`59 02 00`, codes at status 00) says nothing by its statuses, so every code it
+    /// lists is kept.
+    pub fn split(dialect: Dialect, availability: Option<u8>, all: Vec<ModuleDtc>) -> ModuleCodes {
+        let statuses_tell = dialect == Dialect::Uds && availability.is_none_or(uds_failed);
         let (codes, rest): (Vec<_>, Vec<_>) = all
             .into_iter()
-            .partition(|c| dialect == Dialect::Kwp || uds_failed(c.status));
+            .partition(|c| !statuses_tell || uds_failed(c.status));
         ModuleCodes {
             dialect,
             codes,
@@ -452,7 +459,11 @@ pub fn module_dtcs(elm: &mut dyn Link, tx: u32, rx: u32) -> Result<CodesRead, Ob
             _ => parse_kwp13_dtcs(&a.data),
         });
         if let Some(v) = parsed {
-            return Ok(Ok(ModuleCodes::split(*dialect, v)));
+            let availability = got
+                .as_ref()
+                .filter(|_| *dialect == Dialect::Uds)
+                .and_then(|a| a.data.get(2).copied());
+            return Ok(Ok(ModuleCodes::split(*dialect, availability, v)));
         }
         let what = match got.as_ref().and_then(|a| a.refusal()) {
             Some((_, code)) => {
@@ -1064,34 +1075,49 @@ mod tests {
             (0x35, "invalid key"),
             (0x36, "too many wrong keys"),
             (0x37, "wait after a wrong key has not run out"),
-            (0x38, "secure-link rules"),
-            (0x4F, "secure-link rules"),
-            (0x50, "authentication failed"),
-            (0x5D, "authentication failed"),
+            (0x38, "security or authentication refused"),
+            (0x4F, "security or authentication refused"),
+            (0x50, "security or authentication refused"),
+            (0x5D, "security or authentication refused"),
             (0x70, "upload or download not accepted"),
             (0x71, "transfer suspended"),
-            (0x72, "programming failed"),
+            (0x72, "programming failed or the transfer was stopped"),
             (0x73, "out of sequence"),
             (0x78, "response pending"),
             (0x7E, "sub-function not supported in this session"),
             (0x7F, "service not supported in this session"),
             (0x80, "service not supported in this diagnostic session"),
             (0x81, "engine speed too high: let it idle"),
-            (0x82, "engine speed too low: start the engine"),
+            (
+                0x82,
+                "engine speed too low (the module wants a higher engine speed)",
+            ),
             (0x83, "the engine is running: turn the engine off"),
-            (0x84, "the engine is not running: start the engine"),
-            (0x85, "has not run long enough"),
+            (
+                0x84,
+                "the engine is not running (the module wants it running): start it only in Park",
+            ),
+            (0x85, "has not run long enough: let it idle a while in Park"),
             (0x86, "temperature too high: let it cool"),
-            (0x87, "temperature too low: let the engine warm up"),
-            (0x88, "vehicle speed too high: stop the vehicle"),
-            (0x89, "vehicle speed too low"),
+            (
+                0x87,
+                "temperature too low: let the engine warm up, idling in Park",
+            ),
+            (
+                0x88,
+                "vehicle speed too high: stop the vehicle somewhere safe",
+            ),
+            (
+                0x89,
+                "the module wants the vehicle moving: Icarus does not run this while driving",
+            ),
             (0x8A, "pedal too far down: take your foot off"),
-            (0x8B, "not down far enough: press the pedal"),
-            (0x8C, "not in Neutral: put it in Neutral"),
-            (0x8D, "not in gear: put it in gear"),
+            (0x8B, "not down far enough (the module wants it pressed)"),
+            (0x8C, "not in Neutral (the module wants Neutral)"),
+            (0x8D, "not in gear (the module wants a gear engaged)"),
             (0x8F, "brake not applied: press the brake pedal"),
             (0x90, "not in Park: put it in Park"),
-            (0x91, "torque converter clutch locked"),
+            (0x91, "the torque converter clutch is locked"),
             (0x92, "voltage too high"),
             (0x93, "voltage too low: connect a battery charger"),
             (0x94, "busy for now: try again"),
@@ -1112,6 +1138,82 @@ mod tests {
                 nrc(c)
             );
         }
+    }
+
+    /// ICA-109 review: a refusal's words reach the owner through tests, settings and routines run parked, so none tells
+    /// them to drive, move the vehicle, engage a gear, rev the engine or press the accelerator.
+    #[test]
+    fn no_refusal_tells_the_owner_to_do_anything_unsafe() {
+        let unsafe_words = [
+            "drive it",
+            "drive the",
+            "start driving",
+            "move the vehicle",
+            "get it moving",
+            "slow down",
+            "speed up",
+            "accelerate",
+            "rev ",
+            "raise the idle",
+            "put it in gear",
+            "put it in drive",
+            "put it in neutral",
+            "put it in reverse",
+            "shift into",
+            "engage a gear",
+            "engage the",
+            "press the pedal",
+            "press the accelerator",
+            "press the throttle",
+            "release the parking brake",
+            "release the brake",
+        ];
+        for c in 0..=0xFF {
+            let words = nrc(c).to_lowercase();
+            for w in unsafe_words {
+                assert!(!words.contains(w), "{c:02X} says {w:?}: {words}");
+            }
+        }
+    }
+
+    /// Review of ICA-207: a module whose availability mask supports none of the failure bits (`59 02 00`, its codes at
+    /// status 00) says nothing by its statuses: every code it lists is kept, none hidden as "not failed".
+    #[test]
+    fn a_module_supporting_no_failure_bits_keeps_every_code() {
+        let codes = [0x01, 0x71, 0x00, 0x00, 0x03, 0x01, 0x00, 0x00];
+        let car = SimCar::new()
+            .with_codes(0x700, &codes)
+            .with_no_status_bits(0x700);
+        let mut elm = Elm::connect(Box::new(car)).unwrap();
+        let read = module_dtcs(&mut elm, 0x700, 0x708).unwrap().unwrap();
+        assert_eq!(
+            (
+                read.codes
+                    .iter()
+                    .map(|c| c.code.as_str())
+                    .collect::<Vec<_>>(),
+                read.not_failed
+            ),
+            (vec!["P0171", "P0301"], 0)
+        );
+        assert_eq!(read.none_failed(), None);
+        let dtc = |status| ModuleDtc {
+            code: "P0100".into(),
+            failure_type: Some(0),
+            status,
+            states: uds_states(status),
+        };
+        // availability with only the "not tested" bits: no failure bit to judge by, so kept too
+        let only = ModuleCodes::split(Dialect::Uds, Some(0x50), vec![dtc(0x50)]);
+        assert_eq!((only.codes.len(), only.not_failed), (1, 0));
+        // a failure bit available: judged by the statuses as before
+        let judged = ModuleCodes::split(Dialect::Uds, Some(0x09), vec![dtc(0x00), dtc(0x08)]);
+        assert_eq!((judged.codes.len(), judged.not_failed), (1, 1));
+        let unknown = ModuleCodes::split(Dialect::Uds, None, vec![dtc(0x50)]);
+        assert_eq!((unknown.codes.len(), unknown.not_failed), (0, 1));
+        // KWP2000 codes are all kept, whatever their status byte
+        let kwp = ModuleCodes::split(Dialect::Kwp, None, vec![dtc(0x00)]);
+        assert_eq!(kwp.codes.len(), 1);
     }
 
     /// Bits 6-5 together are one state: 0x40 alone is a maturing (intermittent) code, not one present now.
