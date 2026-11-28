@@ -142,6 +142,14 @@ Bus (watching only: nothing is sent onto the bus):
                                              --ask-sarina (only when Sarina is installed) has Sarina read the session
                                              and say what Sarina makes of it
 
+Recorded drives (~/Documents/Icarus/logs and each vehicle's Logs folder; only the files are read):
+  icarus logs compare A B [C...] [--min-rows N]
+                                             two drives or more at matching conditions (warm, closed loop, engine
+                                             running): each bank's total fuel trim by air flow, and timing by engine
+                                             speed and load, side by side with each group's row count and the difference
+                                             from the first. A group under N rows (10) is thin, never summarized. A
+                                             recording is a file's path or its name in the logs folders
+
 Interfaces:
   icarus devices                             the tuners and interfaces plugged in (SCT, COBB, HP Tuners, CP210x/FTDI
                                              cables...), what each is and whether Icarus can open it; nothing is sent
@@ -238,6 +246,7 @@ fn main() -> ExitCode {
         Some("bus") => cmd_bus(&args[1..]),
         Some("learn") => cmd_learn(&args[1..], icarus_obd::fence::current()),
         Some("tires") => cmd_tires(&args[1..]),
+        Some("logs") => cmd_logs(&args[1..]),
         Some("gps") => gps::cmd_gps(&args[1..]),
         Some("recalls") => cmd_recalls(&args[1..]),
         Some("import") => data::cmd_import(&args[1..]),
@@ -2499,6 +2508,54 @@ fn cmd_recalls(a: &[String]) -> Result<(), String> {
         "\nWhether one vehicle is affected and still open: its VIN at {}",
         nhtsa::VIN_RECALL_CHECK
     );
+    Ok(())
+}
+
+const LOGS_USAGE: &str = "usage: icarus logs compare A B [C...] [--min-rows N]   (each a recording's path, or its file name in \
+~/Documents/Icarus/logs or a vehicle's Logs folder; the first is the one the others are measured against)";
+
+/// `icarus logs compare`: recorded drives side by side at matching conditions (ICA-210).
+fn cmd_logs(a: &[String]) -> Result<(), String> {
+    use icarus_obd::drivelog::{self, compare};
+    let args = parse_args(a, &["min-rows"])?;
+    let Some((what, files)) = args.pos.split_first() else {
+        return Err(LOGS_USAGE.into());
+    };
+    if what != "compare" || files.len() < 2 {
+        return Err(LOGS_USAGE.into());
+    }
+    let min_rows = args
+        .opt("min-rows")
+        .map(|v| {
+            v.parse::<usize>()
+                .ok()
+                .filter(|n| *n > 0)
+                .ok_or("--min-rows needs a whole number of rows, 1 or more")
+        })
+        .transpose()?
+        .unwrap_or(compare::MIN_ROWS);
+    let dirs = drivelog::folders();
+    let paths: Vec<std::path::PathBuf> = files
+        .iter()
+        .map(|f| {
+            let p = std::path::PathBuf::from(f);
+            if p.is_file() {
+                Ok(p)
+            } else {
+                drivelog::by_name(&dirs, f).ok_or(format!(
+                    "{f}: no such file, and no recording by that name in the logs folders"
+                ))
+            }
+        })
+        .collect::<Result<_, String>>()?;
+    let refs: Vec<&std::path::Path> = paths.iter().map(|p| p.as_path()).collect();
+    let c = compare::compare_files(&refs, min_rows)?;
+    let warm = if icarus_core::moddata::units::us_customary() {
+        icarus_obd::units::both("°C", compare::WARM_C, 0)
+    } else {
+        format!("{:.0} °C", compare::WARM_C)
+    };
+    print!("{}", compare::words(&c, &warm));
     Ok(())
 }
 

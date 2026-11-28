@@ -125,6 +125,20 @@ A clear, a service routine or a setting change confirmed in the window belongs t
 dialog closes when the adapter disconnects, connects again or fails, and a yes that reaches the vehicle side after the
 adapter connected again (perhaps to another vehicle) is refused with nothing sent.
 
+## Comparing drives
+
+```sh
+icarus logs compare drive-A.csv drive-B.csv [drive-C.csv...] [--min-rows 10]
+```
+
+Two recordings or more at matching conditions, so a change of fuel or tune shows without sorting rows by hand: only the
+rows where the engine is warm (coolant 176 °F, 80 °C, or more), in closed loop (commanded lambda 0.98 to 1.02) and running,
+grouped by air flow (each bank's total fuel trim, short + long term) and by engine speed and load (timing advance), each
+recording's column headed by its file name and the adapter it names, with each group's row count and the difference from
+the first recording. A group under the minimum count is marked thin and never summarized, and no difference is given
+beside it. The recordings may hold different columns in a different order; each is found by its name. A recording is a
+path, or a file name in `~/Documents/Icarus/logs` or a vehicle's Logs folder. The Logs page's Compare view shows the same.
+
 ## Tires and gears
 
 ```sh

@@ -1,9 +1,12 @@
 //! The Logs page and recording: drives recorded as CSV (by the window's Record button on the Live data page, or by `icarus obd
 //! live --csv`), listed, summarized (icarus-obd's drivelog, the same summary assistants read through `icarus mcp`'s drive_logs)
 //! and drawn: stacked charts on one time line (fuel trims of both banks, engine speed and road speed, throttle, the rear
-//! oxygen sensors, timing, air flow, coolant), with a line under the pointer that reads every chart at that moment.
+//! oxygen sensors, timing, air flow, coolant), with a line under the pointer that reads every chart at that moment. The
+//! Compare view puts two drives or more side by side at matching conditions (icarus-obd's drivelog::compare, the same
+//! comparison as `icarus logs compare`).
 
 use eframe::egui::{self, vec2, Color32, CornerRadius, RichText, Sense, Stroke};
+use icarus_obd::drivelog::compare::{self, Comparison, Table};
 use icarus_obd::drivelog::{self, Series, Summary};
 use icarus_obd::j1979;
 use std::collections::HashMap;
@@ -279,6 +282,147 @@ pub struct Logs {
     checked: Option<std::time::Instant>,
     /// The column shown over engine speed and load (None: the first fuel trim, else timing).
     grid_value: Option<usize>,
+    /// The Compare view, when it is the one shown.
+    compare: CompareView,
+}
+
+/// Recordings side by side (ICA-210): the ones picked, in the order picked (the first is the one the others are measured
+/// against), the minimum row count, and the comparison as last read for them.
+#[derive(Default)]
+struct CompareView {
+    on: bool,
+    picked: Vec<PathBuf>,
+    /// None: compare::MIN_ROWS.
+    min_rows: Option<usize>,
+    read: Option<(Vec<PathBuf>, Result<Comparison, String>)>,
+}
+
+/// Picks or unpicks a recording, keeping the order they were picked in.
+fn pick(picked: &mut Vec<PathBuf>, p: &std::path::Path, on: bool) {
+    picked.retain(|x| x != p);
+    if on {
+        picked.push(p.to_path_buf());
+    }
+}
+
+fn file_name_of(p: &std::path::Path) -> String {
+    p.file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+impl CompareView {
+    fn page(&mut self, ui: &mut egui::Ui, pal: &theme::Palette, list: &[PathBuf]) {
+        let mut min = self.min_rows.unwrap_or(compare::MIN_ROWS);
+        ui.horizontal(|ui| {
+            ui.label("Thin under");
+            ui.add(egui::DragValue::new(&mut min).range(1..=10_000));
+            ui.label("rows");
+            if ui.button("Read again").clicked() {
+                self.read = None;
+            }
+            if ui.button("Clear").clicked() {
+                self.picked.clear();
+            }
+        });
+        self.min_rows = Some(min);
+        ui.label(
+            RichText::new(
+                "Pick two recordings or more: the first picked is the one the others are measured against.",
+            )
+            .small()
+            .color(pal.dim),
+        );
+        // a recording no longer there is unpicked
+        self.picked.retain(|p| list.contains(p));
+        egui::ScrollArea::vertical()
+            .id_salt("compare-pick")
+            .max_height(150.0)
+            .show(ui, |ui| {
+                for p in list {
+                    let at = self.picked.iter().position(|x| x == p);
+                    let mut on = at.is_some();
+                    let label = match at {
+                        Some(i) => format!("{}. {}", i + 1, file_name_of(p)),
+                        None => file_name_of(p),
+                    };
+                    if ui.checkbox(&mut on, label).changed() {
+                        pick(&mut self.picked, p, on);
+                    }
+                }
+            });
+        ui.add_space(8.0);
+        if self.picked.len() < 2 {
+            ui.label(RichText::new("Pick at least two to compare.").color(pal.dim));
+            return;
+        }
+        if self.read.as_ref().is_none_or(|r| r.0 != self.picked) {
+            let refs: Vec<&std::path::Path> = self.picked.iter().map(|p| p.as_path()).collect();
+            self.read = Some((self.picked.clone(), compare::compare_files(&refs, min)));
+        }
+        let Some((_, result)) = &mut self.read else {
+            return;
+        };
+        let c = match result {
+            Ok(c) => c,
+            Err(e) => {
+                ui.label(RichText::new(format!("Cannot compare: {e}")).color(pal.red));
+                return;
+            }
+        };
+        c.min_rows = min;
+        egui::ScrollArea::both().id_salt("compare").show(ui, |ui| {
+            ui.label(
+                RichText::new(c.conditions(&value_text("°C", compare::WARM_C, 0)))
+                    .small()
+                    .color(pal.dim),
+            );
+            for f in 0..c.recordings.len() {
+                ui.label(RichText::new(c.recording_line(f)).small());
+            }
+            for t in [Table::Trims, Table::Timing] {
+                ui.add_space(10.0);
+                ui.label(RichText::new(t.title()).strong());
+                if c.groups(t).is_empty() {
+                    ui.label(RichText::new("No rows at those conditions.").color(pal.dim));
+                    continue;
+                }
+                compare_table(ui, pal, c, t);
+            }
+        });
+    }
+}
+
+/// One of the comparison's tables: the group, each recording's cell (thin ones dimmed), each difference from the first.
+fn compare_table(ui: &mut egui::Ui, pal: &theme::Palette, c: &Comparison, t: Table) {
+    let n = c.recordings.len();
+    egui::Grid::new(("compare", t.by()))
+        .striped(true)
+        .spacing([18.0, 4.0])
+        .show(ui, |ui| {
+            for (i, line) in c.heading(t).iter().enumerate() {
+                for h in line {
+                    let r = RichText::new(h);
+                    ui.label(if i == 0 {
+                        r.strong()
+                    } else {
+                        r.small().color(pal.dim)
+                    });
+                }
+                ui.end_row();
+            }
+            for g in c.groups(t) {
+                ui.label(&g.label);
+                for f in 0..n {
+                    let r = RichText::new(c.cell_text(t, g, f));
+                    ui.label(if c.thin(g, f) { r.color(pal.dim) } else { r });
+                }
+                for f in 1..n {
+                    ui.label(c.difference_text(t, g, f));
+                }
+                ui.end_row();
+            }
+        });
 }
 
 fn changed(p: &std::path::Path) -> Option<std::time::SystemTime> {
@@ -343,6 +487,14 @@ impl Logs {
             .is_some_and(|a| a.as_secs() < 5);
         if live {
             ui.ctx().request_repaint_after(tick);
+        }
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.compare.on, false, "One recording");
+            ui.selectable_value(&mut self.compare.on, true, "Compare");
+        });
+        if self.compare.on && !self.list.is_empty() {
+            self.compare.page(ui, pal, &self.list);
+            return;
         }
         ui.horizontal(|ui| {
             ui.label("Recording");
@@ -971,5 +1123,30 @@ mod tests {
         );
         assert_eq!(unit_of("Vehicle speed [km/h]"), "km/h");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn recordings_are_compared_in_the_order_picked() {
+        let (a, b, c) = (
+            PathBuf::from("a.csv"),
+            PathBuf::from("b.csv"),
+            PathBuf::from("c.csv"),
+        );
+        let mut picked = vec![];
+        pick(&mut picked, &b, true);
+        pick(&mut picked, &a, true);
+        pick(&mut picked, &c, true);
+        assert_eq!(
+            picked,
+            [b.clone(), a.clone(), c.clone()],
+            "the first picked is the one measured against"
+        );
+        pick(&mut picked, &a, false);
+        pick(&mut picked, &b, true);
+        assert_eq!(picked, [c, b], "picked again goes last");
+        assert_eq!(
+            file_name_of(std::path::Path::new("/x/drive.csv")),
+            "drive.csv"
+        );
     }
 }

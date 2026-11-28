@@ -6,6 +6,8 @@
 //! and left out of the trims: there the trims say nothing and the rear sensors read lean, and on some engines commanded
 //! lambda reads well below 1 (0.48 on a Tacoma, ICA-86), which is not running rich. Offline: only the file is read.
 
+pub mod compare;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -142,34 +144,111 @@ pub struct Grid {
 pub const RPM_STEP: f64 = 500.0;
 pub const LOAD_STEP: f64 = 10.0;
 
-/// `value` (a column) over engine speed and engine load; None when the recording lacks either or has no reading of it.
-pub fn grid(s: &Series, value: usize) -> Option<Grid> {
-    let (r, l) = (s.find(&["engine speed"])?, s.find(&["engine load"])?);
-    let mut acc: BTreeMap<(usize, usize), (f64, usize)> = BTreeMap::new();
+/// How one side of a table is cut: even steps from 0 (a tuner's columns), or bands between edges. Either way a band holds
+/// its lower edge and not its upper, so a reading on an edge (engine load comes in steps of 0.4 %, and 60.0 % is one of
+/// them) is counted once.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Cut<'a> {
+    Step(f64),
+    Edges(&'a [f64]),
+}
+
+impl Cut<'_> {
+    /// The band `v` falls in, from 0; None outside the edges, below 0 for steps, or not a number.
+    pub fn band(&self, v: f64) -> Option<usize> {
+        if !v.is_finite() {
+            return None;
+        }
+        match *self {
+            Cut::Step(w) => (v >= 0.0 && w > 0.0).then(|| (v / w) as usize),
+            Cut::Edges(e) => e.windows(2).position(|w| v >= w[0] && v < w[1]),
+        }
+    }
+}
+
+/// What fell in one cell of a table: how many rows, and for each value its sum and how many of those rows had it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Cell {
+    pub rows: usize,
+    sums: Vec<(f64, usize)>,
+}
+
+impl Cell {
+    /// The mean of value `k` over the rows that had it.
+    pub fn mean(&self, k: usize) -> Option<f64> {
+        self.sums
+            .get(k)
+            .filter(|s| s.1 > 0)
+            .map(|s| s.0 / s.1 as f64)
+    }
+
+    /// How many rows had value `k`.
+    pub fn count(&self, k: usize) -> usize {
+        self.sums.get(k).map_or(0, |s| s.1)
+    }
+}
+
+/// One value of a row, worked out from the row's columns (a column itself, or short + long-term trim).
+pub type Value<'a> = &'a dyn Fn(usize) -> Option<f64>;
+
+/// The rows of `s` that `keep` lets through, sorted into cells by `axes` (a column each and how it is cut; a row that lacks
+/// one, or falls outside its edges, is left out), and each of `values` summed per cell. A row lacking a value still counts
+/// in its cell's rows, and is left out of that value's mean only. The cells are keyed by their band on each axis.
+pub fn cells(
+    s: &Series,
+    axes: &[(usize, Cut)],
+    keep: impl Fn(usize) -> bool,
+    values: &[Value],
+) -> BTreeMap<Vec<usize>, Cell> {
+    let mut acc: BTreeMap<Vec<usize>, Cell> = BTreeMap::new();
     for i in 0..s.t.len() {
-        let (Some(rpm), Some(load), Some(v)) = (s.cols[r][i], s.cols[l][i], s.cols.get(value)?[i])
+        if !keep(i) {
+            continue;
+        }
+        let Some(key) = axes
+            .iter()
+            .map(|(c, cut)| cut.band(s.cols.get(*c)?.get(i).copied().flatten()?))
+            .collect::<Option<Vec<usize>>>()
         else {
             continue;
         };
-        if !(rpm.is_finite() && load.is_finite() && v.is_finite()) || rpm < 0.0 || load < 0.0 {
-            continue;
+        let cell = acc.entry(key).or_insert_with(|| Cell {
+            rows: 0,
+            sums: vec![(0.0, 0); values.len()],
+        });
+        cell.rows += 1;
+        for (k, v) in values.iter().enumerate() {
+            if let Some(x) = v(i).filter(|x| x.is_finite()) {
+                cell.sums[k].0 += x;
+                cell.sums[k].1 += 1;
+            }
         }
-        let k = ((load / LOAD_STEP) as usize, (rpm / RPM_STEP) as usize);
-        let e = acc.entry(k).or_insert((0.0, 0));
-        e.0 += v;
-        e.1 += 1;
     }
+    acc
+}
+
+/// `value` (a column) over engine speed and engine load; None when the recording lacks either or has no reading of it.
+pub fn grid(s: &Series, value: usize) -> Option<Grid> {
+    let (r, l) = (s.find(&["engine speed"])?, s.find(&["engine load"])?);
+    let col = s.cols.get(value)?;
+    let v = |i: usize| col[i];
+    let acc = cells(
+        s,
+        &[(l, Cut::Step(LOAD_STEP)), (r, Cut::Step(RPM_STEP))],
+        |i| col[i].is_some_and(f64::is_finite),
+        &[&v],
+    );
     let (rows, cols) = (
-        acc.keys().map(|k| k.0).max()? + 1,
-        acc.keys().map(|k| k.1).max()? + 1,
+        acc.keys().map(|k| k[0]).max()? + 1,
+        acc.keys().map(|k| k[1]).max()? + 1,
     );
     let mut cells = vec![vec![None; cols]; rows];
     let (mut min, mut max) = (f64::MAX, f64::MIN);
-    for ((row, col), (sum, n)) in acc {
-        let m = sum / n as f64;
+    for (k, cell) in acc {
+        let m = cell.mean(0)?;
         min = min.min(m);
         max = max.max(m);
-        cells[row][col] = Some((m, n));
+        cells[k[0]][k[1]] = Some((m, cell.rows));
     }
     Some(Grid {
         rpm: (0..cols).map(|c| c as f64 * RPM_STEP).collect(),
