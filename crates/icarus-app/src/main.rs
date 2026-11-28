@@ -473,6 +473,8 @@ struct App {
     gps_busy: bool,
     /// Record drives with the GPS's columns too (opted into on the Live data page).
     record_gps: bool,
+    /// The module values a recording reads every sweep, one a line (Settings; `drive::watch_path`, ICA-218).
+    record_watch: String,
     /// `--gps`: listen once the Tools page is drawn.
     gps_now: bool,
     s_obd: String,
@@ -653,6 +655,9 @@ impl App {
             gps_fix: None,
             gps_busy: false,
             record_gps: false,
+            record_watch: watch_field(&icarus_obd::drive::load_watch(
+                icarus_obd::drive::watch_path().as_deref(),
+            )),
             gps_now: start.gps.is_some(),
             s_obd: String::new(),
             // a start page the levels do not show (--page tests on Basic) is the vehicle's
@@ -762,6 +767,7 @@ impl App {
         let _ = self.tx.send(Cmd::Record(Some(worker::RecordStart {
             gps,
             quiet: self.levels.record_quiet,
+            watch: icarus_obd::drive::parse_watch(&self.record_watch),
         })));
         self.status = "Starting the recording...".into();
         self.live_on = true;
@@ -784,16 +790,29 @@ impl App {
         match r {
             worker::Rec::Started { path, values } => {
                 // a new part keeps the rows counted so far
-                let rows = self.recording.as_ref().map_or(0, |r| r.rows);
+                let (rows, said) = self
+                    .recording
+                    .take()
+                    .map_or((0, Vec::new()), |r| (r.rows, r.said));
                 self.status = format!(
                     "Recording {values} values to {} (the Logs page shows it as it comes in).",
                     name(&path)
                 );
-                self.recording = Some(Recording { path, values, rows });
+                self.recording = Some(Recording {
+                    path,
+                    values,
+                    rows,
+                    said,
+                });
             }
             worker::Rec::Rows(n) => {
                 if let Some(r) = self.recording.as_mut() {
                     r.rows = n;
+                }
+            }
+            worker::Rec::Said(line) => {
+                if let Some(r) = self.recording.as_mut() {
+                    r.said.push(line);
                 }
             }
             worker::Rec::Stopped { rows, paths } => {
@@ -2126,9 +2145,9 @@ impl App {
                 .on_hover_text(
                     "Record every value the vehicle offers (fuel trims, timing, air flow, throttle and mixture every sweep, \
                      the rest every few seconds) and each module's own values (transmission temperature, knock...: the \
-                     vehicle's module-data set, answers kept) until stopped, keeping the laptop awake and going on through \
-                     adapter drops; a tone and a notice when it starts, stalls, resumes and stops (Settings); see it on the \
-                     Logs page",
+                     vehicle's module-data set, answers kept; knock, gear and lock-up every sweep, Settings changes \
+                     which) until stopped, keeping the laptop awake and going on through adapter drops; a tone and a \
+                     notice when it starts, stalls, resumes and stops (Settings); see it on the Logs page",
                 )
                 .clicked()
             {
@@ -2147,6 +2166,12 @@ impl App {
                 .weak(),
             );
         });
+        // ICA-218: the module values read every sweep, and the rows a second once known
+        if let Some(r) = &self.recording {
+            for line in &r.said {
+                ui.add(egui::Label::new(RichText::new(line).weak()).wrap());
+            }
+        }
         // Advanced: the request going out now (ICA-76)
         let adv = self.levels.advanced;
         if adv {
@@ -2824,6 +2849,37 @@ impl App {
             self.levels.record_quiet = !sound;
             self.save_levels();
             let _ = self.tx.send(Cmd::RecordQuiet(self.levels.record_quiet));
+        }
+        // ICA-218: the module values read every sweep, not only in their turn
+        ui.add_space(8.0);
+        ui.label("Module values read every sweep");
+        ui.add(egui::Label::new(RichText::new(format!(
+            "Part of a value's name, one a line (empty: the defaults; none: every value in turn). The requests carrying them are read every sweep, up to {} a sweep (more take turns); each costs the rows a second a little, the rest stay in turn. icarus record takes this too, unless given --watch.",
+            icarus_obd::drive::PRIORITY_PER_SWEEP
+        )).weak()).wrap());
+        let edit = ui.add(
+            egui::TextEdit::multiline(&mut self.record_watch)
+                .desired_rows(4)
+                .desired_width(320.0),
+        );
+        let defaults = ui.button("Defaults").on_hover_text(
+            "Knock feedback and correction, gear, lock-up, the shift lever's switches, sport mode and neutral",
+        );
+        if defaults.clicked() {
+            self.record_watch = watch_field(
+                &icarus_obd::drive::WATCH_DEFAULT
+                    .iter()
+                    .map(|w| w.to_string())
+                    .collect::<Vec<_>>(),
+            );
+        }
+        if edit.lost_focus() || defaults.clicked() {
+            let names = icarus_obd::drive::parse_watch(&self.record_watch);
+            if let Some(p) = icarus_obd::drive::watch_path() {
+                if let Err(e) = icarus_obd::drive::save_watch(&p, &names) {
+                    self.status = format!("The watched module values were not kept: {e}");
+                }
+            }
         }
         ui.add_space(18.0);
 
@@ -5629,6 +5685,17 @@ pub(crate) struct Recording {
     pub(crate) path: std::path::PathBuf,
     pub(crate) values: usize,
     pub(crate) rows: usize,
+    /// What it said of its module values: the watched ones, then its rows a second (ICA-218).
+    pub(crate) said: Vec<String>,
+}
+
+/// The Settings field for the watched module values: a name a line, `none` for nothing watched.
+fn watch_field(names: &[String]) -> String {
+    if names.is_empty() {
+        "none".into()
+    } else {
+        names.join("\n")
+    }
 }
 
 /// A home of a test's own for the tests that run the worker (it reads the config folder and writes the vehicle's record,

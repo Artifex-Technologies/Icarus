@@ -81,6 +81,8 @@ pub struct RecordStart {
     pub gps: Option<String>,
     /// No sound or notification (the window's settings).
     pub quiet: bool,
+    /// The module values read every sweep (the window's settings, ICA-218; empty: all in turn).
+    pub watch: Vec<String>,
 }
 
 /// What the recording is doing, for the Live data page.
@@ -93,6 +95,9 @@ pub enum Rec {
     },
     /// Rows written so far.
     Rows(usize),
+    /// What the recording says of its module values: the watched ones when it starts, its rows a second after the first
+    /// 10 s (ICA-218).
+    Said(String),
     /// Stopped (asked, or the vehicle changed): the rows and every part's file.
     Stopped {
         rows: usize,
@@ -541,6 +546,9 @@ pub(crate) fn run_with(
                             path: r.path().map(|p| p.to_path_buf()).unwrap_or_default(),
                             values: r.values(),
                         }));
+                        for w in r.watch_lines() {
+                            send(Event::Recording(Rec::Said(w)));
+                        }
                         glitches = 0;
                         recorder = Some(r);
                     }
@@ -906,6 +914,10 @@ pub(crate) fn run_with(
                         for n in std::mem::take(&mut s.notes) {
                             send(Event::Status(n));
                         }
+                        if let Some(rate) = s.rate.take() {
+                            send(Event::Status(rate.clone()));
+                            send(Event::Recording(Rec::Said(rate)));
+                        }
                         if let Some(p) = s.new_part.take() {
                             send(Event::Status(format!(
                                 "The engine started again: recording goes on in {}.",
@@ -986,14 +998,17 @@ fn start_recording(
     let modules = match icarus_obd::vehicledata::choose_for(e, profiles) {
         Ok(c) => {
             notes.push(format!(
-                "Recording module data from the set {} too (read in turn, its answers kept).",
+                "Recording module data from the set {} too (the watched values every sweep, the rest in turn, its answers kept).",
                 c.set.set.name
             ));
-            Some(icarus_obd::drive::Modules::new(
-                c.set,
-                c.scope,
-                Pacer::new(Instant::now, std::thread::sleep, never).with_gap(moddata::MIN_GAP),
-            ))
+            Some(
+                icarus_obd::drive::Modules::new(
+                    c.set,
+                    c.scope,
+                    Pacer::new(Instant::now, std::thread::sleep, never).with_gap(moddata::MIN_GAP),
+                )
+                .watching(&how.watch),
+            )
         }
         Err(why) => {
             notes.push(format!("Recording standard values only: {why}"));
@@ -1319,6 +1334,10 @@ pub(crate) mod tests {
         ctx.send(Cmd::Record(Some(RecordStart {
             gps: None,
             quiet: true,
+            watch: icarus_obd::drive::WATCH_DEFAULT
+                .iter()
+                .map(|w| w.to_string())
+                .collect(),
         })))
         .unwrap();
         let seen = until(&erx, "the start", &|e| {
@@ -1333,6 +1352,12 @@ pub(crate) mod tests {
         let path = path.clone();
         assert!(path.starts_with(&home.dir), "{path:?}");
         assert!(*values > 20, "{values}");
+        // ICA-218: what is watched is said as it starts
+        until(
+            &erx,
+            "the watched values said",
+            &|e| matches!(e, Event::Recording(Rec::Said(l)) if l.contains("knock correction (700 22 1F01)")),
+        );
         until(&erx, "a new connection", &|e| {
             matches!(e, Event::Connected(_))
         });
@@ -1397,6 +1422,10 @@ pub(crate) mod tests {
         ctx.send(Cmd::Record(Some(RecordStart {
             gps: None,
             quiet: true,
+            watch: icarus_obd::drive::WATCH_DEFAULT
+                .iter()
+                .map(|w| w.to_string())
+                .collect(),
         })))
         .unwrap();
         until(

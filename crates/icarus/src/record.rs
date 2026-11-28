@@ -14,14 +14,14 @@ use icarus_obd::{actuator, drivelog, j1979, vehicledata, vehicles};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-pub const USAGE: &str = "usage: icarus record [--adapter A] [--auto [--off-after SECS]] [--quiet] [--gps SOURCE] [--no-modules]\n       \
+pub const USAGE: &str = "usage: icarus record [--adapter A] [--auto [--off-after SECS]] [--quiet] [--gps SOURCE] [--no-modules] [--watch NAME]...\n       \
 icarus record redecode FILE.csv [--set SET] [--year YYYY] [--out NEW.csv]";
 
 pub fn cmd_record(a: &[String]) -> Result<(), String> {
     if a.first().map(String::as_str) == Some("redecode") {
         return redecode(&parse_args(&a[1..], &["set", "year", "out"])?);
     }
-    let args = parse_args(a, &["adapter", "off-after", "gps"])?;
+    let args = parse_args(a, &["adapter", "off-after", "gps", "watch"])?;
     if !args.pos.is_empty() {
         return Err(USAGE.into());
     }
@@ -61,6 +61,7 @@ pub fn cmd_record(a: &[String]) -> Result<(), String> {
         gps: args.opt("gps").map(str::to_string),
         auto,
         modules: args.opt("no-modules").is_none(),
+        watch: watch_of(&args),
         profiles: vehicles::load(vehicles::user_dir().as_deref()).0,
         dir,
         pending: Vec::new(),
@@ -97,6 +98,8 @@ struct Cli {
     gps: Option<String>,
     auto: bool,
     modules: bool,
+    /// The module values read every sweep (ICA-218).
+    watch: Vec<String>,
     profiles: Vec<vehicles::Profile>,
     dir: PathBuf,
     /// What the modules did with each request, to keep in the vehicle's record (ICA-70): (VIN, outcomes).
@@ -116,6 +119,21 @@ impl Cli {
         }
         self.pending.clear();
     }
+}
+
+/// The module values to watch (ICA-218): every `--watch NAME` given (`none`: nothing), else the window's setting
+/// (`drive::watch_path`), else the defaults.
+fn watch_of(args: &Args) -> Vec<String> {
+    let given: Vec<String> = args
+        .opts
+        .iter()
+        .filter(|o| o.0 == "watch")
+        .map(|o| o.1.trim().to_string())
+        .collect();
+    if given.is_empty() {
+        return drive::load_watch(drive::watch_path().as_deref());
+    }
+    drive::parse_watch(&given.join("\n"))
 }
 
 /// Module data's pacer, stopping on Ctrl+C or SIGTERM only (a recording owns the adapter: it is this one).
@@ -159,13 +177,13 @@ impl Driver for Cli {
                         self.say(&format!("Module data: {n}"));
                     }
                     self.say(&format!(
-                        "Module data from the set {} (read in turn, its answers kept).",
+                        "Module data from the set {} (the watched values every sweep, the rest in turn, its answers kept).",
                         c.set.set.name
                     ));
                     if !c.set.set.source.attribution.is_empty() {
                         self.say(&c.set.set.source.attribution);
                     }
-                    Some(Modules::new(c.set, c.scope, pacer()))
+                    Some(Modules::new(c.set, c.scope, pacer()).watching(&self.watch))
                 }
                 Err(e) => {
                     self.say(&format!("Module data: {e}. Standard values only."));
@@ -260,4 +278,31 @@ fn redecode(args: &Args) -> Result<(), String> {
         println!("{}", loaded.set.source.attribution);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line(a: &[&str]) -> Args {
+        let a: Vec<String> = a.iter().map(|s| s.to_string()).collect();
+        parse_args(&a, &["adapter", "off-after", "gps", "watch"]).unwrap()
+    }
+
+    /// ICA-218: `--watch` again for each name, `none` for nothing (given names never read the window's file).
+    #[test]
+    fn watch_names_come_from_the_line() {
+        assert_eq!(
+            watch_of(&line(&[
+                "--watch",
+                "Knock feedback",
+                "--adapter",
+                "sim",
+                "--watch",
+                "gear"
+            ])),
+            vec!["Knock feedback", "gear"]
+        );
+        assert!(watch_of(&line(&["--watch", "none"])).is_empty());
+    }
 }

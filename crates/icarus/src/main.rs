@@ -50,12 +50,17 @@ Vehicle, through an OBD adapter (read-only: nothing is cleared or written):
   icarus obd pids  --adapter A               the live values each module offers, and what they mean
   icarus obd live  --adapter A [PID...] [--every MS] [--count N] [--csv FILE] [--gps SOURCE] [--all]
                                              watch live values (PIDs in hex, e.g. 0C 05 06 07); Ctrl+C stops
-  icarus record [--adapter A] [--auto [--off-after SECS]] [--quiet] [--gps SOURCE] [--no-modules]
+  icarus record [--adapter A] [--auto [--off-after SECS]] [--quiet] [--gps SOURCE] [--no-modules] [--watch NAME]...
                                              record a drive (~/Documents/Icarus/logs, as the window's Record drive):
                                              every value the vehicle offers, the fast ones every sweep, and each
                                              module's own values (the set obd data would choose) in turn, their answers
-                                             kept. From now until Ctrl+C or SIGTERM; --auto waits for the adapter and
-                                             for the engine to run, and ends each drive once the engine has been off
+                                             kept. The module values named by --watch (part of a name, again for each;
+                                             none: nothing) are read every sweep, up to 4 requests a sweep; without it,
+                                             the window's setting (Settings, Recording a drive), else knock feedback and
+                                             correction, gear, lock-up, shift lever and sport mode. Said at the start,
+                                             with the rows a second after 10 s. From now until Ctrl+C or SIGTERM;
+                                             --auto waits for the adapter and for the engine to run, and ends each
+                                             drive once the engine has been off
                                              or the adapter gone for SECS (120). The adapter is held by this program
                                              alone; adapter glitches do not end it; an engine started again goes into a
                                              part file. A sound and a desktop notification when it starts, stalls (no
