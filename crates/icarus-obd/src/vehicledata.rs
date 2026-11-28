@@ -95,6 +95,9 @@ pub struct ModuleValues {
     pub name: String,
     /// (value name, its reading with its unit, checked on this vehicle).
     pub values: Vec<(String, String, bool)>,
+    /// The values that read as a number: (value name, the number in the definition's own unit, that unit), for what needs
+    /// the number rather than its text (an odometer offered for the maintenance log).
+    pub numbers: Vec<(String, f64, String)>,
     /// What else happened: a request refused or unanswered, the module not reachable yet.
     pub notes: Vec<String>,
 }
@@ -243,6 +246,7 @@ pub fn read(
             label: m.module.label(),
             name: m.module.name.clone(),
             values: Vec::new(),
+            numbers: Vec::new(),
             notes: Vec::new(),
         };
         if let Err(why) = moddata::reachable(m) {
@@ -264,6 +268,9 @@ pub fn read(
                     for v in vs {
                         let checked = state.checked(m.module.tx, &v.id).is_some();
                         mv.values.push((v.name.clone(), v.text(us), checked));
+                        if let icarus_core::moddata::Shown::Number(x) = v.shown {
+                            mv.numbers.push((v.name.clone(), x, v.unit.clone()));
+                        }
                     }
                 }
                 Outcome::NotDue => {}
@@ -312,6 +319,14 @@ mod tests {
             "{labels:?}"
         );
         assert!(all.modules.iter().any(|m| !m.values.is_empty()), "{all:?}");
+        // each value that reads as a number is there as a number too, in its definition's own unit
+        assert!(
+            all.modules.iter().any(|m| !m.numbers.is_empty()
+                && m.numbers
+                    .iter()
+                    .all(|(n, _, _)| m.values.iter().any(|v| v.0 == *n))),
+            "{all:?}"
+        );
         let one = read(&mut elm, &profiles, Some("701"), false).unwrap();
         assert_eq!(one.modules.len(), 1);
         assert!(one.text().contains("701"));

@@ -1031,6 +1031,11 @@ fn start_recording(
         gps_optional: false,
         dir,
         keep_awake: !cfg!(test),
+        // the garage folder's name for the file's vehicle line (a test reads no garage of the home's)
+        vehicle: vin
+            .as_deref()
+            .filter(|_| !cfg!(test))
+            .and_then(icarus_obd::garage::folder_label),
         vin,
     };
     let r = icarus_obd::drive::Recorder::start_pruning(plan, PRUNE_AFTER_S)?;

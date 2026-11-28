@@ -153,8 +153,9 @@ icarus garage service [VIN] odometer [--adapter A]
 Each vehicle keeps the services done in `maintenance.toml` in its folder, a plain file I can read and edit by hand. The
 VIN may be left out while the garage holds one vehicle. Kinds: `oil` (oil and filter), `spark-plugs`, `air-filter`,
 `fluids`, `brakes`, `tire-rotation`, `sensor`, `fuel` (a fuel change) and `other` (which needs a `--note`); a few plain
-words are taken too ("spark plugs", "plugs", "oil and filter"). The date is today's unless given; giving the time as well
-(`--date "2026-11-29 14:30"`) places the drives of that day before or after it. The file:
+words are taken too ("spark plugs", "plugs", "oil and filter"). The date and time are now unless given (the window's
+card fills in now too); the time places the drives of that day before or after it, and logging a service says how many of
+that day's drives began after it ("1 drive on 2026-11-29 began after 14:30: it counts as after it"). The file:
 
 ```toml
 [intervals.oil]          # whichever comes first
@@ -166,7 +167,12 @@ kind = "spark-plugs"
 date = "2026-11-29 14:30" # or "2026-11-29"
 miles = 84213             # the odometer then, in miles (optional)
 note = "NGK"              # optional; other needs one
+shop = "my driveway"      # a key of my own: kept
 ```
+
+Keys of my own, anywhere in it, are kept when Icarus saves; comments are not (the file's first lines say so). Each save is
+written whole into a new file and renamed over the old one, and the window and the command line take turns on it (a lock
+beside it), so neither loses the other's change.
 
 `due` gives each kind with an interval against the odometer now (`--miles`, else the highest one logged or the Garage
 page's miles, said which) and today's date: overdue, due soon (within 500 miles or 30 days), ok, or none logged yet. The
@@ -176,19 +182,26 @@ never offered) and, with `--adapter`, reads the vehicle's own (A6 and the set's 
 it is only); `add` without `--miles` asks about the newest recording's reading at a terminal and only says it otherwise.
 Icarus reads an odometer and never changes one.
 
-`compare` runs the drive comparison (Comparing drives, above) around a service: the last 3 recordings before it (by when each began, from
-its `drive-2026-11-27_183005.csv` name) pooled as "Before spark plugs" against the first 3 after it as "After spark
-plugs", with misfire counts before and after when the recordings carry them (a module-data value named misfire, recorded
-with the module data; how much each rose over the drives, and the hours driven). A side with fewer rows at matching
-conditions than the minimum is said plainly, and a service with no time leaves its own day's drives out, said too. It
-reads the vehicle's own Logs folder and `~/Documents/Icarus/logs`; those recordings do not say which vehicle they are from,
-so with more than one vehicle in the garage it says so. KIND is the latest service of that kind; DATE the services that
-day.
+`compare` runs the drive comparison (Comparing drives, above) around a service: the last 3 recordings before it pooled
+as "Before spark plugs" (every row counted once, so a long drive weighs more than a short one) against the first 3 after
+it as "After spark plugs", with misfire counts before and after when the recordings carry them (a module-data value whose
+name says misfire count; how much each rose over the drives that carry it, and how long those drives were). When a
+recording began is read from its `# began:` line (the recorder writes one in every part, so a part recorded after a stop
+for the plugs counts after them), else from the stamp in a first part's name (`drive-2026-11-27_183005.csv`), else from
+when the file was last written less its last row's time. Only the drives chosen are read whole. A drive is counted once:
+the same file in two folders once, and a drive decoded again (`icarus record redecode`, `-redecoded.csv`) in place of its
+original. A side with fewer rows at matching conditions than the minimum is said plainly, and a service with no time
+leaves its own day's drives out, said too. It reads the vehicle's own Logs folder and `~/Documents/Icarus/logs`: a
+recording's `# vehicle:` line (the name of the vehicle's garage folder, never the VIN; written for a named vehicle) leaves
+another vehicle's drives out, and when older recordings without the line are counted while other vehicles are in the
+garage, it says so (an odometer offered from one says so too). KIND is the latest service of that kind; DATE the
+services that day.
 
 The Garage page's **Maintenance** card does the same for the vehicle shown: what is due (colored by how soon), a service
 logged with its date, odometer and note (with **Use this reading** beside a reading offered: live A6 or the Modules page's
 odometer from the connected vehicle when it is this one, else the newest recording's), each kind's interval, the services
-logged, and **Before and after** on each one with the Compare view's tables under the service's name.
+logged, and **Before and after** on each one with the Compare view's tables under the service's name. What reads the
+recordings runs beside the window, which never waits on them.
 
 ## Tires and gears
 

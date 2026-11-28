@@ -208,6 +208,27 @@ fn a_service_logged_listed_due_and_compared() {
         "{out}"
     );
     assert!(!std::fs::read_to_string(&file).unwrap().contains("84260"));
+    // a service logged with its time says which of that day's drives count after it
+    let (ok, out, err) = h.run(&[
+        "garage",
+        "service",
+        VIN,
+        "add",
+        "sensor",
+        "--miles",
+        "84250",
+        "--date",
+        "2026-11-30 07:00",
+        "--note",
+        "front oxygen sensor",
+    ]);
+    assert!(ok, "{err}");
+    assert!(
+        out.contains(
+            "1 drive on 2026-11-30 began after 07:00: it counts as after it; 0 began before it"
+        ),
+        "{out}"
+    );
 
     // mistakes are refused
     let (ok, _, err) = h.run(&["garage", "service", VIN, "add", "other"]);

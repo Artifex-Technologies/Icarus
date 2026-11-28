@@ -296,8 +296,9 @@ fn assemble(parts: Vec<(Recording, Cells, Cells)>, min_rows: usize) -> Compariso
     c
 }
 
-/// The misfire values a recording carries (columns whose name says misfire, such as a module's "Cylinder #1 misfire
-/// count"; the standard values have none) and how much each rose over the recording: every step up between one reading
+/// The misfire counts a recording carries (columns whose name says both misfire and count, such as a module's "Cylinder
+/// #1 misfire count"; a misfire rate, ratio or flag is not a count, and the standard values have none) and how much each
+/// rose over the recording: every step up between one reading
 /// and the next added, so a counter that starts again (a new drive cycle) is still counted. With the recording's length
 /// in seconds. No such column: an empty list.
 pub fn misfires(text: &str) -> Result<(Vec<(String, f64)>, f64), String> {
@@ -305,7 +306,8 @@ pub fn misfires(text: &str) -> Result<(Vec<(String, f64)>, f64), String> {
     let seconds = s.t.last().copied().unwrap_or(0.0) - s.t.first().copied().unwrap_or(0.0);
     let mut out = vec![];
     for (name, col) in s.names.iter().zip(&s.cols) {
-        if !name.to_lowercase().contains("misfire") || name.ends_with("[hex]") {
+        let lower = name.to_lowercase();
+        if !lower.contains("misfire") || !lower.contains("count") || name.ends_with("[hex]") {
             continue;
         }
         let mut rise = 0.0;
@@ -729,5 +731,21 @@ mod tests {
             compare(&[("a.csv".into(), a)], MIN_ROWS).is_err(),
             "one is no comparison"
         );
+    }
+
+    #[test]
+    fn only_a_misfire_count_is_counted() {
+        // made-up names in the form a module-data set's values take: a count rises; a rate and a flag are not counts
+        let rec =
+            "time_s,\"Cylinder #1 misfire count (7E0 21 01) []\",\"Misfire rate (7E0 21 02) [%]\",\
+                   \"Misfire detected (7E0 21 03) []\",\"7E0 21 01 answer [hex]\"\n\
+                   0,0,1.5,0,00\n1,2,0.5,1,02\n2,1,2.5,0,01\n3,4,3.0,1,04\n";
+        let (m, secs) = misfires(rec).unwrap();
+        assert_eq!(
+            m,
+            [("Cylinder #1 misfire count (7E0 21 01) []".to_string(), 5.0)],
+            "2 up, 1 down (started again), 3 up"
+        );
+        assert_eq!(secs, 3.0);
     }
 }

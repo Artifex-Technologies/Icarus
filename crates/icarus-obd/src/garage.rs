@@ -299,6 +299,27 @@ pub fn logs_dir(vin: Option<&str>) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// The name of this vehicle's folder in `lib` when the vehicle has a name of its own (`name`), for a recording's
+/// `# vehicle:` line: "2017 Toyota Tacoma 3.5L V6". None for an unnamed vehicle, whose folder is its VIN (a recording does
+/// not carry the VIN), and for the simulated vehicle.
+pub fn folder_label_in(lib: &Path, vin: &str, name: Option<&str>) -> Option<String> {
+    if vin == crate::sim::VIN {
+        return None;
+    }
+    name.map(folder_name).filter(|n| !n.is_empty())?;
+    folder_in(lib, vin, name)
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+}
+
+/// `folder_label_in` for the garage on this computer.
+pub fn folder_label(vin: &str) -> Option<String> {
+    if vin == crate::sim::VIN {
+        return None;
+    }
+    folder_label_in(&library(), vin, load().get(vin).map(String::as_str))
+}
+
 /// This vehicle's folder, made if needed (the simulated vehicle has none).
 pub fn ensure(vin: &str) -> std::io::Result<PathBuf> {
     if vin == crate::sim::VIN {
@@ -676,6 +697,14 @@ mod tests {
         );
         let unnamed = ensure_in(&lib, "JF1VA2E60K9800000", None).unwrap();
         assert!(unnamed.ends_with("JF1VA2E60K9800000"));
+        // a recording's vehicle line: the folder's name, never a bare VIN
+        let label = |vin: &str, name: Option<&str>| folder_label_in(&lib, vin, name);
+        assert_eq!(
+            label("3TMCZ5AN0HM999999", Some("2017 Toyota Tacoma 3.5L V6")).as_deref(),
+            Some("2017 Toyota Tacoma 3.5L V6 (999999)")
+        );
+        assert_eq!(label("JF1VA2E60K9800000", None), None);
+        assert_eq!(label(crate::sim::VIN, Some("Sim")), None);
         assert_eq!(folder_name("a/b\\c."), "a-b-c");
         let v = vehicles_in(&lib);
         assert_eq!(v.len(), 3);

@@ -206,6 +206,7 @@ impl Driver for Cli {
             gps_optional: self.auto,
             dir: self.dir.clone(),
             keep_awake: true,
+            vehicle: vin.as_deref().and_then(icarus_obd::garage::folder_label),
             vin,
         })
     }

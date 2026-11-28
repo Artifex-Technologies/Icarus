@@ -86,7 +86,7 @@ fn number(v: Option<&str>, what: &str) -> Result<Option<u32>, String> {
 }
 
 /// The recordings that may be this vehicle's, and a note on them.
-fn recordings(dir: &std::path::Path) -> (Vec<PathBuf>, Option<String>) {
+fn recordings(dir: &std::path::Path) -> mt::Recordings {
     let shared = drivelog::folders().into_iter().next().unwrap_or_default();
     mt::recordings_for(&garage::library(), dir, &shared)
 }
@@ -110,22 +110,22 @@ pub fn cmd_service(a: &[String]) -> Result<(), String> {
                 Some(d) => When::parse(d)?.text(),
                 None => When::now().text(),
             };
+            let recs = recordings(&dir);
             let mut miles = number(args.opt("miles"), "miles")?;
             if miles.is_none() {
-                miles = confirm_offer(mt::offer_from_recordings(&recordings(&dir).0))?;
+                miles = confirm_offer(mt::offer_from(&recs))?;
             }
             let (s, warnings) = mt::add(
                 &dir,
-                Service {
-                    kind,
-                    date,
-                    miles,
-                    note: args.opt("note").unwrap_or("").to_string(),
-                },
+                Service::new(kind, &date, miles, args.opt("note").unwrap_or("")),
             )?;
             println!("Logged: {}", s.line());
             for w in warnings {
                 println!("Note: {w}");
+            }
+            // which of that day's drives a before and after will count on which side
+            if let Some(n) = s.when().and_then(|w| mt::day_note(w, &recs.paths)) {
+                println!("Note: {n}.");
             }
             if let Some(i) = mt::load(&dir)?.interval(kind) {
                 println!("Next {}: {}.", kind.name(), i.text());
@@ -185,7 +185,7 @@ pub fn cmd_service(a: &[String]) -> Result<(), String> {
                     println!(
                         "{}: {}.",
                         kind.name(),
-                        mt::Interval { miles, months }.text()
+                        mt::Interval::new(miles, months).text()
                     );
                 }
                 _ => return Err(USAGE.into()),
@@ -222,19 +222,15 @@ pub fn cmd_service(a: &[String]) -> Result<(), String> {
                 return Ok(());
             }
             match odometer {
-                Some(m) => println!("Odometer: {} ({from}).", mt::miles_text(m)),
+                Some(m) => println!("Odometer: {} ({from}).", mt::miles_text(m.into())),
                 None => println!("Odometer not known: due by months only (give --miles N)."),
             }
             if typed.is_none() {
-                if let Some(o) = dir
-                    .as_deref()
-                    .and_then(|d| mt::offer_from_recordings(&recordings(d).0))
-                {
+                if let Some(o) = dir.as_deref().and_then(|d| mt::offer_from(&recordings(d))) {
                     if Some(o.miles) > odometer {
                         println!(
-                            "A reading to confirm: {} from {}. If it is right: --miles {}",
-                            mt::miles_text(o.miles),
-                            o.from,
+                            "A reading to confirm: {}. If it is right: --miles {}",
+                            o.text(),
                             o.miles
                         );
                     }
@@ -258,9 +254,9 @@ pub fn cmd_service(a: &[String]) -> Result<(), String> {
                 .map(|n| n as usize)
                 .filter(|n| *n > 0)
                 .unwrap_or(drivelog::compare::MIN_ROWS);
-            let (recs, note) = recordings(&dir);
-            let mut ba = mt::before_after(&ev, &recs, drives, min_rows)?;
-            ba.note = note;
+            let recs = recordings(&dir);
+            let mut ba = mt::before_after(&ev, &recs.paths, drives, min_rows)?;
+            ba.note = recs.note;
             let warm = if icarus_core::moddata::units::us_customary() {
                 icarus_obd::units::both("°C", drivelog::compare::WARM_C, 0)
             } else {
@@ -272,7 +268,7 @@ pub fn cmd_service(a: &[String]) -> Result<(), String> {
         ("odometer", []) => {
             let mut offers: Vec<Offer> = vec![];
             if let Some(d) = &dir {
-                offers.extend(mt::offer_from_recordings(&recordings(d).0));
+                offers.extend(mt::offer_from(&recordings(d)));
             }
             if args.opt("adapter").is_some() {
                 let (o, notes) = read_odometer(&args, &vin)?;
@@ -288,7 +284,7 @@ pub fn cmd_service(a: &[String]) -> Result<(), String> {
                 );
             }
             for o in &offers {
-                println!("{} from {}", mt::miles_text(o.miles), o.from);
+                println!("{}", o.text());
             }
             if !offers.is_empty() {
                 println!(
@@ -309,18 +305,16 @@ fn confirm_offer(offer: Option<Offer>) -> Result<Option<u32>, String> {
     };
     if !std::io::stdin().is_terminal() {
         println!(
-            "Logged without the odometer. A reading to confirm: {} from {}; if it is right, add miles = {} to the \
-             service in its file, or log it with --miles next time.",
-            mt::miles_text(o.miles),
-            o.from,
+            "Logged without the odometer. A reading to confirm: {}; if it is right, add miles = {} to the service in \
+             its file, or log it with --miles next time.",
+            o.text(),
             o.miles
         );
         return Ok(None);
     }
     print!(
-        "Odometer: {} from {}. Use it? y, or type the miles, or Enter for none: ",
-        mt::miles_text(o.miles),
-        o.from
+        "Odometer: {}. Use it? y, or type the miles, or Enter for none: ",
+        o.text()
     );
     use std::io::Write;
     let _ = std::io::stdout().flush();
@@ -360,6 +354,7 @@ fn read_odometer(args: &super::Args, want: &str) -> Result<(Vec<Offer>, Vec<Stri
             Some((m, x)) => offers.push(Offer {
                 miles: m,
                 from: format!("the vehicle's odometer (standard value A6, {})", x.module),
+                doubt: None,
             }),
             None => notes.push("the vehicle does not give standard value A6 (odometer)".into()),
         },
@@ -379,28 +374,9 @@ fn read_odometer(args: &super::Args, want: &str) -> Result<(Vec<Offer>, Vec<Stri
                     let label = m.module.label();
                     match vehicledata::read(link.as_mut(), &all, Some(&label), false) {
                         Ok(vv) => {
-                            for mv in &vv.modules {
-                                for (name, value, _) in &mv.values {
-                                    if !name.to_lowercase().contains("odometer") {
-                                        continue;
-                                    }
-                                    let (num, unit) = value.rsplit_once(' ').unwrap_or((value, ""));
-                                    let miles = num
-                                        .replace(',', "")
-                                        .parse::<f64>()
-                                        .ok()
-                                        .and_then(|v| mt::miles_of(v, unit));
-                                    match miles {
-                                        Some(m) => offers.push(Offer {
-                                            miles: m,
-                                            from: format!("{name} ({label}, the set {})", vv.set),
-                                        }),
-                                        None => notes.push(format!(
-                                            "{name} ({label}) read {value:?}: its unit is not known, so it is not offered"
-                                        )),
-                                    }
-                                }
-                            }
+                            let (o, n) = mt::offers_in(&vv, "");
+                            offers.extend(o);
+                            notes.extend(n);
                         }
                         Err(e) => notes.push(format!("module data: {e}")),
                     }

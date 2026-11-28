@@ -1,8 +1,9 @@
 //! Recording a drive: one recorder for the window's Record drive and for `icarus record` (ICA-208), so both write the same
 //! files the same way.
 //!
-//! A recording is a CSV in ~/Documents/Icarus/logs (drivelog reads it): a `# adapter:` line, a `# module data:` line when
-//! module values are in it, the header, then one row per sweep. A sweep reads the fast standard values (`FAST`: what fuel
+//! A recording is a CSV in ~/Documents/Icarus/logs (drivelog reads it): a `# adapter:` line, a `# vehicle:` line naming the
+//! vehicle's garage folder when it has a name (never the VIN), a `# module data:` line when module values are in it, a
+//! `# began:` line (local time, in every part), the header, then one row per sweep. A sweep reads the fast standard values (`FAST`: what fuel
 //! trims, timing, air flow, the throttle and the mixture are read from) every time, two of the other values the vehicle
 //! offers in turn, and, no more often than `MODULE_STEP`, one request of the vehicle's module data (ICA-44: transmission
 //! fluid temperature, knock correction... from the set `icarus obd data` would choose), through module data's gates and
@@ -74,6 +75,24 @@ pub fn stamp() -> String {
         libc::localtime_r(&t, &mut tm);
         format!(
             "{:04}-{:02}-{:02}_{:02}{:02}{:02}",
+            tm.tm_year + 1900,
+            tm.tm_mon + 1,
+            tm.tm_mday,
+            tm.tm_hour,
+            tm.tm_min,
+            tm.tm_sec
+        )
+    }
+}
+
+/// Now, local time, for a part's `# began:` line: 2026-11-27 18:30:05.
+pub fn began_now() -> String {
+    unsafe {
+        let t = libc::time(std::ptr::null_mut());
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&t, &mut tm);
+        format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
             tm.tm_year + 1900,
             tm.tm_mon + 1,
             tm.tm_mday,
@@ -636,6 +655,9 @@ pub struct Plan {
     pub keep_awake: bool,
     /// The VIN read when it started: connecting again to another vehicle ends the recording.
     pub vin: Option<String>,
+    /// The name of the vehicle's garage folder (`garage::folder_label`: "2017 Toyota Tacoma 3.5L V6", never the VIN), for
+    /// the file's `# vehicle:` line, so the shared logs folder's drives can be told apart by vehicle.
+    pub vehicle: Option<String>,
 }
 
 /// What one sweep did.
@@ -737,6 +759,14 @@ impl Recorder {
             .map(|d| format!("{} [{}]", d.name, d.unit))
             .collect();
         let mut head = vec![drivelog::adapter_line(&plan.adapter)];
+        if let Some(v) = plan
+            .vehicle
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            head.push(format!("# vehicle: {}", v.replace(['\r', '\n'], " ")));
+        }
         let mut value_cols = Vec::new();
         if let Some(md) = &plan.modules {
             for i in 0..md.items.len() {
@@ -867,6 +897,8 @@ impl Recorder {
         };
         let mut out = std::io::BufWriter::new(file);
         let mut head = self.head.clone();
+        // when this part began, in every part: a later part's name carries the first part's stamp
+        head.push(format!("# began: {}", began_now()));
         if self.part_no > 1 {
             head.push(format!(
                 "# part {} of the drive that began in drive-{}.csv (the engine started again)",
@@ -1611,6 +1643,7 @@ mod tests {
             dir: dir.to_path_buf(),
             keep_awake: false,
             vin: j1979::vin(link).ok().flatten(),
+            vehicle: Some("Made-up Truck".into()),
         }
     }
 
@@ -1642,6 +1675,20 @@ mod tests {
             .and_then(|d| d.year);
         assert!(year.is_some());
         assert_eq!(module_data_of(&text), Some(("sim".into(), year)));
+        // which vehicle's garage folder it belongs to, and when it began, in its first lines
+        let hashes: Vec<String> = text
+            .lines()
+            .take_while(|l| l.starts_with('#'))
+            .map(str::to_string)
+            .collect();
+        assert_eq!(
+            crate::maintenance::vehicle_of(&hashes).as_deref(),
+            Some("Made-up Truck")
+        );
+        assert!(
+            crate::maintenance::began_of(&hashes).is_some(),
+            "{hashes:?}"
+        );
         let s = drivelog::series(&text).unwrap();
         assert_eq!(s.t.len(), rows, "every row held");
         let rpm = s.find(&["engine speed [rpm]"]).unwrap();
@@ -1895,6 +1942,12 @@ mod tests {
         assert!(files[1].to_string_lossy().ends_with("-part2.csv"));
         let second = std::fs::read_to_string(&files[1]).unwrap();
         assert!(second.contains("# part 2 of the drive"));
+        // each part says when it began: the second's start is its own, not the first part's stamp
+        let (a, b) = (
+            crate::maintenance::recording_start(&files[0]).unwrap(),
+            crate::maintenance::recording_start(&files[1]).unwrap(),
+        );
+        assert!(second.contains("# began: ") && b >= a, "{a:?} {b:?}");
         let s = drivelog::series(&second).unwrap();
         let rpm = s.find(&["engine speed [rpm]"]).unwrap();
         assert!(s.cols[rpm][0].is_some_and(|r| r >= RUNNING_RPM));

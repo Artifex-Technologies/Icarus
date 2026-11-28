@@ -259,7 +259,8 @@ impl When {
     }
 }
 
-/// One service done.
+/// One service done. Keys Icarus does not know (written by hand: `shop = "..."`, `cost = 45`) are kept in `extra` and
+/// written back as they were.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Service {
     pub kind: Kind,
@@ -270,9 +271,21 @@ pub struct Service {
     pub miles: Option<u32>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
+    #[serde(flatten)]
+    pub extra: toml::Table,
 }
 
 impl Service {
+    pub fn new(kind: Kind, date: &str, miles: Option<u32>, note: &str) -> Service {
+        Service {
+            kind,
+            date: date.to_string(),
+            miles,
+            note: note.to_string(),
+            extra: toml::Table::new(),
+        }
+    }
+
     pub fn when(&self) -> Option<When> {
         When::parse(&self.date).ok()
     }
@@ -292,28 +305,40 @@ impl Service {
             "{}{}: {}",
             self.date,
             self.miles
-                .map(|m| format!(" at {}", miles_text(m)))
+                .map(|m| format!(" at {}", miles_text(m.into())))
                 .unwrap_or_default(),
             self.what()
         )
     }
 }
 
-/// A kind's interval: whichever comes first of its miles and its months.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// A kind's interval: whichever comes first of its miles and its months. Keys Icarus does not know are kept.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Interval {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub miles: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub months: Option<u32>,
+    #[serde(flatten)]
+    pub extra: toml::Table,
 }
 
 impl Interval {
+    pub fn new(miles: Option<u32>, months: Option<u32>) -> Interval {
+        Interval {
+            miles,
+            months,
+            extra: toml::Table::new(),
+        }
+    }
+
     /// "every 5,000 mi or 6 months".
     pub fn text(&self) -> String {
         match (self.miles, self.months) {
-            (Some(mi), Some(mo)) => format!("every {} or {}", miles_text(mi), months_text(mo)),
-            (Some(mi), None) => format!("every {}", miles_text(mi)),
+            (Some(mi), Some(mo)) => {
+                format!("every {} or {}", miles_text(mi.into()), months_text(mo))
+            }
+            (Some(mi), None) => format!("every {}", miles_text(mi.into())),
             (None, Some(mo)) => format!("every {}", months_text(mo)),
             (None, None) => "no interval".into(),
         }
@@ -325,7 +350,7 @@ fn months_text(m: u32) -> String {
 }
 
 /// "84,213 mi".
-pub fn miles_text(m: u32) -> String {
+pub fn miles_text(m: u64) -> String {
     let s = m.to_string();
     let mut out = String::new();
     for (i, c) in s.chars().enumerate() {
@@ -337,27 +362,31 @@ pub fn miles_text(m: u32) -> String {
     format!("{out} mi")
 }
 
-/// A vehicle's log: the intervals (by kind's key) and the services, oldest first.
+/// A vehicle's log: the intervals (by kind's key) and the services, oldest first; top-level keys Icarus does not know are
+/// kept in `extra`.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Log {
     #[serde(default)]
     pub intervals: BTreeMap<String, Interval>,
     #[serde(default, rename = "service")]
     pub services: Vec<Service>,
+    #[serde(flatten)]
+    pub extra: toml::Table,
 }
 
 const HEAD: &str = "# Icarus: this vehicle's maintenance log, on this computer only. Edit it by hand as you like:\n\
 # [intervals.KIND] miles = N and/or months = M (whichever comes first); each [[service]] has kind, date\n\
 # (\"2026-11-29\" or \"2026-11-29 14:30\"), miles (the odometer then, optional) and note (optional; other needs one).\n\
-# Kinds: oil, spark-plugs, air-filter, fluids, brakes, tire-rotation, sensor, fuel, other.\n";
+# Kinds: oil, spark-plugs, air-filter, fluids, brakes, tire-rotation, sensor, fuel, other.\n\
+# Keys of your own (shop = \"...\", cost = 45) are kept when Icarus saves; comments other than these lines are not.\n";
 
 impl Log {
     /// The interval set for a kind.
     pub fn interval(&self, k: Kind) -> Option<Interval> {
         self.intervals
             .get(k.key())
-            .copied()
             .filter(|i| i.miles.is_some() || i.months.is_some())
+            .cloned()
     }
 
     /// The latest service of a kind (by its date; the odometer breaks a tie).
@@ -408,19 +437,62 @@ pub fn load(dir: &Path) -> Result<Log, String> {
     log.checked().map_err(|e| format!("{}: {e}", p.display()))
 }
 
+/// Writes `text` to `p` whole or not at all: into a new file of this process in the same folder, flushed to the disk,
+/// then renamed over `p`, so a crash or a full disk midway leaves the old file as it was. (The pattern of vehicles.rs's
+/// `write_replacing` on main; one shared helper once both are on one branch.)
+fn write_replacing(p: &Path, text: &str) -> Result<(), String> {
+    use std::io::Write;
+    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or(FILE);
+    let tmp = p.with_file_name(format!(".{name}.new-{}", std::process::id()));
+    let written = (|| {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(text.as_bytes())?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, p)
+    })();
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("{}: {e}", p.display()));
+    }
+    if let Some(d) = p.parent().and_then(|d| std::fs::File::open(d).ok()) {
+        let _ = d.sync_all();
+    }
+    Ok(())
+}
+
+/// Runs `f` holding the log's lock (an flock on `.maintenance.lock` in the vehicle's folder), so the window and the
+/// command line changing the log at once do not lose one another's change.
+fn locked<T>(dir: &Path, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    use std::os::fd::AsRawFd;
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let lp = dir.join(".maintenance.lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lp)
+        .map_err(|e| format!("{}: {e}", lp.display()))?;
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(format!(
+            "{}: {}",
+            lp.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    let r = f();
+    unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) };
+    r
+}
+
 /// Saves the log in a vehicle's folder, its services in date order.
 pub fn save(dir: &Path, log: &Log) -> Result<(), String> {
     let mut log = log.clone();
     log.services.sort_by_key(|s| s.when());
     log.intervals
-        .retain(|_, i| i.miles.is_some() || i.months.is_some());
+        .retain(|_, i| i.miles.is_some() || i.months.is_some() || !i.extra.is_empty());
     let body = toml::to_string(&log).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let p = path(dir);
-    let tmp = p.with_extension("tmp");
-    std::fs::write(&tmp, format!("{HEAD}\n{body}"))
-        .and_then(|_| std::fs::rename(&tmp, &p))
-        .map_err(|e| format!("{}: {e}", p.display()))
+    write_replacing(&path(dir), &format!("{HEAD}\n{body}"))
 }
 
 /// Adds a service to the log in `dir`: its date checked (and written the one way), "other" with a note. Says what looks
@@ -438,31 +510,33 @@ pub fn add(dir: &Path, s: Service) -> Result<(Service, Vec<String>), String> {
         note: s.note.split_whitespace().collect::<Vec<_>>().join(" "),
         ..s
     };
-    let mut log = load(dir)?;
-    let mut warnings = vec![];
-    if let Some(m) = s.miles {
-        if let Some(e) = log
-            .services
-            .iter()
-            .filter(|e| e.when().is_some_and(|w| w.day < when.day))
-            .filter(|e| e.miles.is_some_and(|em| em > m))
-            .max_by_key(|e| e.miles)
-        {
-            warnings.push(format!(
-                "{} is less than the {} logged on {} ({}): check the odometer",
-                miles_text(m),
-                miles_text(e.miles.unwrap_or(0)),
-                e.date,
-                e.kind.name()
-            ));
+    locked(dir, || {
+        let mut log = load(dir)?;
+        let mut warnings = vec![];
+        if let Some(m) = s.miles {
+            if let Some(e) = log
+                .services
+                .iter()
+                .filter(|e| e.when().is_some_and(|w| w.day < when.day))
+                .filter(|e| e.miles.is_some_and(|em| em > m))
+                .max_by_key(|e| e.miles)
+            {
+                warnings.push(format!(
+                    "{} is less than the {} logged on {} ({}): check the odometer",
+                    miles_text(m.into()),
+                    miles_text(e.miles.unwrap_or(0).into()),
+                    e.date,
+                    e.kind.name()
+                ));
+            }
         }
-    }
-    log.services.push(s.clone());
-    save(dir, &log)?;
-    Ok((s, warnings))
+        log.services.push(s.clone());
+        save(dir, &log)?;
+        Ok((s, warnings))
+    })
 }
 
-/// Sets (or, with neither, clears) a kind's interval in the log in `dir`.
+/// Sets (or, with neither, clears) a kind's interval in the log in `dir`; keys of the owner's own under it are kept.
 pub fn set_interval(
     dir: &Path,
     k: Kind,
@@ -472,14 +546,13 @@ pub fn set_interval(
     if miles == Some(0) || months == Some(0) {
         return Err("an interval of 0 is no interval: leave it out, or clear it with off".into());
     }
-    let mut log = load(dir)?;
-    if miles.is_none() && months.is_none() {
-        log.intervals.remove(k.key());
-    } else {
-        log.intervals
-            .insert(k.key().to_string(), Interval { miles, months });
-    }
-    save(dir, &log)
+    locked(dir, || {
+        let mut log = load(dir)?;
+        let i = log.intervals.entry(k.key().to_string()).or_default();
+        i.miles = miles;
+        i.months = months;
+        save(dir, &log)
+    })
 }
 
 /// Where a kind stands against its interval.
@@ -502,7 +575,7 @@ pub struct Due {
     pub interval: Interval,
     pub last: Option<Service>,
     /// Due at this odometer (when the interval has miles and the last service has its odometer).
-    pub at_miles: Option<u32>,
+    pub at_miles: Option<u64>,
     /// Due by this day (when the interval has months).
     pub by_day: Option<i64>,
     /// Miles left (negative: past), when the odometer now is known too.
@@ -532,14 +605,17 @@ pub fn due(log: &Log, today: i64, odometer: Option<u32>) -> Vec<Due> {
                     state: State::NeverLogged,
                 });
             };
-            let at_miles = interval.miles.zip(l.miles).map(|(i, m)| m + i);
+            let at_miles = interval
+                .miles
+                .zip(l.miles)
+                .map(|(i, m)| u64::from(m) + u64::from(i));
             let by_day = interval
                 .months
                 .zip(l.when())
                 .map(|(mo, w)| add_months(w.day, mo));
             let miles_left = at_miles
                 .zip(odometer)
-                .map(|(at, now)| at as i64 - now as i64);
+                .map(|(at, now)| at as i64 - i64::from(now));
             let days_left = by_day.map(|d| d - today);
             let state = if miles_left.is_some_and(|m| m <= 0) || days_left.is_some_and(|d| d <= 0) {
                 State::Overdue
@@ -593,12 +669,12 @@ impl Due {
         match (self.at_miles, self.miles_left) {
             (Some(at), Some(left)) if left <= 0 => parts.push(format!(
                 "overdue by {} (due at {})",
-                miles_text((-left) as u32),
+                miles_text(left.unsigned_abs()),
                 miles_text(at)
             )),
             (Some(at), Some(left)) => parts.push(format!(
                 "in {} (at {})",
-                miles_text(left as u32),
+                miles_text(left.unsigned_abs()),
                 miles_text(at)
             )),
             (Some(at), None) => parts.push(format!(
@@ -629,17 +705,30 @@ impl Due {
             parts.join(", "),
             l.date,
             l.miles
-                .map(|m| format!(" at {}", miles_text(m)))
+                .map(|m| format!(" at {}", miles_text(m.into())))
                 .unwrap_or_default()
         )
     }
 }
 
-/// An odometer reading offered for a service: the miles and where they came from, for the owner to confirm.
+/// An odometer reading offered for a service: the miles and where they came from, for the owner to confirm; with a doubt
+/// when the reading may be another vehicle's (a shared-folder recording that does not say which vehicle it is from).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Offer {
     pub miles: u32,
     pub from: String,
+    pub doubt: Option<String>,
+}
+
+impl Offer {
+    /// "84,213 mi from ..." and its doubt, in words.
+    pub fn text(&self) -> String {
+        let mut t = format!("{} from {}", miles_text(self.miles.into()), self.from);
+        if let Some(d) = &self.doubt {
+            t += &format!(" (but {d})");
+        }
+        t
+    }
 }
 
 /// A reading in `unit` as miles: km converted, mi as they are; any other unit (or none: an unchecked value) is not taken.
@@ -652,7 +741,7 @@ pub fn miles_of(v: f64, unit: &str) -> Option<u32> {
         "mi" | "miles" => v,
         _ => return None,
     };
-    Some(m.round() as u32)
+    (m < u32::MAX as f64).then(|| m.round() as u32)
 }
 
 /// A column's unit, from the `[unit]` its name ends with.
@@ -677,19 +766,103 @@ pub fn odometer_in(text: &str) -> Option<(u32, String)> {
         .max_by_key(|x| x.0)
 }
 
-/// The newest odometer reading among `recordings` (newest first; the first few that have one are looked at).
-pub fn offer_from_recordings(recordings: &[PathBuf]) -> Option<Offer> {
-    recordings.iter().take(20).find_map(|p| {
-        let text = std::fs::read_to_string(p).ok()?;
-        let (miles, col) = odometer_in(&text)?;
+/// How much of a recording's end is read for its last odometer reading (the odometer is read in turn, so it is in the last
+/// rows of any drive).
+const TAIL_BYTES: u64 = 256 * 1024;
+
+/// A recording's `#` lines and header, and its last `tail` bytes from the first whole line in them: what its start, its
+/// vehicle and its last readings are told from, without reading the rows between.
+fn head_and_tail(p: &Path, tail: u64) -> Option<(Vec<String>, Option<String>, String)> {
+    use std::io::{BufRead, Read, Seek};
+    let f = std::fs::File::open(p).ok()?;
+    let len = f.metadata().ok()?.len();
+    let mut r = std::io::BufReader::new(f);
+    let (mut hashes, mut header, mut taken) = (vec![], None, 0u64);
+    for _ in 0..64 {
+        let mut l = String::new();
+        let n = r.read_line(&mut l).ok()?;
+        if n == 0 {
+            break;
+        }
+        taken += n as u64;
+        let l = l.trim_end_matches(['\n', '\r']).to_string();
+        if l.starts_with('#') {
+            hashes.push(l);
+        } else {
+            header = Some(l);
+            break;
+        }
+    }
+    if tail == 0 {
+        return Some((hashes, header, String::new()));
+    }
+    let from = len.saturating_sub(tail).max(taken);
+    r.seek(std::io::SeekFrom::Start(from)).ok()?;
+    let mut buf = vec![];
+    r.read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    // from the first whole line, unless the tail starts right after the header
+    let text = if from == taken {
+        text
+    } else {
+        text.split_once('\n')
+            .map(|x| x.1.to_string())
+            .unwrap_or_default()
+    };
+    Some((hashes, header, text))
+}
+
+/// The odometer a recording file read last, from its header and its end only.
+pub fn odometer_in_file(p: &Path) -> Option<(u32, String)> {
+    let (_, header, tail) = head_and_tail(p, TAIL_BYTES)?;
+    odometer_in(&format!("{}\n{tail}", header?))
+}
+
+/// The newest odometer reading among `recs` (newest first; the first few that have one are looked at), with a doubt when
+/// it comes from a recording that does not say which vehicle it is from while others are in the garage.
+pub fn offer_from(recs: &Recordings) -> Option<Offer> {
+    recs.paths.iter().take(20).find_map(|p| {
+        let (miles, col) = odometer_in_file(p)?;
         Some(Offer {
             miles,
             from: format!(
                 "the newest recording that read it, {} ({col})",
                 file_name(p)
             ),
+            doubt: recs.unmarked.contains(p).then(|| {
+                "that recording does not say which vehicle it is from, and other vehicles are in the garage".into()
+            }),
         })
     })
+}
+
+/// The odometer readings in module data as read (`vehicledata::read`): each value named odometer, from its number and
+/// the definition's own unit (km or mi; a value of another unit, or none, is said and not offered). `read_where` is added
+/// to where each came from (", read on the Modules page").
+pub fn offers_in(
+    vv: &crate::vehicledata::VehicleValues,
+    read_where: &str,
+) -> (Vec<Offer>, Vec<String>) {
+    let (mut offers, mut notes) = (vec![], vec![]);
+    for mv in &vv.modules {
+        for (name, v, unit) in &mv.numbers {
+            if !name.to_lowercase().contains("odometer") {
+                continue;
+            }
+            match miles_of(*v, unit) {
+                Some(miles) => offers.push(Offer {
+                    miles,
+                    from: format!("{name} ({}, the set {}{read_where})", mv.label, vv.set),
+                    doubt: None,
+                }),
+                None => notes.push(format!(
+                    "{name} ({}) read {v} {unit}: its unit is not known as km or mi, so it is not offered",
+                    mv.label
+                )),
+            }
+        }
+    }
+    (offers, notes)
 }
 
 fn file_name(p: &Path) -> String {
@@ -698,36 +871,162 @@ fn file_name(p: &Path) -> String {
         .unwrap_or_else(|| p.display().to_string())
 }
 
-/// The recordings that may be this vehicle's: its folder's Logs, and the shared folder `shared` (~/Documents/Icarus/logs,
-/// where the recorder writes; its files do not say which vehicle they are from). Newest first. With a note when other
-/// vehicles have folders in `lib` too, since the shared folder's drives could be theirs.
-pub fn recordings_for(lib: &Path, dir: &Path, shared: &Path) -> (Vec<PathBuf>, Option<String>) {
-    let list = drivelog::list(&[dir.join("Logs"), shared.to_path_buf()]);
-    let others = crate::garage::vehicles_in(lib)
+/// A recording's `# vehicle:` line: the name of the garage folder of the vehicle it was recorded on.
+pub fn vehicle_of(hashes: &[String]) -> Option<String> {
+    hashes
         .iter()
-        .filter(|(_, _, d)| d != dir)
-        .count();
-    let note = (others > 0).then(|| {
-        format!(
-            "the recordings in {} do not say which vehicle they are from, and {others} other vehicle{} {} a folder in \
-             the garage: move another vehicle's drives into its own Logs folder to keep them out",
-            shared.display(),
-            if others == 1 { "" } else { "s" },
-            if others == 1 { "has" } else { "have" }
-        )
-    });
-    (list, note)
+        .find_map(|l| l.strip_prefix("# vehicle: "))
+        .map(|v| v.trim().to_string())
 }
 
-/// When a recording began: from its name (`drive-2026-11-27_183005.csv`, as the recorder names it), else when the file was
-/// last written.
-pub fn recording_start(p: &Path) -> Option<When> {
-    let name = file_name(p);
+/// A recording's `# began:` line: when its part began, local time.
+pub fn began_of(hashes: &[String]) -> Option<When> {
+    hashes
+        .iter()
+        .find_map(|l| l.strip_prefix("# began: "))
+        .and_then(|v| When::parse(v).ok())
+}
+
+/// What a drive is, for telling two copies of it apart: its file name without `-redecoded` (`icarus record redecode`
+/// writes `drive-STAMP-redecoded.csv` beside the original), and whether it is the decoded-again copy.
+fn drive_key(p: &Path) -> (String, bool) {
+    let stem = p
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    match stem.strip_suffix("-redecoded") {
+        Some(s) => (s.to_string(), true),
+        None => (stem, false),
+    }
+}
+
+/// One copy of each drive, in the order given: a file whose name was already listed (the same drive in two folders) is
+/// left out, and a drive decoded again (`-redecoded`) stands in for its original, where the original was.
+pub fn one_copy_each(paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = vec![];
+    let mut at: BTreeMap<String, (usize, bool)> = BTreeMap::new();
+    for p in paths {
+        let (key, redecoded) = drive_key(p);
+        match at.get(&key) {
+            Some(&(i, false)) if redecoded => {
+                out[i] = p.clone();
+                at.insert(key, (i, true));
+            }
+            Some(_) => {}
+            None => {
+                at.insert(key, (out.len(), redecoded));
+                out.push(p.clone());
+            }
+        }
+    }
+    out
+}
+
+/// The recordings that may be one vehicle's (`recordings_for`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Recordings {
+    /// Newest first, one copy of each drive.
+    pub paths: Vec<PathBuf>,
+    /// Those in the shared folder that name no vehicle (older recordings) while other vehicles are in the garage: counted,
+    /// but they could be another vehicle's.
+    pub unmarked: Vec<PathBuf>,
+    /// How many were left out as another vehicle's (their `# vehicle:` line names another vehicle's folder).
+    pub others: usize,
+    pub note: Option<String>,
+}
+
+/// The recordings that may be this vehicle's: its folder's Logs, and the shared folder `shared` (~/Documents/Icarus/logs,
+/// where the recorder writes). A recording whose `# vehicle:` line names another vehicle's folder in `lib` is left out; one
+/// with no such line (recorded before the line was written) is counted, and when other vehicles are in the garage the note
+/// says so. One copy of each drive (`one_copy_each`, this vehicle's own folder first), newest first.
+pub fn recordings_for(lib: &Path, dir: &Path, shared: &Path) -> Recordings {
+    let other_folders: Vec<String> = crate::garage::vehicles_in(lib)
+        .iter()
+        .filter(|(_, _, d)| d != dir)
+        .filter_map(|(_, _, d)| d.file_name().map(|f| f.to_string_lossy().into_owned()))
+        .collect();
+    let own = drivelog::list(&[dir.join("Logs")]);
+    let common = drivelog::list(&[shared.to_path_buf()]);
+    let mut recs = Recordings::default();
+    let mut kept = vec![];
+    for (p, in_shared) in own
+        .iter()
+        .map(|p| (p, false))
+        .chain(common.iter().map(|p| (p, true)))
+    {
+        let hashes = head_and_tail(p, 0).map(|h| h.0).unwrap_or_default();
+        match vehicle_of(&hashes) {
+            Some(v) if other_folders.contains(&v) => {
+                recs.others += 1;
+                continue;
+            }
+            Some(_) => {}
+            None if in_shared && !other_folders.is_empty() => recs.unmarked.push(p.clone()),
+            None => {}
+        }
+        kept.push(p.clone());
+    }
+    let mut paths = one_copy_each(&kept);
+    let modified = |p: &PathBuf| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    paths.sort_by_key(|p| std::cmp::Reverse(modified(p)));
+    recs.unmarked.retain(|p| paths.contains(p));
+    let mut notes = vec![];
+    if !recs.unmarked.is_empty() {
+        let n = other_folders.len();
+        notes.push(format!(
+            "{} of the recordings in {} do not say which vehicle they are from, and {n} other vehicle{} {} a folder in \
+             the garage: they are counted here (move another vehicle's drives into its own Logs folder to keep them out)",
+            recs.unmarked.len(),
+            shared.display(),
+            if n == 1 { "" } else { "s" },
+            if n == 1 { "has" } else { "have" }
+        ));
+    }
+    if recs.others > 0 {
+        notes.push(format!(
+            "{} recording{} of other vehicles left out",
+            recs.others,
+            if recs.others == 1 { "" } else { "s" }
+        ));
+    }
+    recs.paths = paths;
+    recs.note = (!notes.is_empty()).then(|| notes.join("; "));
+    recs
+}
+
+/// Local time `secs` seconds after 1970 as a `When`.
+fn local(secs: i64) -> When {
+    let t = secs as libc::time_t;
+    let tm = unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&t, &mut tm);
+        tm
+    };
+    When {
+        day: days_from_civil(
+            tm.tm_year as i64 + 1900,
+            (tm.tm_mon + 1) as u32,
+            tm.tm_mday as u32,
+        ),
+        minute: Some((tm.tm_hour * 60 + tm.tm_min) as u32),
+    }
+}
+
+/// The recorder's stamp in a file name (`drive-2026-11-27_183005.csv`), when the file is a drive's first part: a later
+/// part (`-part2`) carries the first part's stamp, not its own beginning.
+fn stamp_in_name(name: &str) -> Option<When> {
     let b = name.as_bytes();
-    let from_name = (0..b.len().saturating_sub(16)).find_map(|i| {
+    (0..b.len().saturating_sub(16)).find_map(|i| {
         let s = name.get(i..i + 17)?;
         let (d, t) = (s.get(..10)?, s.get(11..)?);
         if !matches!(b[i + 10], b'_' | b'T' | b' ') || !t.bytes().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        let after = name.get(i + 17..).unwrap_or("");
+        if after
+            .strip_prefix("-part")
+            .is_some_and(|n| n.starts_with(|c: char| c.is_ascii_digit()))
+        {
             return None;
         }
         let w = When::parse(d).ok()?;
@@ -736,23 +1035,64 @@ pub fn recording_start(p: &Path) -> Option<When> {
             day: w.day,
             minute: Some(h * 60 + m),
         })
-    });
-    from_name.or_else(|| {
-        let t = std::fs::metadata(p).ok()?.modified().ok()?;
-        let secs = t.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as libc::time_t;
-        let tm = unsafe {
-            let mut tm: libc::tm = std::mem::zeroed();
-            libc::localtime_r(&secs, &mut tm);
-            tm
-        };
-        Some(When {
-            day: days_from_civil(
-                tm.tm_year as i64 + 1900,
-                (tm.tm_mon + 1) as u32,
-                tm.tm_mday as u32,
-            ),
-            minute: Some((tm.tm_hour * 60 + tm.tm_min) as u32),
-        })
+    })
+}
+
+/// When a recording began, read from its first lines and its end only: its `# began:` line (the recorder writes one in
+/// every part), else the stamp in its name when it is a drive's first part, else when the file was last written less its
+/// last row's time (the file is written to its end, and `time_s` counts from its start).
+pub fn recording_start(p: &Path) -> Option<When> {
+    let (hashes, _, tail) = head_and_tail(p, 4096).unwrap_or_default();
+    if let Some(w) = began_of(&hashes) {
+        return Some(w);
+    }
+    if let Some(w) = stamp_in_name(&file_name(p)) {
+        return Some(w);
+    }
+    let modified = std::fs::metadata(p).ok()?.modified().ok()?;
+    let end = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs_f64();
+    let last_t = tail
+        .lines()
+        .rev()
+        .find_map(|l| l.split(',').next()?.trim().parse::<f64>().ok())
+        .filter(|t| t.is_finite() && *t >= 0.0)
+        .unwrap_or(0.0);
+    Some(local((end - last_t) as i64))
+}
+
+/// What the time of a service logged at `when` says about the drives recorded that day (`recordings`): with a time, how
+/// many began after it (they count as after) and before it; with none, that the day's drives are on neither side.
+pub fn day_note(when: When, recordings: &[PathBuf]) -> Option<String> {
+    let starts: Vec<When> = one_copy_each(recordings)
+        .iter()
+        .filter_map(|p| recording_start(p))
+        .filter(|s| s.day == when.day)
+        .collect();
+    if starts.is_empty() {
+        return None;
+    }
+    let date = date_text(when.day);
+    Some(match when.minute {
+        Some(_) => {
+            let after = starts.iter().filter(|s| **s >= when).count();
+            let before = starts.len() - after;
+            let t = when.text();
+            let time = t.rsplit(' ').next().unwrap_or("");
+            format!(
+                "{} on {date} began after {time}: {} as after it; {} began before it",
+                drives_text(after),
+                if after == 1 { "it counts" } else { "they count" },
+                before
+            )
+        }
+        None => format!(
+            "{} recorded on {date}: with no time given, a before and after leaves them out (give the time: \
+             --date \"{date} 14:30\")",
+            drives_text(starts.len())
+        ),
     })
 }
 
@@ -826,13 +1166,20 @@ pub fn event(log: &Log, what: &str) -> Result<Event, String> {
     })
 }
 
-/// One misfire value before and after: how much it rose over each side's drives (None: that side's drives do not carry
-/// it).
+/// One misfire count on one side: how much it rose over the drives that carry it, and how long those drives were.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rise {
+    pub count: f64,
+    pub seconds: f64,
+    pub drives: usize,
+}
+
+/// One misfire count before and after (None: that side's drives do not carry it).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Misfire {
     pub name: String,
-    pub before: Option<f64>,
-    pub after: Option<f64>,
+    pub before: Option<Rise>,
+    pub after: Option<Rise>,
 }
 
 /// The drives before a service against the drives after it (ICA-215).
@@ -858,8 +1205,10 @@ pub struct BeforeAfter {
 }
 
 /// Compares the last `drives` recordings before `event` with the first `drives` after it, by when each recording began
-/// (`recording_start`) against the event's date (and time, when it has one: without it, the drives on its day itself are
-/// left out, since they could be on either side). A side with no drive is an error saying so.
+/// (`recording_start`, from its first lines and its end only) against the event's date (and time, when it has one:
+/// without it, the drives on its day itself are left out, since they could be on either side). Only the drives chosen are
+/// read whole; one that does not read is left out, said, and the next one taken. One copy of each drive
+/// (`one_copy_each`). A side with no drive is an error saying so.
 pub fn before_after(
     event: &Event,
     recordings: &[PathBuf],
@@ -867,41 +1216,47 @@ pub fn before_after(
     min_rows: usize,
 ) -> Result<BeforeAfter, String> {
     let drives = drives.max(1);
-    let mut before: Vec<(When, PathBuf, String)> = vec![];
-    let mut after: Vec<(When, PathBuf, String)> = vec![];
+    let mut before: Vec<(When, PathBuf)> = vec![];
+    let mut after: Vec<(When, PathBuf)> = vec![];
     let (mut same_day, mut skipped) = (vec![], vec![]);
-    for p in recordings {
-        let Some(start) = recording_start(p) else {
-            skipped.push(format!("{}: when it began is not known", file_name(p)));
+    for p in one_copy_each(recordings) {
+        let Some(start) = recording_start(&p) else {
+            skipped.push(format!("{}: when it began is not known", file_name(&p)));
             continue;
         };
-        let text = match std::fs::read_to_string(p) {
-            Ok(t) => t,
-            Err(e) => {
-                skipped.push(format!("{}: {e}", file_name(p)));
-                continue;
-            }
-        };
-        if let Err(e) = drivelog::series(&text) {
-            skipped.push(format!("{}: {e}", file_name(p)));
-            continue;
-        }
         let side = match event.when.minute {
             Some(_) => Some(start < event.when),
             None if start.day == event.when.day => None,
             None => Some(start.day < event.when.day),
         };
         match side {
-            Some(true) => before.push((start, p.clone(), text)),
-            Some(false) => after.push((start, p.clone(), text)),
-            None => same_day.push(p.clone()),
+            Some(true) => before.push((start, p)),
+            Some(false) => after.push((start, p)),
+            None => same_day.push(p),
         }
     }
+    // nearest first on each side; only as many read as are kept
     before.sort_by_key(|a| std::cmp::Reverse(a.0));
-    before.truncate(drives);
-    before.reverse();
     after.sort_by_key(|a| a.0);
-    after.truncate(drives);
+    let mut take = |v: Vec<(When, PathBuf)>| -> Vec<(When, PathBuf, String)> {
+        let mut out = vec![];
+        for (w, p) in v {
+            if out.len() == drives {
+                break;
+            }
+            match std::fs::read_to_string(&p)
+                .map_err(|e| e.to_string())
+                .and_then(|t| drivelog::series(&t).map(|_| t))
+            {
+                Ok(t) => out.push((w, p, t)),
+                Err(e) => skipped.push(format!("{}: {e}", file_name(&p))),
+            }
+        }
+        out
+    };
+    let mut before = take(before);
+    before.reverse();
+    let after = take(after);
     same_day.sort();
     let when = event.when.text();
     let day_note = if same_day.is_empty() {
@@ -937,20 +1292,23 @@ pub fn before_after(
         ],
         min_rows,
     )?;
-    let mut counts: BTreeMap<String, (Option<f64>, Option<f64>)> = BTreeMap::new();
-    let mut seconds = (0.0, 0.0);
+    // each misfire count over the drives on its side that carry it, with their own length
+    let mut counts: BTreeMap<String, [Option<Rise>; 2]> = BTreeMap::new();
+    let mut seconds = [0.0, 0.0];
     for (i, v) in [&before, &after].into_iter().enumerate() {
         for (_, _, t) in v {
             let (m, secs) = compare::misfires(t)?;
-            if i == 0 {
-                seconds.0 += secs;
-            } else {
-                seconds.1 += secs;
-            }
+            seconds[i] += secs;
             for (name, rise) in m {
-                let e = counts.entry(name).or_default();
-                let slot = if i == 0 { &mut e.0 } else { &mut e.1 };
-                *slot = Some(slot.unwrap_or(0.0) + rise);
+                let slot = &mut counts.entry(name).or_default()[i];
+                let r = slot.get_or_insert(Rise {
+                    count: 0.0,
+                    seconds: 0.0,
+                    drives: 0,
+                });
+                r.count += rise;
+                r.seconds += secs;
+                r.drives += 1;
             }
         }
     }
@@ -964,13 +1322,13 @@ pub fn before_after(
         comparison,
         misfires: counts
             .into_iter()
-            .map(|(name, (before, after))| Misfire {
+            .map(|(name, [before, after])| Misfire {
                 name,
                 before,
                 after,
             })
             .collect(),
-        seconds,
+        seconds: (seconds[0], seconds[1]),
         note: None,
     })
 }
@@ -1050,15 +1408,21 @@ impl BeforeAfter {
             .collect()
     }
 
-    /// The misfire counts before and after, in lines; one line saying so when the recordings carry none.
+    /// The misfire counts before and after, in lines (each over the drives that carry it, and their length); one line
+    /// saying so when the recordings carry none.
     pub fn misfire_lines(&self) -> Vec<String> {
         if self.misfires.is_empty() {
-            return vec!["The recordings carry no misfire counts (a module-data value named misfire, recorded with the \
+            return vec!["The recordings carry no misfire counts (a module-data misfire count, recorded with the \
                          vehicle's module data, would be compared here)."
                 .into()];
         }
-        let side = |v: Option<f64>, s: f64| match v {
-            Some(x) => format!("{x:.0} over {}", hours(s)),
+        let side = |v: Option<Rise>| match v {
+            Some(r) => format!(
+                "{:.0} over {} ({})",
+                r.count,
+                hours(r.seconds),
+                drives_text(r.drives)
+            ),
             None => "not recorded".into(),
         };
         self.misfires
@@ -1067,8 +1431,8 @@ impl BeforeAfter {
                 format!(
                     "{}: before {}, after {}",
                     m.name,
-                    side(m.before, self.seconds.0),
-                    side(m.after, self.seconds.1)
+                    side(m.before),
+                    side(m.after)
                 )
             })
             .collect()
@@ -1089,7 +1453,7 @@ impl BeforeAfter {
         }
         o += "\n";
         o += &compare::words(&self.comparison, warm);
-        o += "\nMisfire counts (how much each misfire value rose over the drives):\n";
+        o += "\nMisfire counts (how much each misfire count rose over the drives that carry it):\n";
         for l in self.misfire_lines() {
             o += &format!("  {l}\n");
         }
@@ -1181,59 +1545,34 @@ mod tests {
         assert_eq!(load(&dir).unwrap(), Log::default(), "no file yet: empty");
         let (s, w) = add(
             &dir,
-            Service {
-                kind: Kind::Oil,
-                date: "2026-05-01".into(),
-                miles: Some(80_000),
-                note: "  0W-20   synthetic ".into(),
-            },
+            Service::new(
+                Kind::Oil,
+                "2026-05-01",
+                Some(80_000),
+                "  0W-20   synthetic ",
+            ),
         )
         .unwrap();
         assert!(w.is_empty());
         assert_eq!(s.note, "0W-20 synthetic");
         add(
             &dir,
-            Service {
-                kind: Kind::SparkPlugs,
-                date: "2026-11-29T14:30".into(),
-                miles: Some(84_213),
-                note: String::new(),
-            },
+            Service::new(Kind::SparkPlugs, "2026-11-29T14:30", Some(84_213), ""),
         )
         .unwrap();
         // logged out of order: the file keeps date order; a lower odometer than an earlier one is said
         let (_, w) = add(
             &dir,
-            Service {
-                kind: Kind::AirFilter,
-                date: "2026-06-01".into(),
-                miles: Some(8_100),
-                note: String::new(),
-            },
+            Service::new(Kind::AirFilter, "2026-06-01", Some(8_100), ""),
         )
         .unwrap();
         assert!(w[0].contains("less than the 80,000 mi"), "{w:?}");
-        assert!(add(
-            &dir,
-            Service {
-                kind: Kind::Other,
-                date: "2026-06-01".into(),
-                miles: None,
-                note: " ".into(),
-            },
-        )
-        .unwrap_err()
-        .contains("note"));
-        assert!(add(
-            &dir,
-            Service {
-                kind: Kind::Oil,
-                date: "June 1".into(),
-                miles: None,
-                note: String::new(),
-            },
-        )
-        .is_err());
+        assert!(
+            add(&dir, Service::new(Kind::Other, "2026-06-01", None, " "),)
+                .unwrap_err()
+                .contains("note")
+        );
+        assert!(add(&dir, Service::new(Kind::Oil, "June 1", None, ""),).is_err());
         set_interval(&dir, Kind::Oil, Some(5000), Some(6)).unwrap();
         set_interval(&dir, Kind::Brakes, Some(30_000), None).unwrap();
         set_interval(&dir, Kind::Brakes, None, None).unwrap();
@@ -1254,10 +1593,7 @@ mod tests {
         assert_eq!(dates, ["2026-05-01", "2026-06-01", "2026-11-29 14:30"]);
         assert_eq!(
             log.interval(Kind::Oil),
-            Some(Interval {
-                miles: Some(5000),
-                months: Some(6)
-            })
+            Some(Interval::new(Some(5000), Some(6)))
         );
         // edited by hand: read as written; a mistake in it is said, never taken as an empty log
         std::fs::write(
@@ -1286,12 +1622,7 @@ mod tests {
     #[test]
     fn due_by_miles_and_by_months() {
         let mut log = Log::default();
-        let svc = |k, date: &str, miles| Service {
-            kind: k,
-            date: date.into(),
-            miles,
-            note: String::new(),
-        };
+        let svc = |k, date: &str, miles| Service::new(k, date, miles, "");
         log.services = vec![
             svc(Kind::Oil, "2026-01-10", Some(70_000)),
             svc(Kind::Oil, "2026-05-01", Some(80_000)),
@@ -1299,7 +1630,7 @@ mod tests {
             svc(Kind::SparkPlugs, "2026-11-29", None),
             svc(Kind::Brakes, "2026-01-01", None),
         ];
-        let iv = |miles, months| Interval { miles, months };
+        let iv = Interval::new;
         log.intervals.insert("oil".into(), iv(Some(5000), Some(6)));
         log.intervals
             .insert("air-filter".into(), iv(None, Some(12)));
@@ -1441,7 +1772,10 @@ mod tests {
                 "drive-2026-12-01_071500.csv",
                 drive(4, 25.0, 1.0, Some(0.0)),
             ),
-            ("notes.csv", "not a recording\n".to_string()),
+            (
+                "drive-2026-11-28_120000.csv",
+                "not a recording\n".to_string(),
+            ),
         ];
         for (n, t) in &files {
             std::fs::write(logs.join(n), t).unwrap();
@@ -1449,12 +1783,7 @@ mod tests {
         let dir = home.clone();
         add(
             &dir,
-            Service {
-                kind: Kind::SparkPlugs,
-                date: "2026-11-29".into(),
-                miles: Some(84_213),
-                note: "NGK".into(),
-            },
+            Service::new(Kind::SparkPlugs, "2026-11-29", Some(84_213), "NGK"),
         )
         .unwrap();
         let log = load(&dir).unwrap();
@@ -1480,7 +1809,9 @@ mod tests {
             "no time given: on neither side"
         );
         assert!(
-            ba.skipped.iter().any(|s| s.starts_with("notes.csv")),
+            ba.skipped
+                .iter()
+                .any(|s| s.starts_with("drive-2026-11-28_120000.csv")),
             "{:?}",
             ba.skipped
         );
@@ -1508,8 +1839,16 @@ mod tests {
             ba.misfires,
             [Misfire {
                 name: "Cylinder #3 misfire count (7E0 21 01) []".into(),
-                before: Some(4.0),
-                after: Some(0.0)
+                before: Some(Rise {
+                    count: 4.0,
+                    seconds: 5.5,
+                    drives: 1
+                }),
+                after: Some(Rise {
+                    count: 0.0,
+                    seconds: 5.5,
+                    drives: 1
+                })
             }]
         );
         let w = ba.words("176 °F (80 °C)");
@@ -1542,7 +1881,14 @@ mod tests {
             Some(20.5),
             "both drives before, pooled"
         );
-        assert_eq!(ba.misfires[0].before, Some(10.0));
+        assert_eq!(
+            ba.misfires[0].before,
+            Some(Rise {
+                count: 10.0,
+                seconds: 11.0,
+                drives: 2
+            })
+        );
         assert!(
             ba.sides()[1].contains("only 2 of the 3 asked for"),
             "{:?}",
@@ -1586,9 +1932,14 @@ mod tests {
     }
 
     #[test]
-    fn a_recording_begins_when_its_name_says() {
-        let w = recording_start(Path::new("/x/drive-2026-11-27_183005-part2.csv")).unwrap();
-        assert_eq!(w.text(), "2026-11-27 18:30");
+    fn a_recording_begins_when_its_began_line_says() {
+        // the name's stamp only for a drive's first part (and its copies); a later part's is the first part's
+        assert_eq!(
+            recording_start(Path::new("/x/drive-2026-11-27_183005.csv"))
+                .unwrap()
+                .text(),
+            "2026-11-27 18:30"
+        );
         assert_eq!(
             recording_start(Path::new("/x/drive-2026-11-27_183005-2.csv"))
                 .unwrap()
@@ -1596,9 +1947,306 @@ mod tests {
             "2026-11-27 18:30"
         );
         assert_eq!(
-            recording_start(Path::new("/nowhere/at-all.csv")),
-            None,
-            "no name, no file"
+            recording_start(Path::new("/x/drive-2026-11-27_183005-redecoded.csv"))
+                .unwrap()
+                .text(),
+            "2026-11-27 18:30"
         );
+        assert_eq!(
+            recording_start(Path::new("/x/drive-2026-11-27_183005-part2.csv")),
+            None,
+            "a later part with no began line and no file: not known"
+        );
+        assert_eq!(recording_start(Path::new("/nowhere/at-all.csv")), None);
+        let dir = scratch("began");
+        // the began line first, whatever the name says
+        let part2 = dir.join("drive-2026-11-27_183005-part2.csv");
+        std::fs::write(
+            &part2,
+            format!(
+                "# began: 2026-11-27 21:05:41\n{}",
+                drive(12, 20.0, 1.0, None)
+            ),
+        )
+        .unwrap();
+        assert_eq!(recording_start(&part2).unwrap().text(), "2026-11-27 21:05");
+        // no line, no stamp: when it was last written less its last row's time (5.5 s here, 600 s below)
+        let plain = dir.join("live.csv");
+        let mut text = drive(12, 20.0, 1.0, None);
+        text.push_str("600.0,2200,70,20.0,20,1.0,-4.0,90,1.00\n");
+        std::fs::write(&plain, text).unwrap();
+        let end = 1_795_000_000i64;
+        std::fs::File::options()
+            .write(true)
+            .open(&plain)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(end as u64))
+            .unwrap();
+        assert_eq!(recording_start(&plain), Some(local(end - 600)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_later_part_recorded_after_the_service_is_after_it() {
+        let dir = scratch("part2");
+        let logs = dir.join("Logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        // the drive began in the morning, before the plugs; it stopped for the plugs and went on at 15:10 (part 2)
+        std::fs::write(
+            logs.join("drive-2026-11-29_080000.csv"),
+            format!(
+                "# began: 2026-11-29 08:00:00\n{}",
+                drive(12, 20.0, 3.0, None)
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            logs.join("drive-2026-11-29_080000-part2.csv"),
+            format!("# began: 2026-11-29 15:10:00\n# part 2 of the drive that began in drive-2026-11-29_080000.csv\n{}", drive(12, 25.0, 1.0, None)),
+        )
+        .unwrap();
+        let ev = Event {
+            name: "spark plugs".into(),
+            when: When::parse("2026-11-29 14:30").unwrap(),
+            services: vec![],
+        };
+        let recs = drivelog::list(std::slice::from_ref(&logs));
+        let ba = before_after(&ev, &recs, 3, compare::MIN_ROWS).unwrap();
+        let names = |v: &[PathBuf]| v.iter().map(|p| file_name(p)).collect::<Vec<_>>();
+        assert_eq!(names(&ba.before), ["drive-2026-11-29_080000.csv"]);
+        assert_eq!(names(&ba.after), ["drive-2026-11-29_080000-part2.csv"]);
+        // logging it at 14:30 says which of that day's drives count after it
+        let n = day_note(ev.when, &recs).unwrap();
+        assert!(
+            n.starts_with(
+                "1 drive on 2026-11-29 began after 14:30: it counts as after it; 1 began before it"
+            ),
+            "{n}"
+        );
+        let n = day_note(When::parse("2026-11-29").unwrap(), &recs).unwrap();
+        assert!(
+            n.contains("2 drives recorded on 2026-11-29: with no time given"),
+            "{n}"
+        );
+        assert_eq!(day_note(When::parse("2026-11-30").unwrap(), &recs), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pooled_drives_count_each_row_once() {
+        let dir = scratch("pooled");
+        let logs = dir.join("Logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        // before: 12 rows at 20° and 24 rows at 26°: the rows' mean is 24.0, not the drives' mean of 23.0
+        for (n, t) in [
+            (
+                "drive-2026-11-20_080000.csv",
+                drive(12, 20.0, 1.0, Some(2.0)),
+            ),
+            ("drive-2026-11-21_080000.csv", drive(24, 26.0, 1.0, None)),
+            (
+                "drive-2026-11-30_080000.csv",
+                drive(12, 25.0, 1.0, Some(1.0)),
+            ),
+        ] {
+            std::fs::write(logs.join(n), t).unwrap();
+        }
+        let ev = Event {
+            name: "spark plugs".into(),
+            when: When::parse("2026-11-29").unwrap(),
+            services: vec![],
+        };
+        let ba = before_after(
+            &ev,
+            &drivelog::list(std::slice::from_ref(&logs)),
+            3,
+            compare::MIN_ROWS,
+        )
+        .unwrap();
+        let c = &ba.comparison;
+        let g = c
+            .timing
+            .iter()
+            .find(|g| g.label == "1800-2600 rpm, 60-80 %")
+            .unwrap();
+        assert_eq!(c.value(g, 0, 0), Some(24.0), "row-weighted");
+        assert_eq!(c.recordings[0].kept, 36);
+        // the misfire count over the one drive before that carries it (5.5 s), not over both (17 s)
+        let m = &ba.misfires[0];
+        assert_eq!(
+            m.before,
+            Some(Rise {
+                count: 2.0,
+                seconds: 5.5,
+                drives: 1
+            })
+        );
+        assert_eq!(ba.seconds.0, 17.0, "both drives before, 5.5 + 11.5 s");
+        assert!(
+            ba.misfire_lines()[0].contains("before 2 over 0 min (1 drive)"),
+            "{:?}",
+            ba.misfire_lines()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn one_copy_of_each_drive() {
+        let p = |s: &str| PathBuf::from(s);
+        let got = one_copy_each(&[
+            p("/own/drive-A.csv"),
+            p("/shared/drive-A.csv"),
+            p("/shared/drive-A-redecoded.csv"),
+            p("/shared/drive-B-part2.csv"),
+            p("/own/drive-B-part2-redecoded.csv"),
+            p("/shared/drive-B-part2-redecoded.csv"),
+            p("/shared/drive-C.csv"),
+        ]);
+        assert_eq!(
+            got,
+            [
+                p("/shared/drive-A-redecoded.csv"),
+                p("/own/drive-B-part2-redecoded.csv"),
+                p("/shared/drive-C.csv"),
+            ]
+        );
+    }
+
+    #[test]
+    fn another_vehicles_drives_are_left_out_by_their_vehicle_line() {
+        let home = scratch("vehicles");
+        let lib = home.join("Vehicles");
+        let shared = home.join("logs");
+        std::fs::create_dir_all(&shared).unwrap();
+        let mine = crate::garage::ensure_in(&lib, "1M8GDM9AXKP042788", Some("Old Blue")).unwrap();
+        crate::garage::ensure_in(&lib, "1M8GDM9AXKP042789", Some("Grandma's Camry")).unwrap();
+        let odo = |km: f64| {
+            format!(
+                "time_s,\"Engine speed [rpm]\",\"Odometer [km]\"\n0,700,{km:.1}\n1,700,{km:.1}\n"
+            )
+        };
+        std::fs::write(
+            shared.join("drive-2026-11-20_080000.csv"),
+            format!("# vehicle: Grandma's Camry\n{}", odo(50_000.0)),
+        )
+        .unwrap();
+        std::fs::write(
+            shared.join("drive-2026-11-21_080000.csv"),
+            format!("# vehicle: Old Blue\n{}", odo(135_000.0)),
+        )
+        .unwrap();
+        std::fs::write(shared.join("drive-2026-11-22_080000.csv"), odo(135_100.0)).unwrap();
+        // the same drive copied into my own Logs folder too: one copy
+        std::fs::copy(
+            shared.join("drive-2026-11-21_080000.csv"),
+            mine.join("Logs/drive-2026-11-21_080000.csv"),
+        )
+        .unwrap();
+        let recs = recordings_for(&lib, &mine, &shared);
+        let names: Vec<String> = recs.paths.iter().map(|p| file_name(p)).collect();
+        assert_eq!(names.len(), 2, "{names:?}");
+        assert!(!names.contains(&"drive-2026-11-20_080000.csv".to_string()));
+        assert_eq!(recs.others, 1);
+        assert_eq!(recs.unmarked.len(), 1);
+        assert!(recs
+            .paths
+            .contains(&mine.join("Logs/drive-2026-11-21_080000.csv")));
+        let note = recs.note.clone().unwrap();
+        assert!(
+            note.contains("1 of the recordings")
+                && note.contains("1 recording of other vehicles left out"),
+            "{note}"
+        );
+        // the newest reading is from the unmarked drive: offered with its doubt
+        std::fs::File::options()
+            .write(true)
+            .open(shared.join("drive-2026-11-22_080000.csv"))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(60))
+            .unwrap();
+        let recs = recordings_for(&lib, &mine, &shared);
+        let o = offer_from(&recs).unwrap();
+        assert_eq!(o.miles, miles_of(135_100.0, "km").unwrap());
+        assert!(
+            o.text().contains("does not say which vehicle"),
+            "{}",
+            o.text()
+        );
+        // with no other vehicle in the garage, nothing is in doubt
+        let alone = home.join("Alone");
+        let only = crate::garage::ensure_in(&alone, "1M8GDM9AXKP042788", Some("Old Blue")).unwrap();
+        let recs = recordings_for(&alone, &only, &shared);
+        assert_eq!(
+            (recs.paths.len(), recs.unmarked.len(), recs.note.clone()),
+            (3, 0, None)
+        );
+        assert_eq!(offer_from(&recs).unwrap().doubt, None);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn the_owners_own_keys_are_kept() {
+        let dir = scratch("keys");
+        std::fs::write(
+            path(&dir),
+            "# my own comment\nowner = \"me\"\n\n[intervals.oil]\nmiles = 5000\nreminder = true\n\n\
+             [[service]]\nkind = \"oil\"\ndate = \"2026-05-01\"\nmiles = 80000\nshop = \"Joe's\"\ncost = 45\n",
+        )
+        .unwrap();
+        add(&dir, Service::new(Kind::Brakes, "2026-06-01", None, "pads")).unwrap();
+        set_interval(&dir, Kind::Oil, Some(6000), None).unwrap();
+        let text = std::fs::read_to_string(path(&dir)).unwrap();
+        for k in [
+            "owner = \"me\"",
+            "reminder = true",
+            "shop = \"Joe's\"",
+            "cost = 45",
+            "miles = 6000",
+            "note = \"pads\"",
+        ] {
+            assert!(text.contains(k), "{k} in {text}");
+        }
+        assert!(
+            !text.contains("my own comment"),
+            "comments are not kept, as the file says"
+        );
+        assert!(text.contains("comments other than these lines are not"));
+        let log = load(&dir).unwrap();
+        assert_eq!(
+            log.services[0]
+                .extra
+                .get("cost")
+                .and_then(|v| v.as_integer()),
+            Some(45)
+        );
+        // no temp file left behind, only the lock
+        let left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            left.iter().all(|n| n == FILE || n == ".maintenance.lock"),
+            "{left:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_due_odometer_far_past_u32_does_not_overflow() {
+        let mut log = Log {
+            services: vec![Service::new(
+                Kind::Oil,
+                "2026-05-01",
+                Some(u32::MAX - 10),
+                "",
+            )],
+            ..Log::default()
+        };
+        log.intervals
+            .insert("oil".into(), Interval::new(Some(5000), None));
+        let d = due(&log, day("2026-06-01"), Some(u32::MAX));
+        assert_eq!(d[0].at_miles, Some(u32::MAX as u64 + 4990));
+        assert_eq!(d[0].miles_left, Some(4990));
     }
 }
