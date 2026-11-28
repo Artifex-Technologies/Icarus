@@ -79,11 +79,10 @@ fn tool_list() -> Value {
 
 /// The adapter the window last connected to (icarus-app writes ~/.config/icarus/adapter).
 fn remembered_adapter() -> Option<String> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
+    // through icarus-obd's `env`, so tests never read the real home's (ICA-225)
+    let base = icarus_obd::env("XDG_CONFIG_HOME")
         .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config"))
-        })?;
+        .or_else(|| icarus_obd::env("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))?;
     let t = std::fs::read_to_string(base.join("icarus/adapter")).ok()?;
     let a = t.lines().next()?.trim().to_string();
     (!a.is_empty()).then_some(a)

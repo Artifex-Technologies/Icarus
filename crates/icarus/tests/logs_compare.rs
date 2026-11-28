@@ -38,6 +38,13 @@ fn two_recordings_by_name_and_a_minimum_row_count() {
         let o = Command::new(env!("CARGO_BIN_EXE_icarus"))
             .args(args)
             .env("HOME", &home)
+            // the binary is built without icarus-obd's test-home guard (ICA-225): a config or state folder from the
+            // shell that runs the tests must not reach the real one
+            .env("XDG_CONFIG_HOME", home.join("config"))
+            .env("XDG_STATE_HOME", home.join("state"))
+            .env("XDG_DATA_HOME", home.join("data"))
+            .env_remove("ICARUS_ADAPTER")
+            .env_remove("ICARUS_READ_ONLY")
             .env("ICARUS_UNITS", "us")
             .stdin(std::process::Stdio::null())
             .output()

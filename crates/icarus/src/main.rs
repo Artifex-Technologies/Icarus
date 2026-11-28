@@ -3276,6 +3276,27 @@ mod tests {
 
     use super::*;
 
+    /// ICA-225: this crate's tests build icarus-obd with its `test-home` feature (the dev-dependency), so the action log,
+    /// the config folder and the vehicle library are only ever in a test's own home in the temporary folder, whatever
+    /// HOME the tests were run with. Without it these tests wrote bench-make lines into the real home's action log.
+    #[test]
+    fn the_tests_keep_out_of_the_real_home() {
+        assert!(
+            icarus_obd::test_home_active(),
+            "icarus-obd was built for these tests without its test-home feature: they would write the real home"
+        );
+        let tmp = std::env::temp_dir();
+        let log = icarus_obd::audit::path().unwrap();
+        assert!(log.starts_with(&tmp), "{log:?}");
+        assert!(icarus_obd::vehicles::user_dir().unwrap().starts_with(&tmp));
+        assert!(icarus_obd::garage::library().starts_with(&tmp));
+        assert!(icarus_obd::lock::path().unwrap().starts_with(&tmp));
+        let line = format!("ICA-225 guard {}", std::process::id());
+        icarus_obd::audit::log(&line);
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert!(text.contains(&line), "{text}");
+    }
+
     /// ICA-206: `obd setting` and `obd service` judge the link connect() opened, not the adapter as written. `sim` as
     /// written is wired (`Target::wired`), but a link opened on a port that is not a cable is refused; a link opened on a
     /// cable is taken whatever its path, as written, would say now (here a Bluetooth port's name).

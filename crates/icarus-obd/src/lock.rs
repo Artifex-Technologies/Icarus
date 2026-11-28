@@ -124,10 +124,14 @@ pub(crate) fn switch_for_test(vins: &[&str]) {
     FOR_TEST.with(|t| *t.borrow_mut() = Some(vins.iter().map(|v| v.to_string()).collect()));
 }
 
-/// The VINs switched to read-only.
+/// The VINs switched to read-only. In the window's and the command's tests (the `test-home` feature, ICA-225), only a
+/// test's own home's list (`crate::env` gives no other), else none switched; never the real config folder's file.
 #[cfg(not(test))]
 pub fn read_only() -> BTreeSet<String> {
-    path().map(|p| list_in(&p)).unwrap_or_default()
+    let p = path();
+    #[cfg(feature = "test-home")]
+    let p = p.filter(|p| crate::in_test_area(p));
+    p.map(|p| list_in(&p)).unwrap_or_default()
 }
 
 /// In tests: the test's own list (`switch_for_test`), else none switched; never the config folder's file.
@@ -160,7 +164,11 @@ pub fn set_in(file: &Path, vin: &str, on: bool) -> Result<(), String> {
 }
 
 pub fn set(vin: &str, on: bool) -> Result<(), String> {
-    set_in(&path().ok_or("no config folder")?, vin, on)
+    let p = path();
+    // the window's and the command's tests (ICA-225): only into a test's own home
+    #[cfg(feature = "test-home")]
+    let p = p.filter(|p| crate::in_test_area(p));
+    set_in(&p.ok_or("no config folder")?, vin, on)
 }
 
 /// Whether a request would change the vehicle: anything but a read (OBD-II services 01 02 03 05 06 07 09 0A; KWP2000

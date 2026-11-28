@@ -18,3 +18,10 @@ toml = "0.9"
 serde_json = "1"
 # OBDex's trouble codes are kept compressed (pure Rust; MIT/Zlib/Apache-2.0)
 miniz_oxide = "0.8"
+
+[features]
+# ICA-225: the window's and the command's tests keep out of the real home, as this crate's own tests do (lib.rs `env`):
+# HOME and the XDG folders only ever a test's own folder in the temporary folder, the action log and the Read-Only list
+# only there, and no sleep lock asked of logind. Turned on only by icarus-app's and icarus's [dev-dependencies], so only
+# their test builds have it (resolver 2); never turn it on for a build that is run or packaged.
+test-home = []

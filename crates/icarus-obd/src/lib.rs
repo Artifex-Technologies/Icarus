@@ -59,19 +59,66 @@ pub mod vehicles;
 pub mod vin;
 
 /// The environment variables Icarus's files are found by (HOME, XDG_CONFIG_HOME, XDG_STATE_HOME...): read from the
-/// environment, except in this crate's tests, where HOME is a folder of the test run's own and every XDG variable is
-/// unset, so no test reads or writes the real home or config folder.
-pub(crate) fn env(name: &str) -> Option<std::ffi::OsString> {
+/// environment, except in tests, so no test reads or writes the real home or config folder (ICA-225):
+///
+/// - in this crate's own tests, HOME is a folder of the test run's own and every XDG variable is unset;
+/// - with the `test-home` feature (which icarus-app and the icarus command turn on for their tests only, through their
+///   dev-dependencies: a release build never has it), a variable is taken only when it is a folder in the system's
+///   temporary folder (a test's own home, as icarus-app's `TestHome` sets); otherwise HOME is this test run's own folder
+///   and an XDG variable is unset.
+///
+/// The window and the command find their own files (window.toml, the remembered adapter) through this too, so their tests
+/// get the same guard.
+pub fn env(name: &str) -> Option<std::ffi::OsString> {
     #[cfg(test)]
     return (name == "HOME").then(|| test_home().into_os_string());
-    #[cfg(not(test))]
+    #[cfg(all(feature = "test-home", not(test)))]
+    return std::env::var_os(name)
+        .filter(|v| in_test_area(std::path::Path::new(v)))
+        .or_else(|| (name == "HOME").then(|| test_home().into_os_string()));
+    #[cfg(not(any(test, feature = "test-home")))]
     std::env::var_os(name)
 }
 
+/// Whether this build keeps its tests out of the real home (this crate's own tests, or the `test-home` feature). The
+/// window's and the command's tests assert it, so a test build that lost the feature fails instead of writing the home.
+pub fn test_home_active() -> bool {
+    cfg!(any(test, feature = "test-home"))
+}
+
+/// Whether `p` is a folder a test may use as a home: an absolute path inside the system's temporary folder, with no `..`
+/// that could lead out of it.
+#[cfg(any(test, feature = "test-home"))]
+pub(crate) fn in_test_area(p: &std::path::Path) -> bool {
+    p.is_absolute()
+        && !p
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        && p.starts_with(std::env::temp_dir())
+}
+
 /// This test run's own home folder (made when first asked), in the system's temporary folder.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-home"))]
 pub(crate) fn test_home() -> std::path::PathBuf {
     let d = std::env::temp_dir().join(format!("icarus-obd-test-home-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&d);
     d
+}
+
+#[cfg(test)]
+mod tests {
+    /// ICA-225: what a test may take for a home: a folder in the temporary folder, never one outside it or one that leads
+    /// out of it with `..`.
+    #[test]
+    fn a_test_home_is_in_the_temporary_folder() {
+        let tmp = std::env::temp_dir();
+        assert!(super::in_test_area(&tmp.join("icarus-app-x/state")));
+        assert!(super::in_test_area(&super::test_home()));
+        assert!(!super::in_test_area(std::path::Path::new(
+            "/home/someone/.local/state"
+        )));
+        assert!(!super::in_test_area(&tmp.join("../home/someone")));
+        assert!(!super::in_test_area(std::path::Path::new("relative/state")));
+        assert!(super::test_home_active());
+    }
 }

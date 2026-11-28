@@ -2227,4 +2227,66 @@ pub(crate) mod tests {
         worker.join().unwrap();
         drop(home);
     }
+
+    /// ICA-225: this crate's tests build icarus-obd with its `test-home` feature (the dev-dependency), so its files are
+    /// found only in a test's own home. Without it a test of the window wrote the real home's action log.
+    #[test]
+    fn the_tests_keep_out_of_the_real_home() {
+        assert!(
+            icarus_obd::test_home_active(),
+            "icarus-obd was built for these tests without its test-home feature: they would write the real home"
+        );
+        let _home = crate::TestHome::new("worker-ica225-guard");
+        // HOME outside the temporary folder (as the real one is) is never taken; the run's own test home is
+        std::env::set_var("HOME", "/nonexistent-real-home");
+        std::env::remove_var("XDG_STATE_HOME");
+        let log = icarus_obd::audit::path().unwrap();
+        assert!(log.starts_with(std::env::temp_dir()), "{log:?}");
+        assert!(!log.starts_with("/nonexistent-real-home"), "{log:?}");
+    }
+
+    /// ICA-225: an actuator test the window's worker ends (the window closed) writes its line to the action log in the
+    /// test's own home, never the real one.
+    #[test]
+    fn an_actuator_test_ended_by_the_worker_logs_into_the_test_home() {
+        let home = crate::TestHome::new("worker-ica225");
+        let log = icarus_obd::audit::path().unwrap();
+        assert!(log.starts_with(&home.dir), "{log:?}");
+        let (ctx, crx) = mpsc::channel();
+        let (etx, erx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            run_with(
+                crx,
+                etx,
+                icarus_obd::fence::Fence::default,
+                || {},
+                &two_vehicles,
+                &icarus_obd::lock::session_allows_changes,
+            )
+        });
+        ctx.send(Cmd::Connect("sim".into())).unwrap();
+        until(&erx, "the connection", &|e| {
+            matches!(e, Event::Connected(_))
+        });
+        let def = icarus_obd::sim::tests().remove(0);
+        assert_eq!(def.name, "Cooling fan: run");
+        ctx.send(Cmd::TestStart { def, value: 0.0 }).unwrap();
+        let seen = until(&erx, "the test's start", &|e| {
+            matches!(e, Event::TestStopped { .. } | Event::TestStarted(_))
+        });
+        if let Some(Event::TestStopped { why, .. }) = seen.last() {
+            panic!("the test did not start: {why}");
+        }
+        // the window closes: the worker hands control back and ends
+        drop(ctx);
+        worker.join().unwrap();
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            text.lines()
+                .any(|l| l.contains("test stop 7E0 \"Cooling fan: run\"")
+                    && l.contains("the window closed")),
+            "{text}"
+        );
+        drop(home);
+    }
 }

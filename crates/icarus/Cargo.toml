@@ -10,3 +10,8 @@ repository.workspace = true
 icarus-core = { path = "../icarus-core" }
 icarus-obd = { path = "../icarus-obd" }
 serde_json = "1"
+
+[dev-dependencies]
+# ICA-225: this crate's tests keep out of the real home (HOME/XDG only a test's own temp folder; icarus-obd's lib.rs
+# `env`). Dev-dependencies only: a release build never has the feature.
+icarus-obd = { path = "../icarus-obd", features = ["test-home"] }

@@ -22,7 +22,7 @@ impl Inhibit {
     /// Holds the lock until dropped. Fails when logind refuses or systemd-inhibit is missing (a caller that writes a module's
     /// memory must not go on then; a short test may).
     pub fn take(why: &str) -> Result<Inhibit, String> {
-        if cfg!(test) {
+        if cfg!(any(test, feature = "test-home")) {
             return Ok(Inhibit(None));
         }
         // held by cat on our pipe (`tied`): it ends with this program, however it ends
@@ -45,7 +45,7 @@ impl Inhibit {
     /// (`tied`), so however the program ends (the window closed, a crash, SIGKILL) the pipe closes, cat ends and the
     /// inhibitor with it. Never `sleep infinity`, which would outlive a program that died and keep the laptop awake.
     pub fn recording(why: &str) -> Result<Inhibit, String> {
-        if cfg!(test) {
+        if cfg!(any(test, feature = "test-home")) {
             return Ok(Inhibit(None));
         }
         let mut child = tied("systemd-inhibit", &recording_args(why))

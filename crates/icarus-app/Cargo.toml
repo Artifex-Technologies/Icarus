@@ -16,3 +16,8 @@ icarus-obd = { path = "../icarus-obd" }
 eframe = "0.36.2"
 # Yggdrasil's shared look (palette, title bar), from its public repository at a fixed commit
 yggdrasil-ui = { git = "https://github.com/Artifex-Technologies/Yggdrasil", rev = "e6c95a58f1345c6b7f228a7a483b4ddf33c2c99d" }
+
+[dev-dependencies]
+# ICA-225: this crate's tests keep out of the real home (HOME/XDG only a test's own temp folder; icarus-obd's lib.rs
+# `env`). Dev-dependencies only: a release build never has the feature.
+icarus-obd = { path = "../icarus-obd", features = ["test-home"] }
