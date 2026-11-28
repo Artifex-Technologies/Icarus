@@ -571,9 +571,9 @@ fn track_ui(ui: &mut egui::Ui, pal: &theme::Palette, s: &Series) {
 
 fn summary_ui(ui: &mut egui::Ui, pal: &theme::Palette, s: &Summary) {
     let mut line = format!(
-        "{} readings over {:.0} minutes",
+        "{} readings over {}",
         s.readings,
-        s.seconds / 60.0
+        icarus_obd::drivelog::how_long(s.seconds)
     );
     if let Some(k) = s.top_kmh {
         line.push_str(&format!(", top {k:.0} km/h ({:.0} mph)", k * 0.621371));

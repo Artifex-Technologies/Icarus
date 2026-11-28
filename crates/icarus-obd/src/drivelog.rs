@@ -524,12 +524,22 @@ fn volts(v: Option<f64>) -> String {
     v.map(|x| format!("{x:.2} V")).unwrap_or_else(|| "-".into())
 }
 
+/// How long a recording ran, in words: seconds under a minute and a half ("25 seconds", not "0 minutes"), else minutes.
+pub fn how_long(seconds: f64) -> String {
+    if seconds < 90.0 {
+        let s = seconds.max(0.0).round();
+        format!("{s:.0} second{}", if s == 1.0 { "" } else { "s" })
+    } else {
+        format!("{:.0} minutes", seconds / 60.0)
+    }
+}
+
 /// The summary in words and a table (Markdown), speeds in km/h and mph, temperatures in °C and °F.
 pub fn words(name: &str, s: &Summary) -> String {
     let mut o = format!(
-        "# Drive log {name}\n\n{} readings over {:.0} minutes",
+        "# Drive log {name}\n\n{} readings over {}",
         s.readings,
-        s.seconds / 60.0
+        how_long(s.seconds)
     );
     if let Some(k) = s.top_kmh {
         o.push_str(&format!(
@@ -743,6 +753,15 @@ mod tests {
         assert!(
             w.contains("| idle | 2 | -8.0 % | -3.0 % | -5.0 % | 0.79 V | 0.75 V |"),
             "{w}"
+        );
+        assert_eq!(
+            [
+                how_long(25.4),
+                how_long(1.0),
+                how_long(89.0),
+                how_long(600.0)
+            ],
+            ["25 seconds", "1 second", "89 seconds", "10 minutes"]
         );
         assert!(w.contains("56 mph"));
         assert!(

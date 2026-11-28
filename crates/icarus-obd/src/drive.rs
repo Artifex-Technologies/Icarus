@@ -435,6 +435,8 @@ impl Modules {
         let out = moddata::fetch_request(link, &mut self.pacer, &self.set.gates, m, r, &self.scope);
         match out {
             Err(Outcome::NotDue) => None,
+            // the recording is ending (Ctrl+C, SIGTERM): not a request that stopped being read
+            Err(Outcome::Skipped(_)) if self.pacer.stopped().is_some() => None,
             Err(Outcome::Skipped(why)) => {
                 self.asked[i] = false;
                 notes.push(format!(
