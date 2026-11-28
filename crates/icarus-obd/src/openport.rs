@@ -833,4 +833,21 @@ mod tests {
         assert_eq!(find(&root).unwrap(), "/dev/ttyACM0");
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// ICA-104: the udev rule that gives the person at the seat the cable's ttyACM port also tells ModemManager to leave
+    /// it alone (it would probe it with AT commands as root, past the port lock).
+    #[test]
+    fn modemmanager_is_told_the_cable_is_not_a_modem() {
+        let rules = include_str!("../../../packaging/70-icarus-tuners.rules");
+        let line = rules
+            .lines()
+            .find(|l| {
+                !l.starts_with('#')
+                    && l.contains(&format!("ATTRS{{idVendor}}==\"{VENDOR:04x}\""))
+                    && l.contains(&format!("ATTRS{{idProduct}}==\"{PRODUCT:04x}\""))
+            })
+            .expect("the OpenPort's line");
+        assert!(line.starts_with("SUBSYSTEM==\"tty\""), "{line}");
+        assert!(line.contains("ENV{ID_MM_DEVICE_IGNORE}=\"1\""), "{line}");
+    }
 }

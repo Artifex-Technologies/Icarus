@@ -68,6 +68,10 @@ hands-free, a watch. Icarus keeps only the OBD conversation:
   `3B 90`), also where it is split over several messages (`09 02` on K-line and J1850 gives it four bytes at a time).
   The whole field of a VIN's own identifier is masked whatever it holds; more is masked than need be rather than less. The VIN is used, unwritten, to pick the make and
   model year when `--make` is not given.
+- A module's serial number is masked with `*` in the transcript and the set always, `--keep-vin` or not: the answers to
+  `22 F18C` (UDS's ECU serial number; also in a read of several identifiers, everything after F18C) and `1A 89` (the
+  supplier's serial number in KWP2000 as BMW uses it; other makes may keep something else there, and it is masked all
+  the same), and a `2E F18C` write. No value needs it, and it tells one module, and so one vehicle, from every other.
 - The capture file itself is never copied: the set records its file name and sha256 only.
 
 A bus log holds only CAN frames; Icarus keeps the diagnostic ones (IDs 700-7FF, 29-bit 18DA/18DB, and where the log

@@ -629,6 +629,7 @@ pub fn conversation(chunks: &[Chunk]) -> Conversation {
             replies,
             problem,
             masked: false,
+            serial_masked: false,
             // ATSP's protocol, when the capture set one (under automatic protocol it is not known)
             kline: st
                 .protocol

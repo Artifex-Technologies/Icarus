@@ -129,9 +129,31 @@ pub fn decode(vin: &str) -> Result<VinInfo, String> {
     })
 }
 
+/// The VIN with its serial number hidden (ICA-106): positions 12-17, the part that tells this vehicle from every other of
+/// its model, year and plant, each become `*`; the rest (maker, model, year, plant) still reads. Text that is not 17
+/// characters long has its last 6 hidden all the same, and all of it when it is shorter.
+pub fn masked(vin: &str) -> String {
+    let chars: Vec<char> = vin.trim().chars().collect();
+    let keep = chars.len().saturating_sub(6);
+    chars
+        .iter()
+        .enumerate()
+        .map(|(i, c)| if i < keep { *c } else { '*' })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_vin_is_masked_after_position_11() {
+        assert_eq!(masked("1M8GDM9AXKP042788"), "1M8GDM9AXKP******");
+        assert_eq!(masked(" 1M8GDM9AXKP042788\n"), "1M8GDM9AXKP******");
+        assert_eq!(masked("ABCDEFGH"), "AB******");
+        assert_eq!(masked("ABC"), "***");
+        assert_eq!(masked(""), "");
+    }
 
     #[test]
     fn the_textbook_vin() {

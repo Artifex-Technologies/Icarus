@@ -104,6 +104,13 @@ A module is bricked when a write stops halfway or puts the wrong thing in. Icaru
     tester present and hand-backs) to a switched vehicle, so a write path that forgets the check still cannot reach it.
     Any other link to a vehicle (a J2534 device, SocketCAN diagnostics) must do the same before it sends (done), and no
     link hands out what is under it (its socket, device or adapter commands) to send on past that check.
+11. **One program per adapter.** Two programs on one adapter garble each other's requests and could cut a write or a
+    routine in two. A serial port (an ELM327 or STN cable, the OpenPort, the Mongoose, SLCAN, a GPS) is held by the
+    program that opened it alone (done: `port::open_serial` locks it with flock and marks it exclusive with TIOCEXCL), so
+    a second program (the window and `icarus obd` on one cable at once) is refused with "another program has
+    /dev/ttyUSB0 open" and that program's name, when this user may see it in /proc; so is a port another program had
+    open before, locking nothing (a terminal program). ModemManager, which runs as root and would probe a ttyACM cable
+    with AT commands past both, is told by the udev rule to leave the OpenPort alone.
 
 ## Writing a module (flash): the conditions
 

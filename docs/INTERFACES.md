@@ -26,7 +26,9 @@ serial port (likely yes); COBB's AccessPort Manager uses libusb-win32 or WinUSB 
    host's USB stack.
 4. **Write Icarus's own driver** from what was seen, read-only commands first, each command on an allow-list.
 
-The udev rule `packaging/70-icarus-tuners.rules` lets the person at the computer open these devices (no root).
+The udev rule `packaging/70-icarus-tuners.rules` lets the person at the computer open these devices (no root), and tells
+ModemManager the OpenPort's ttyACM port is not a modem (`ID_MM_DEVICE_IGNORE`), so it never probes the cable with AT
+commands. A serial port Icarus opens is its own until it lets go: a second program on the same cable is refused, by name.
 
 ## Recognised now (`icarus devices`)
 

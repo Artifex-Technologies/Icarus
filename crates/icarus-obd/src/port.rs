@@ -379,7 +379,21 @@ impl Target {
 }
 
 /// A file descriptor (serial line or Bluetooth socket), read with poll so a silent adapter never hangs Icarus.
-pub struct FdPort(OwnedFd);
+pub struct FdPort {
+    fd: OwnedFd,
+    /// A serial port this program took for itself (`open_serial`: TIOCEXCL), handed back when it closes.
+    exclusive: bool,
+}
+
+impl Drop for FdPort {
+    fn drop(&mut self) {
+        // a tty can outlive the last close (a pty while its other end is open: socat's stand-in for a Wi-Fi adapter), and
+        // its exclusive mark with it; cleared, so the next program to open it is not refused for nothing
+        if self.exclusive {
+            unsafe { libc::ioctl(self.fd.as_raw_fd(), libc::TIOCNXCL) };
+        }
+    }
+}
 
 impl FdPort {
     /// Whether this open port is a serial port on a USB cable, judged by the open file itself: its device number
@@ -387,7 +401,7 @@ impl FdPort {
     /// answer. A Bluetooth socket, a pipe or anything else that is not a character device is not.
     pub fn wired_on(&self, pc: &dyn Computer) -> bool {
         let mut st: libc::stat = unsafe { std::mem::zeroed() };
-        if unsafe { libc::fstat(self.0.as_raw_fd(), &mut st) } != 0 {
+        if unsafe { libc::fstat(self.fd.as_raw_fd(), &mut st) } != 0 {
             return false;
         }
         st.st_mode & libc::S_IFMT == libc::S_IFCHR
@@ -398,7 +412,7 @@ impl FdPort {
 impl Port for FdPort {
     fn send(&mut self, mut data: &[u8]) -> io::Result<()> {
         while !data.is_empty() {
-            let n = unsafe { libc::write(self.0.as_raw_fd(), data.as_ptr().cast(), data.len()) };
+            let n = unsafe { libc::write(self.fd.as_raw_fd(), data.as_ptr().cast(), data.len()) };
             if n < 0 {
                 let e = io::Error::last_os_error();
                 if e.kind() == io::ErrorKind::Interrupted {
@@ -413,7 +427,7 @@ impl Port for FdPort {
 
     fn recv(&mut self, buf: &mut [u8], timeout: Duration) -> io::Result<usize> {
         let mut p = libc::pollfd {
-            fd: self.0.as_raw_fd(),
+            fd: self.fd.as_raw_fd(),
             events: libc::POLLIN,
             revents: 0,
         };
@@ -438,7 +452,7 @@ impl Port for FdPort {
                 "the adapter went away",
             ));
         }
-        let n = unsafe { libc::read(self.0.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
+        let n = unsafe { libc::read(self.fd.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
         if n < 0 {
             let e = io::Error::last_os_error();
             return if e.kind() == io::ErrorKind::Interrupted {
@@ -477,16 +491,139 @@ fn baud_const(baud: u32) -> io::Result<libc::speed_t> {
     })
 }
 
-/// A serial line in raw mode (8N1, no flow control).
+/// Where the computer's programs and their open files are read from: `/proc` (`Procs::this`), or a made-up one in tests.
+pub struct Procs(pub PathBuf);
+
+impl Procs {
+    pub fn this() -> Procs {
+        Procs(PathBuf::from("/proc"))
+    }
+
+    /// The programs that have the file at `path` open, as (process ID, name), lowest first: each process whose open files
+    /// (`PID/fd/N`, links to where each leads) include it, named by `PID/comm`. Only what this user may read: the programs
+    /// of other users (ModemManager, gpsd) are not seen.
+    pub fn holding(&self, path: &Path) -> Vec<(u32, String)> {
+        let want = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let Ok(all) = std::fs::read_dir(&self.0) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for p in all.flatten() {
+            let Some(pid) = p.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else {
+                continue;
+            };
+            let Ok(fds) = std::fs::read_dir(p.path().join("fd")) else {
+                continue;
+            };
+            if fds
+                .flatten()
+                .any(|f| std::fs::read_link(f.path()).is_ok_and(|to| to == want))
+            {
+                let name = std::fs::read_to_string(p.path().join("comm"))
+                    .map(|c| c.trim().to_string())
+                    .unwrap_or_default();
+                out.push((
+                    pid,
+                    if name.is_empty() {
+                        "a program".into()
+                    } else {
+                        name
+                    },
+                ));
+            }
+        }
+        out.sort();
+        out
+    }
+}
+
+/// The refusal of a port that is open already: named by `holders` (from `Procs::holding`) when they could be seen, this
+/// program (`me`) told apart from the others.
+fn in_use(path: &str, holders: &[(u32, String)], me: u32) -> io::Error {
+    let others: Vec<String> = holders
+        .iter()
+        .filter(|(pid, _)| *pid != me)
+        .map(|(pid, name)| format!("{name}, process {pid}"))
+        .collect();
+    let why = if !others.is_empty() {
+        format!(
+            "another program has {path} open ({}): one program at a time speaks to an adapter, so close that one first",
+            others.join("; ")
+        )
+    } else if holders.iter().any(|(pid, _)| *pid == me) {
+        format!(
+            "{path} is open already in this program (another connection to it): one connection at a time speaks to an adapter"
+        )
+    } else {
+        format!(
+            "another program has {path} open (one this user cannot see, or that has just let it go): one program at a time \
+             speaks to an adapter, so close that one first"
+        )
+    };
+    io::Error::new(io::ErrorKind::ResourceBusy, why)
+}
+
+/// A serial line in raw mode (8N1, no flow control), held by this program alone (ICA-104): two programs on one adapter
+/// garble each other's requests, and could cut a write or a routine in two. The port is locked (flock, which binds root
+/// too) and marked exclusive (TIOCEXCL: the kernel refuses any other open of it but root's), so a second program is
+/// refused; and a port another program had open before, locking nothing (a terminal program, `cat`), is refused when
+/// /proc shows that program. Either refusal names the program when this user may see it.
 pub fn open_serial(path: &str, baud: u32) -> io::Result<FdPort> {
+    open_serial_with(path, baud, &Procs::this(), std::process::id())
+}
+
+/// `open_serial`, seeing the other programs through `procs`, this one being process `me`.
+fn open_serial_with(path: &str, baud: u32, procs: &Procs, me: u32) -> io::Result<FdPort> {
     let speed = baud_const(baud)?;
     let c = std::ffi::CString::new(path)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "bad path"))?;
     let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC) };
     if fd < 0 {
-        return Err(io::Error::last_os_error());
+        let e = io::Error::last_os_error();
+        // EBUSY: another program marked it exclusive
+        return Err(if e.raw_os_error() == Some(libc::EBUSY) {
+            in_use(path, &procs.holding(Path::new(path)), me)
+        } else {
+            e
+        });
     }
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    while unsafe { libc::flock(fd.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let e = io::Error::last_os_error();
+        match e.raw_os_error() {
+            Some(libc::EINTR) => continue,
+            Some(libc::EWOULDBLOCK) => {
+                drop(fd);
+                return Err(in_use(path, &procs.holding(Path::new(path)), me));
+            }
+            _ => {
+                return Err(io::Error::new(
+                    e.kind(),
+                    format!("could not lock {path} for this program alone ({e})"),
+                ))
+            }
+        }
+    }
+    if unsafe { libc::ioctl(fd.as_raw_fd(), libc::TIOCEXCL) } != 0 {
+        let e = io::Error::last_os_error();
+        return Err(io::Error::new(
+            e.kind(),
+            format!("could not take {path} for this program alone ({e})"),
+        ));
+    }
+    let port = FdPort {
+        fd,
+        exclusive: true,
+    };
+    let before: Vec<(u32, String)> = procs
+        .holding(Path::new(path))
+        .into_iter()
+        .filter(|(pid, _)| *pid != me)
+        .collect();
+    if !before.is_empty() {
+        return Err(in_use(path, &before, me));
+    }
+    let fd = &port.fd;
     unsafe {
         let mut t: libc::termios = std::mem::zeroed();
         if libc::tcgetattr(fd.as_raw_fd(), &mut t) != 0 {
@@ -504,7 +641,7 @@ pub fn open_serial(path: &str, baud: u32) -> io::Result<FdPort> {
         }
         libc::tcflush(fd.as_raw_fd(), libc::TCIOFLUSH);
     }
-    Ok(FdPort(fd))
+    Ok(port)
 }
 
 const AF_BLUETOOTH: libc::c_int = 31;
@@ -549,7 +686,10 @@ pub fn open_rfcomm(addr: [u8; 6], channel: u8) -> io::Result<FdPort> {
         let e = io::Error::last_os_error();
         return Err(io::Error::new(e.kind(), format!("Bluetooth connect failed ({e}); is the adapter paired, on, and plugged into the car?")));
     }
-    Ok(FdPort(fd))
+    Ok(FdPort {
+        fd,
+        exclusive: false,
+    })
 }
 
 pub struct TcpPort(TcpStream);
@@ -591,9 +731,10 @@ mod tests {
         extern "C" fn on_signal(_: libc::c_int) {}
         let mut fds = [0; 2];
         assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
-        let mut port = super::FdPort(unsafe {
-            <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fds[0])
-        });
+        let mut port = super::FdPort {
+            fd: unsafe { <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fds[0]) },
+            exclusive: false,
+        };
         unsafe {
             let mut sa: libc::sigaction = std::mem::zeroed();
             sa.sa_sigaction = on_signal as extern "C" fn(libc::c_int) as usize;
@@ -819,10 +960,132 @@ mod tests {
         let pc = laptop();
         let mut fds = [0; 2];
         assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
-        let port = FdPort(unsafe { OwnedFd::from_raw_fd(fds[0]) });
+        let port = FdPort {
+            fd: unsafe { OwnedFd::from_raw_fd(fds[0]) },
+            exclusive: false,
+        };
         assert!(!port.wired_on(&pc));
         unsafe { libc::close(fds[1]) };
         assert!(!Silent.wired(), "a port that cannot tell is not wired");
+    }
+
+    /// Who has a port open, read from a made-up /proc: the processes whose open files lead to it, by name, also when it is
+    /// asked for by a symlink; other processes, and entries that are not processes, left out.
+    #[test]
+    fn the_programs_holding_a_port_are_named_from_proc() {
+        let m = Made::new("proc");
+        m.file("dev/ttyUSB0", "");
+        m.file("dev/ttyUSB1", "");
+        m.link("dev/serial/by-id/usb-cable", "../../ttyUSB0");
+        let port = std::fs::canonicalize(m.root.join("dev/ttyUSB0")).unwrap();
+        let other = std::fs::canonicalize(m.root.join("dev/ttyUSB1")).unwrap();
+        m.file("proc/4242/comm", "minicom\n");
+        m.link("proc/4242/fd/0", "/dev/null");
+        m.link("proc/4242/fd/3", port.to_str().unwrap());
+        m.link("proc/4242/fd/4", "socket:[1234]");
+        m.file("proc/77/comm", "gpsd\n");
+        m.link("proc/77/fd/5", other.to_str().unwrap());
+        m.file("proc/90/comm", "\n");
+        m.link("proc/90/fd/1", port.to_str().unwrap());
+        m.link("proc/self", "4242");
+        let procs = Procs(m.root.join("proc"));
+        let both = vec![(90, "a program".to_string()), (4242, "minicom".to_string())];
+        assert_eq!(procs.holding(&m.root.join("dev/ttyUSB0")), both);
+        assert_eq!(
+            procs.holding(&m.root.join("dev/serial/by-id/usb-cable")),
+            both
+        );
+        assert_eq!(
+            procs.holding(&m.root.join("dev/ttyUSB1")),
+            vec![(77, "gpsd".to_string())]
+        );
+        assert!(procs.holding(&m.root.join("dev/ttyUSB9")).is_empty());
+        assert!(Procs(m.root.join("none")).holding(&port).is_empty());
+    }
+
+    #[test]
+    fn a_port_in_use_is_refused_in_words() {
+        let e = in_use("/dev/ttyUSB0", &[(4242, "icarus-app".into())], 1);
+        assert_eq!(e.kind(), io::ErrorKind::ResourceBusy);
+        assert!(
+            e.to_string()
+                .starts_with("another program has /dev/ttyUSB0 open (icarus-app, process 4242)"),
+            "{e}"
+        );
+        let e = in_use("/dev/ttyUSB0", &[], 1).to_string();
+        assert!(
+            e.starts_with("another program has /dev/ttyUSB0 open (one this user cannot see"),
+            "{e}"
+        );
+        let e = in_use("/dev/ttyUSB0", &[(1, "icarus".into())], 1).to_string();
+        assert!(e.contains("open already in this program"), "{e}");
+    }
+
+    /// A pseudo-terminal made for a test, standing in for a cable's serial port, its other end kept open as socat keeps
+    /// one: (that other end, the port's path).
+    fn pty() -> (OwnedFd, String) {
+        let m = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC) };
+        assert!(m >= 0, "{}", io::Error::last_os_error());
+        let m = unsafe { OwnedFd::from_raw_fd(m) };
+        assert_eq!(unsafe { libc::grantpt(m.as_raw_fd()) }, 0);
+        assert_eq!(unsafe { libc::unlockpt(m.as_raw_fd()) }, 0);
+        let mut name = [0 as libc::c_char; 128];
+        assert_eq!(
+            unsafe { libc::ptsname_r(m.as_raw_fd(), name.as_mut_ptr(), name.len()) },
+            0
+        );
+        let path = unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) }
+            .to_str()
+            .unwrap()
+            .to_string();
+        (m, path)
+    }
+
+    /// ICA-104: one program at a time on an adapter. A pty stands in for the cable, and a made-up /proc says who has it.
+    #[test]
+    fn a_port_another_program_has_open_is_refused_with_its_name() {
+        let (_other_end, path) = pty();
+        let m = Made::new("held");
+        let procs = Procs(m.root.join("proc"));
+        let first = open_serial_with(&path, 38_400, &procs, 1).expect("the first program gets it");
+        // the window, say, as /proc shows it
+        m.file("proc/4242/comm", "icarus-app\n");
+        m.link("proc/4242/fd/7", &path);
+        let e = open_serial_with(&path, 38_400, &procs, 2)
+            .err()
+            .expect("a second program is refused");
+        assert_eq!(e.kind(), io::ErrorKind::ResourceBusy);
+        assert!(
+            e.to_string().starts_with(&format!(
+                "another program has {path} open (icarus-app, process 4242)"
+            )),
+            "{e}"
+        );
+        // let go, it is anyone's again: the exclusive mark is cleared, though the pty's other end is still open
+        drop(first);
+        std::fs::remove_dir_all(m.root.join("proc/4242")).unwrap();
+        drop(open_serial_with(&path, 38_400, &procs, 2).expect("free again"));
+        // a program that opened it before, locking nothing (a terminal program), is seen in /proc and refused too
+        let c = std::ffi::CString::new(path.as_str()).unwrap();
+        let raw =
+            unsafe { libc::open(c.as_ptr(), libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC) };
+        assert!(raw >= 0, "{}", io::Error::last_os_error());
+        let raw = unsafe { OwnedFd::from_raw_fd(raw) };
+        m.file("proc/5150/comm", "screen\n");
+        m.link("proc/5150/fd/3", &path);
+        let e = open_serial_with(&path, 38_400, &procs, 2)
+            .err()
+            .expect("refused while screen has it")
+            .to_string();
+        assert!(
+            e.starts_with(&format!(
+                "another program has {path} open (screen, process 5150)"
+            )),
+            "{e}"
+        );
+        drop(raw);
+        std::fs::remove_dir_all(m.root.join("proc/5150")).unwrap();
+        assert!(open_serial_with(&path, 38_400, &procs, 2).is_ok());
     }
 
     /// A port that does not say whether it is a cable (`Port::wired`'s default).

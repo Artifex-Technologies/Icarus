@@ -7,6 +7,8 @@
 //! CLI-only. Nothing from an immobilizer, smart-key or certification module is given out (`icarus_obd::fence`): the
 //! module list does not ask them, module data sends them no data request, and a learning session never holds their
 //! messages. The adapter is the one named by ICARUS_ADAPTER in the server's environment, else the one the window last used.
+//! What a tool says may go on to a model in the cloud, so the VIN's serial number (its last 6 characters) is hidden unless
+//! asked for (`vehicle_check`'s `show_vin`).
 
 use icarus_obd::elm::Elm;
 use icarus_obd::port::Target;
@@ -29,8 +31,10 @@ fn tool_list() -> Value {
         },
         {
             "name": "vehicle_check",
-            "description": "Read the connected vehicle (OBD adapter): identity, check-engine light, readiness, trouble codes explained, freeze frame, current values. Read-only.",
-            "inputSchema": {"type": "object", "properties": {}}
+            "description": "Read the connected vehicle (OBD adapter): identity, check-engine light, readiness, trouble codes explained, freeze frame, current values. Read-only. The VIN's last 6 characters (its serial number) are hidden unless show_vin is true.",
+            "inputSchema": {"type": "object", "properties": {
+                "show_vin": {"type": "boolean", "description": "optional: the whole VIN; only when the person asks for it"}
+            }}
         },
         {
             "name": "vehicle_modules",
@@ -238,13 +242,29 @@ fn values(list: &[(u8, f64)]) -> String {
         .join(", ")
 }
 
-fn vehicle_check() -> Result<String, String> {
+/// `vehicle_check`: the connected vehicle read and told (`check_text`), its VIN whole only with `show_vin`.
+fn vehicle_check(show_vin: bool) -> Result<String, String> {
     let mut elm = connect()?;
     let all = vehicles::load(vehicles::user_dir().as_deref()).0;
     let d = report::collect(&mut elm, &all, false).map_err(|e| e.to_string())?;
-    let mut o = String::new();
-    o += &dropped_notes(&mut elm);
-    o += &format!("Vehicle: VIN {}", d.vin.as_deref().unwrap_or("not given"));
+    let notes = dropped_notes(&mut elm);
+    Ok(check_text(&d, &notes, show_vin))
+}
+
+/// What `vehicle_check` says of a reading `d`, after `notes`. The VIN's serial number (its last 6 characters) is hidden
+/// unless `show_vin` (ICA-106): what a tool says may go on to a model in the cloud, and the rest of the VIN (maker, model,
+/// year, plant) is what an explanation needs.
+fn check_text(d: &report::Diagnosis, notes: &str, show_vin: bool) -> String {
+    let mut o = notes.to_string();
+    let vin = match d.vin.as_deref() {
+        None => "not given".to_string(),
+        Some(v) if show_vin => v.to_string(),
+        Some(v) => format!(
+            "{} (its last 6 characters hidden; show_vin gives them)",
+            icarus_obd::vin::masked(v)
+        ),
+    };
+    o += &format!("Vehicle: VIN {vin}");
     if let Some(v) = &d.vin_info {
         o += &format!(
             ", built in {}{}",
@@ -328,7 +348,7 @@ fn vehicle_check() -> Result<String, String> {
             }
         );
     }
-    Ok(o)
+    o
 }
 
 /// `module_data` on a connected vehicle: the values as text, with the set's attribution.
@@ -445,7 +465,9 @@ fn call(name: &str, args: &Value) -> Result<String, String> {
                 code_line(&i.code, "", profile)
             ))
         }
-        "vehicle_check" => vehicle_check(),
+        "vehicle_check" => {
+            vehicle_check(args.get("show_vin").and_then(Value::as_bool) == Some(true))
+        }
         "drive_logs" => drive_logs(args["file"].as_str()),
         "vehicle_modules" => vehicle_modules(),
         "module_data" => module_data_on(&mut connect()?, s("module").as_deref()),
@@ -564,6 +586,48 @@ mod tests {
                 assert!(!n.contains(banned), "{n} would change a vehicle");
             }
         }
+    }
+
+    /// ICA-106: vehicle_check hands a model the VIN without its serial number unless show_vin asks for it whole.
+    #[test]
+    fn vehicle_check_hides_the_vins_serial_number_unless_asked() {
+        let vin = icarus_obd::sim::VIN;
+        let d = report::Diagnosis {
+            vin: Some(vin.to_string()),
+            vin_info: icarus_obd::vin::decode(vin).ok(),
+            protocol: "ISO 15765-4 CAN (11 bit ID, 500 kbaud)".into(),
+            ..Default::default()
+        };
+        let hidden = check_text(&d, "", false);
+        assert!(
+            !hidden.contains(vin) && !hidden.contains(&vin[11..]),
+            "{hidden}"
+        );
+        assert!(
+            hidden.contains(&format!("VIN {}******", &vin[..11])),
+            "{hidden}"
+        );
+        assert!(
+            hidden.contains("model year"),
+            "the year still reads: {hidden}"
+        );
+        let whole = check_text(&d, "", true);
+        assert!(whole.contains(&format!("VIN {vin}")), "{whole}");
+        let none = check_text(&report::Diagnosis::default(), "", false);
+        assert!(none.contains("VIN not given"), "{none}");
+        // the tool says how to ask for it
+        let r = handle(&json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})).unwrap();
+        let tool = r["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "vehicle_check")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            tool["inputSchema"]["properties"]["show_vin"]["type"],
+            "boolean"
+        );
     }
 
     /// ICA-26: the drive_logs tool reads a recording as `obd live --csv` writes it (the adapter line first): listed, the newest

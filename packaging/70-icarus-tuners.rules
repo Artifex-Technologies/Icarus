@@ -22,5 +22,8 @@ SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="1a84", TAG+="uacc
 SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="0403", ATTR{idProduct}=="d018|d019", TAG+="uaccess"
 
 # Tactrix OpenPort 2.0 (0403:cc4d, a J2534 cable): Linux's cdc_acm makes it /dev/ttyACM*, and Icarus speaks the cable's own
-# command language over that port (--adapter openport); this gives the person at the seat the port without the uucp group
-SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="cc4d", TAG+="uaccess"
+# command language over that port (--adapter openport); this gives the person at the seat the port without the uucp group.
+# ModemManager probes ttyACM ports for a modem by sending them AT commands, as root, past Icarus's lock on the port;
+# ID_MM_DEVICE_IGNORE is ModemManager's own way to be told a port is not one (its "Port and device detection"
+# documentation, modemmanager.org, under the generic ignoring rules)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="cc4d", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1"

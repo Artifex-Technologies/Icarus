@@ -211,11 +211,14 @@ fn finish_import(
 /// as frames (several times its size).
 const MAX_CAPTURE: u64 = 256 << 20;
 
-/// What a capture gave: what was read (VINs masked unless kept), the set (gates applied), and where its make came from.
+/// What a capture gave: what was read (VINs masked unless kept, module serial numbers always), the set (gates applied), and
+/// where its make came from.
 struct Learned {
     read: capture::Read,
     imp: moddata::Imported,
     masked: usize,
+    /// Exchanges that held a module's serial number (masked).
+    serials: usize,
     make_from: &'static str,
 }
 
@@ -236,6 +239,9 @@ fn learn(
     } else {
         capture::mask_vins(&mut read.exchanges)
     };
+    // a module's serial number, whatever --keep-vin says: no set's value needs it, and it tells one module (and so one
+    // vehicle) from every other (ICA-106)
+    let serials = capture::mask_serials(&mut read.exchanges);
     let years: Vec<[u16; 2]> = vin
         .as_deref()
         .and_then(|v| vin::decode(v).ok())
@@ -273,6 +279,7 @@ fn learn(
         read,
         imp,
         masked,
+        serials,
         make_from,
     })
 }
@@ -337,6 +344,12 @@ fn import_capture(args: &Args) -> Result<(), String> {
         say!(
             "  {} exchange(s) held a VIN (or text like one): masked in the transcript and the set (--keep-vin keeps it)",
             l.masked
+        );
+    }
+    if l.serials > 0 {
+        say!(
+            "  {} exchange(s) held a module's serial number: masked in the transcript and the set",
+            l.serials
         );
     }
     // what was asked, by service
@@ -2038,6 +2051,49 @@ mod tests {
    0.600       7B0  02 21 05 00 00 00 00 00
    0.610       7B8  03 7F 21 12 00 00 00 00
 ";
+
+    /// ICA-106: a capture with a module's serial number in it (22 F18C, and KWP2000's 1A 89) gives a transcript and a set
+    /// without its bytes, --keep-vin or not.
+    #[test]
+    fn a_capture_with_a_serial_number_gives_neither_transcript_nor_set_its_bytes() {
+        // made-up serial numbers "SN01" and "SN02"
+        let log = "   0.100       7E0  03 22 F1 8C 00 00 00 00
+   0.110       7E8  07 62 F1 8C 53 4E 30 31
+   0.200       7E0  02 1A 89 00 00 00 00 00
+   0.210       7E8  06 5A 89 53 4E 30 32 00
+   0.300       7E0  03 22 12 34 00 00 00 00
+   0.310       7E8  05 62 12 34 01 02 00 00
+";
+        let all = vehicles::builtin();
+        for keep_vin in [false, true] {
+            let l = learn(
+                log.as_bytes(),
+                "bench.log",
+                None,
+                Some("toyota"),
+                keep_vin,
+                &all,
+            )
+            .unwrap();
+            assert_eq!(l.serials, 2);
+            let csv = capture::transcript_csv(&l.read.exchanges, &|_| String::new());
+            assert!(
+                !csv.contains("53 4E 30") && csv.matches("[serial number masked]").count() == 2,
+                "{csv}"
+            );
+            assert!(csv.contains("62 12 34 01 02"), "the rest stays: {csv}");
+            let files = md::set_files(l.imp.set.as_ref().unwrap(), &l.imp.modules);
+            for (name, text) in &files {
+                assert!(!text.contains("53 4E 30"), "{name}: {text}");
+            }
+            assert!(
+                files
+                    .iter()
+                    .any(|(_, t)| t.contains("serial number masked")),
+                "{files:?}"
+            );
+        }
+    }
 
     /// ICA-61: a capture set's attribution follows its naming: unnamed at first, "N of M named" after one, "named by hand,
     /// not verified" once every placeholder is named; a hand-written attribution is never changed.

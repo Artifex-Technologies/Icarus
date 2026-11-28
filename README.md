@@ -386,8 +386,9 @@ listed as seen, not imported (identity comes in a later build). Writes, tests, r
 clearing and security access the tool did are listed as seen, never imported; the gates of `icarus obd data` apply (airbag
 and key modules identity only, never 7DF or an answer ID). **Privacy:** only the OBD conversation is kept. Bluetooth addresses,
 device names, link keys and every other Bluetooth channel are never written to any output, adapter commands are counted
-but not kept, and VINs (in answers and in requests, also split over several messages) are masked in the transcript and
-the set unless `--keep-vin`. How to capture, what is read and how
+but not kept, VINs (in answers and in requests, also split over several messages) are masked in the transcript and
+the set unless `--keep-vin`, and modules' serial numbers (`22 F18C`, `1A 89`) are masked always. How to capture, what is
+read and how
 to name a value afterwards: [docs/CAPTURES.md](docs/CAPTURES.md).
 
 **Suggested names.** `icarus obd suggest [MODULE...] --adapter A [--set SET] [--seconds 60]` reads the standard values
@@ -458,7 +459,8 @@ the saved file is for study only. No family's description ships yet: each needs 
 
 `icarus mcp` is a Model Context Protocol server on stdin/stdout with seven read-only tools: `explain_code` (what a code
 means, where to start, the parts), `vehicle_check` (identity, check-engine light, readiness, codes explained, freeze frame,
-current values, on-board test results), `vehicle_modules` (every module's codes), `module_data` (each module's own
+current values, on-board test results; the VIN's last 6 characters, its serial number, hidden unless `show_vin` is true,
+since what a tool says may go on to a model in the cloud), `vehicle_modules` (every module's codes), `module_data` (each module's own
 values), `learning_sessions` (what Icarus saved while watching another tool), `drive_logs` (recorded drives summarized)
 and `tires_gears`. Nothing that clears
 codes, runs a test or writes is offered to a model; a test fails if a tool with such a name appears. Nothing from an
