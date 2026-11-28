@@ -121,7 +121,7 @@ impl Cli {
     }
 }
 
-/// The module values to watch (ICA-218): every `--watch NAME` given (`none`: nothing), else the window's setting
+/// The module values to watch (ICA-218): every `--watch NAME` given (`none` alone: nothing), else the window's setting
 /// (`drive::watch_path`), else the defaults.
 fn watch_of(args: &Args) -> Vec<String> {
     let given: Vec<String> = args
@@ -133,7 +133,8 @@ fn watch_of(args: &Args) -> Vec<String> {
     if given.is_empty() {
         return drive::load_watch(drive::watch_path().as_deref());
     }
-    drive::parse_watch(&given.join("\n"))
+    // as given: no comment stripping (a name may hold a #)
+    drive::watch_names(given)
 }
 
 /// Module data's pacer, stopping on Ctrl+C or SIGTERM only (a recording owns the adapter: it is this one).
@@ -304,5 +305,15 @@ mod tests {
             vec!["Knock feedback", "gear"]
         );
         assert!(watch_of(&line(&["--watch", "none"])).is_empty());
+        // a # is part of a name on the line, and none among names is kept (watching says it was ignored)
+        assert_eq!(
+            watch_of(&line(&[
+                "--watch",
+                "Cylinder #1 misfire count",
+                "--watch",
+                "none"
+            ])),
+            vec!["Cylinder #1 misfire count", "none"]
+        );
     }
 }

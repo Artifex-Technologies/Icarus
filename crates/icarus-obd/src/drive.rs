@@ -87,55 +87,101 @@ pub fn stamp() -> String {
 // ---------------------------------------------------------------------------------------------------------------------
 // Module data in the rotation (ICA-44)
 
-/// The module values a recording reads every sweep unless told otherwise (ICA-218): knock, the gear, lock-up, the shift
-/// lever and sport mode, what has to be tied to a moment of the drive. Each is part of a value's name, matched ignoring
-/// case, spaces and punctuation ("lock up" finds "Lock up state" and "torque converter lock-up").
+/// The module values a recording reads every sweep unless told otherwise (ICA-218): knock feedback, the gear, lock-up,
+/// the shift lever's switches (on a Toyota they carry neutral and sport mode too) and sport mode, what has to be tied to a
+/// moment of the drive. A learned value (knock correction, learned) changes slowly and stays in turn. Each name is
+/// matched against a value's name as whole words (`watched`).
 pub const WATCH_DEFAULT: &[&str] = &[
     "knock feedback",
-    "knock correction",
     "gear",
     "lock up",
-    "lockup",
     "shift sw status",
     "sports mode",
     "sports shift",
-    "neutral",
 ];
 
-/// The most watched requests one sweep reads (ICA-218), the bound on what watching costs a row. Each is one more module
-/// request in every sweep: its round trip, the switch of the adapter's header when it is another module's (five commands
-/// there, three back), and the pacer's least gap (`moddata::MIN_GAP`, from the end of one answer to the next request),
-/// so on a Bluetooth adapter each adds roughly a tenth of a second to the row. With more watched requests than this they
-/// take turns (each every second or third sweep): a long `--watch` list slows its own values, not the whole recording.
-/// The standard values and the module values in turn keep their pace either way (one request in turn no more often than
-/// `MODULE_STEP`). The pacer is not bypassed: a watched request goes through the same gates and is never asked more often
-/// than the pacer's floor (`moddata::MIN_EVERY`, four times a second), whatever the sweep's speed.
-pub const PRIORITY_PER_SWEEP: usize = 4;
+/// The most watched requests one sweep reads (ICA-218), one of the bounds on what watching costs a row (`MODULE_BUDGET`
+/// is the other). Each is one more module request in the sweep: its round trip, the switch of the adapter's header when
+/// it is another module's (five commands there, three back), and the pacer's least gap (`moddata::MIN_GAP`, from the end
+/// of one answer to the next request), so on a Bluetooth adapter each adds roughly a tenth of a second to the row. With
+/// more watched requests than this they take turns: a long `--watch` list slows its own values, not the whole recording.
+/// The pacer is not bypassed: a watched request goes through the same gates and is never asked more often than the
+/// pacer's floor (`moddata::MIN_EVERY`, four times a second), and never waits for a busy module (`Pacer::would_wait`).
+pub const PRIORITY_PER_SWEEP: usize = 2;
+
+/// The time budget of a sweep's module requests (ICA-218 review: the standard values keep their pace): the request in
+/// turn (when due) and the first watched one always go, a second watched one only while they have taken less than this.
+/// A request that fails (the link lost or timing out) ends them for the sweep.
+pub const MODULE_BUDGET: Duration = Duration::from_millis(150);
+
+/// How long a recording leaves a module alone after it answered busy (7F xx 21), doubling with each busy answer in a row
+/// up to `BUSY_REST_MOST` (ICA-218 review). One busy read takes `uds::WINDOW_SENDS` sends 300 ms apart, near a second of
+/// the sweep, so it is tried again only now and then; the pacer's own slowdown is never waited out.
+pub const BUSY_REST: Duration = Duration::from_secs(5);
+pub const BUSY_REST_MOST: Duration = Duration::from_secs(60);
+
+/// A request whose `every` is this many seconds or more (the source says its values change over minutes) is never
+/// watched; it stays in turn.
+pub const WATCH_SLOWEST_EVERY: f64 = 60.0;
 
 /// The rows-per-second line comes once the recording has run this long (seconds).
 pub const RATE_AFTER_S: f64 = 10.0;
 
 /// The share of its rows a second a recording keeps with the default watch, against one that watches nothing (ICA-218's
-/// done, tested on the simulated vehicle at an adapter's pace: 8 ms an AT command, 40 ms a request). The trade-off in
-/// numbers there: two watched requests on two modules take a row from about 5 a second to about 2 (0.39), and the
-/// watched values go from once every few seconds to every row (0.4 s). Most of a watched request's cost is the header
-/// switch to its module, so the watched requests go by module, beginning with the module the request in turn left the
-/// header on.
-pub const RATE_KEPT: f64 = 1.0 / 3.0;
+/// done, tested on the simulated vehicle at an adapter's pace, 15 ms an AT command and 53 ms a request, where a
+/// recording that watches nothing makes about 3.7 rows a second with a request in turn every other row, as the truck's
+/// did at 3). Most of a watched request's cost is the switch of the adapter's header to its module (five commands); the
+/// first build, which also put a request in turn in every row, kept under half. Here: about 0.6, the watched values in
+/// every row.
+pub const RATE_KEPT: f64 = 0.55;
 
-/// A name as it is matched: lower case, letters and digits only.
-fn fold(s: &str) -> String {
-    s.chars()
-        .filter(|c| c.is_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect()
+/// A name's words as they are matched: lower case, letters and digits, punctuation as a space, and "lock up" as one
+/// word ("lock-up", "lockup").
+fn words(s: &str) -> Vec<String> {
+    let raw: Vec<String> = s
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    let mut out = Vec::new();
+    let mut k = 0;
+    while k < raw.len() {
+        if raw[k] == "lock" && raw.get(k + 1).is_some_and(|w| w == "up") {
+            out.push("lockup".to_string());
+            k += 2;
+        } else {
+            out.push(raw[k].clone());
+            k += 1;
+        }
+    }
+    out
 }
 
-/// Whether a value's name holds a watched name (`WATCH_DEFAULT`'s way of matching).
+/// Whether a value's name holds a watched name as whole words, in order ("lock up" finds "Lock up state" and "torque
+/// converter lock-up", not "Clock update"; "gear" finds "Current gear" and "Gear ratio", not "Gearbox oil").
 pub fn watched(name: &str, watch: &str) -> bool {
-    let w = fold(watch);
-    !w.is_empty() && fold(name).contains(&w)
+    let w = words(watch);
+    let n = words(name);
+    !w.is_empty() && n.windows(w.len()).any(|x| x == w.as_slice())
 }
+
+/// Whether a watched name is `none` (nothing watched, when it is the only one).
+fn is_none(name: &str) -> bool {
+    words(name) == ["none"]
+}
+
+/// Watched names as given (`--watch`, the file): `none` alone, or only `none`, is nothing watched; among other names it
+/// is kept, and `Modules::watching` says it was ignored.
+pub fn watch_names(names: Vec<String>) -> Vec<String> {
+    if !names.is_empty() && names.iter().all(|n| is_none(n)) {
+        Vec::new()
+    } else {
+        names
+    }
+}
+
+/// Where a module is asked: (request ID, address byte).
+type Where = (u32, Option<u8>);
 
 /// The module requests a recording reads: those of the chosen set that its gates let through for this vehicle. Those
 /// carrying a watched value are read every sweep (`watching`, ICA-218), the rest in turn.
@@ -150,14 +196,22 @@ pub struct Modules {
     pacer: Pacer,
     last: Option<Instant>,
     /// The watched requests (indices into `items`, by module so the adapter switches header as little as possible), and
-    /// where the next sweep's turn starts when there are more than `PRIORITY_PER_SWEEP`.
+    /// where the next sweep's turn starts.
     priority: Vec<usize>,
     prio_at: usize,
     /// Each item's answers so far (for the rows-per-second line).
     answers: Vec<u32>,
-    /// What is watched, in words, and the watched names no request of the set carries.
+    /// What is watched, in words; why each watched name that found no request did not (in words); whether a `none`
+    /// among other names was ignored.
     watching: Vec<String>,
     unmatched: Vec<String>,
+    none_ignored: bool,
+    /// Modules that answered busy (7F xx 21), left alone until then: (until, busy answers in a row).
+    resting: std::collections::HashMap<u32, (Instant, u32)>,
+    /// The last sweep sent a request in turn.
+    turn_last: bool,
+    /// The requests the gates kept out: (where, its values' names), so a watched name only they carry is said as such.
+    gated: Vec<(String, Vec<String>)>,
     /// What the gates kept out, in words (said once when the recording starts).
     pub left_out: Vec<String>,
 }
@@ -166,7 +220,7 @@ impl Modules {
     /// The set as used on the vehicle (`vehicledata::choose_for`, or `Loaded::on_vehicle`), what the vehicle may be asked
     /// (`scope`), and the pacer every request goes through. The default values are watched (`WATCH_DEFAULT`).
     pub fn new(set: Loaded, scope: Scope, pacer: Pacer) -> Modules {
-        let (mut items, mut left_out) = (Vec::new(), Vec::new());
+        let (mut items, mut left_out, mut gated) = (Vec::new(), Vec::new(), Vec::new());
         for (mi, m) in set.modules.iter().enumerate() {
             for (ri, r) in m.requests.iter().enumerate() {
                 if r.values.is_empty() {
@@ -174,12 +228,11 @@ impl Modules {
                 }
                 match moddata::may_send(&set.gates, m, r, &scope) {
                     Ok(()) => items.push((mi, ri)),
-                    Err(o) => left_out.push(format!(
-                        "{} {}: {}",
-                        m.module.label(),
-                        r.label(),
-                        o.describe()
-                    )),
+                    Err(o) => {
+                        let at = format!("{} {}", m.module.label(), r.label());
+                        left_out.push(format!("{at}: {}", o.describe()));
+                        gated.push((at, r.values.iter().map(|v| v.name.clone()).collect()));
+                    }
                 }
             }
         }
@@ -196,53 +249,104 @@ impl Modules {
             prio_at: 0,
             watching: Vec::new(),
             unmatched: Vec::new(),
+            none_ignored: false,
+            resting: Default::default(),
+            turn_last: false,
+            gated,
             left_out,
         }
         .watching(WATCH_DEFAULT)
     }
 
-    /// Reads the requests carrying a value whose name holds one of `names` (`watched`) every sweep (ICA-218), the others
-    /// in turn; an empty list reads everything in turn, as before ICA-218.
+    /// Reads requests carrying a value named by one of `watch` (`watched`) every sweep (ICA-218), the others in turn; an
+    /// empty list reads everything in turn, as before ICA-218. For each name, one request a module: the one asked most
+    /// often by its definition (`every`), then the shortest answer, so a long record carrying the name among twenty other
+    /// values is not read every sweep; a request whose `every` is `WATCH_SLOWEST_EVERY` or more is never watched.
     pub fn watching<S: AsRef<str>>(mut self, watch: &[S]) -> Modules {
         let mut names: Vec<&str> = Vec::new();
+        let mut nones = 0;
         for n in watch.iter().map(|n| n.as_ref().trim()) {
-            if !fold(n).is_empty() && !names.iter().any(|x| fold(x) == fold(n)) {
+            if words(n).is_empty() {
+                continue;
+            }
+            if is_none(n) {
+                nones += 1;
+            } else if !names.iter().any(|x| words(x) == words(n)) {
                 names.push(n);
             }
         }
-        let mut used = vec![false; names.len()];
-        let mut found: Vec<((u32, Option<u8>), usize, String)> = Vec::new();
-        for i in 0..self.items.len() {
-            let (m, r) = self.item(i);
-            let mut hits: Vec<&str> = Vec::new();
-            for v in &r.values {
-                let mut hit = false;
-                for (k, w) in names.iter().enumerate() {
-                    if watched(&v.name, w) {
-                        used[k] = true;
-                        hit = true;
-                    }
+        // `none` turns watching off only as the only name (`watch_names` makes that an empty list)
+        self.none_ignored = nones > 0 && !names.is_empty();
+        let set = self.set_name().to_string();
+        let mut chosen: Vec<(Where, usize, Vec<&str>)> = Vec::new();
+        let mut unmatched = Vec::new();
+        for w in &names {
+            // the best request carrying it on each module: (module, item, (every, answer length))
+            let mut best: Vec<(Where, usize, (f64, usize))> = Vec::new();
+            let mut slow: Vec<String> = Vec::new();
+            for i in 0..self.items.len() {
+                let (m, r) = self.item(i);
+                if !r.values.iter().any(|v| watched(&v.name, w)) {
+                    continue;
                 }
-                if hit {
-                    hits.push(&v.name);
+                if r.every.is_some_and(|e| e >= WATCH_SLOWEST_EVERY) {
+                    slow.push(format!("{} {}", m.module.label(), r.label()));
+                    continue;
+                }
+                let rank = (r.every.unwrap_or(f64::MAX), r.min_len.unwrap_or(usize::MAX));
+                let at = (m.module.tx, m.module.ext);
+                match best.iter_mut().find(|b| b.0 == at) {
+                    Some(b) if rank < b.2 => (b.1, b.2) = (i, rank),
+                    Some(_) => {}
+                    None => best.push((at, i, rank)),
                 }
             }
-            if !hits.is_empty() {
-                let line = format!("{} ({} {})", hits.join(", "), m.module.label(), r.label());
-                found.push(((m.module.tx, m.module.ext), i, line));
+            if best.is_empty() {
+                let gated: Vec<&str> = self
+                    .gated
+                    .iter()
+                    .filter(|g| g.1.iter().any(|v| watched(v, w)))
+                    .map(|g| g.0.as_str())
+                    .collect();
+                unmatched.push(if !slow.is_empty() {
+                    format!(
+                        "\"{w}\" is only in request(s) read every {WATCH_SLOWEST_EVERY:.0} s or less often ({}), left in turn",
+                        slow.join(", ")
+                    )
+                } else if !gated.is_empty() {
+                    format!(
+                        "\"{w}\" is only in request(s) the gates leave out ({}), not read",
+                        gated.join(", ")
+                    )
+                } else {
+                    format!("no value of the set {set} is named \"{w}\"")
+                });
+            }
+            for (at, i, _) in best {
+                match chosen.iter_mut().find(|c| c.1 == i) {
+                    Some(c) => c.2.push(w),
+                    None => chosen.push((at, i, vec![w])),
+                }
             }
         }
         // by module (a set may name one module in more than one file): the header switched once for its requests
-        found.sort_by_key(|f| f.0);
-        self.priority = found.iter().map(|f| f.1).collect();
-        self.watching = found.into_iter().map(|f| f.2).collect();
-        self.prio_at = 0;
-        self.unmatched = names
+        chosen.sort_by_key(|c| (c.0, c.1));
+        self.watching = chosen
             .iter()
-            .zip(&used)
-            .filter(|(_, u)| !**u)
-            .map(|(n, _)| n.to_string())
+            .map(|(_, i, ws)| {
+                let (m, r) = self.item(*i);
+                let hits: Vec<&str> = r
+                    .values
+                    .iter()
+                    .filter(|v| ws.iter().any(|w| watched(&v.name, w)))
+                    .map(|v| v.name.as_str())
+                    .collect();
+                format!("{} ({} {})", hits.join(", "), m.module.label(), r.label())
+            })
             .collect();
+        self.priority = chosen.iter().map(|c| c.1).collect();
+        self.prio_at = 0;
+        self.unmatched = unmatched;
         self
     }
 
@@ -279,16 +383,14 @@ impl Modules {
                 self.watching.join("; ")
             ));
         }
-        if !self.unmatched.is_empty() {
-            out.push(format!(
-                "Module data: no value of the set {} is named {}, so it is not watched.",
-                self.set_name(),
-                self.unmatched
-                    .iter()
-                    .map(|n| format!("\"{n}\""))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
+        for u in &self.unmatched {
+            out.push(format!("Module data: {u}: not watched."));
+        }
+        if self.none_ignored {
+            out.push(
+                "Module data: \"none\" was ignored: it turns watching off only as the only name."
+                    .into(),
+            );
         }
         out
     }
@@ -300,7 +402,8 @@ impl Modules {
     }
 
     /// Item `i` asked, the same way in turn and watched: None when it was not due (its `every`, or for a watched one the
-    /// pacer's floor) or the gates or the pacer dropped it (said in `notes`; not asked again).
+    /// pacer's floor), when its module is slowed for being busy (left for a later sweep: the sweep never waits it out), or
+    /// when the gates or the pacer dropped it (said in `notes`; not asked again).
     fn ask(
         &mut self,
         i: usize,
@@ -321,7 +424,16 @@ impl Modules {
         } else {
             def
         };
-        match moddata::fetch_request(link, &mut self.pacer, &self.set.gates, m, r, &self.scope) {
+        // a busy module's slowdown (up to `moddata::MAX_SLOW`) is not waited out here, only the least gap is; and a module
+        // that answered busy is left alone for a while (`BUSY_REST`): one busy read costs the sweep its retries
+        let tx = m.module.tx;
+        if self.pacer.would_wait(moddata::key(m, r)) > self.pacer.gap()
+            || self.resting.get(&tx).is_some_and(|r| Instant::now() < r.0)
+        {
+            return None;
+        }
+        let out = moddata::fetch_request(link, &mut self.pacer, &self.set.gates, m, r, &self.scope);
+        match out {
             Err(Outcome::NotDue) => None,
             Err(Outcome::Skipped(why)) => {
                 self.asked[i] = false;
@@ -333,6 +445,14 @@ impl Modules {
                 None
             }
             other => {
+                if matches!(other, Err(Outcome::Refused(0x21))) {
+                    // each busy answer in a row rests the module twice as long, up to BUSY_REST_MOST
+                    let n = self.resting.get(&tx).map_or(0, |r| r.1) + 1;
+                    let rest = (BUSY_REST * 2u32.pow((n - 1).min(8))).min(BUSY_REST_MOST);
+                    self.resting.insert(tx, (Instant::now() + rest, n));
+                } else {
+                    self.resting.remove(&tx);
+                }
                 if other.is_ok() {
                     self.answers[i] += 1;
                 }
@@ -341,34 +461,34 @@ impl Modules {
         }
     }
 
-    /// Where item `i` is asked: (module request ID, address byte).
-    fn module_of(&self, i: usize) -> (u32, Option<u8>) {
-        let m = &self.set.modules[self.items[i].0].module;
-        (m.tx, m.ext)
-    }
-
-    /// The watched requests due this sweep, sent: all of them, or `PRIORITY_PER_SWEEP` in turn when there are more. (index,
-    /// its answer's data or what it did) for each sent. `after`: the request just asked in turn, whose module's watched
-    /// requests then go first (the adapter's header is already there: five commands fewer).
-    fn watched_step(
+    /// The module requests of one sweep, sent: the one in turn when one is due, then the watched ones in turn (at most
+    /// `PRIORITY_PER_SWEEP`): the first due always, each after it only while the sweep's module requests have taken less
+    /// than `MODULE_BUDGET`.
+    /// A request that failed (the link lost or timing out, a garbled answer) ends them for this sweep, so the recording
+    /// learns of a lost adapter from its next standard read at once. (index, its answer's data or what it did) for each.
+    fn phase(
         &mut self,
         link: &mut dyn Link,
         notes: &mut Vec<String>,
-        after: Option<usize>,
     ) -> Vec<(usize, Result<Vec<u8>, Outcome>)> {
-        let n = self.priority.len();
-        if n <= PRIORITY_PER_SWEEP {
-            // every one each sweep, by module, beginning with the module the header is on
-            let here = after.map(|i| self.module_of(i));
-            self.prio_at = self
-                .priority
-                .iter()
-                .position(|i| Some(self.module_of(*i)) == here)
-                .unwrap_or(0);
+        let start = Instant::now();
+        let failed = |o: &Result<Vec<u8>, Outcome>| matches!(o, Err(Outcome::Failed(_)));
+        let mut out: Vec<(usize, Result<Vec<u8>, Outcome>)> = Vec::new();
+        // while values are watched, a request in turn every other sweep at most: as often a row as before watching (on a
+        // Bluetooth adapter at about 3 rows a second the request in turn went every second sweep), so the watched request
+        // is what a row gains, not a request in turn in every row besides
+        let turn = self.priority.is_empty() || !self.turn_last;
+        if turn {
+            out.extend(self.step(link, notes));
         }
-        let mut out = Vec::new();
+        self.turn_last = turn && !out.is_empty();
+        if out.iter().any(|x| failed(&x.1)) {
+            return out;
+        }
+        let n = self.priority.len();
+        let mut sent = 0;
         for _ in 0..n {
-            if out.len() >= PRIORITY_PER_SWEEP {
+            if sent >= PRIORITY_PER_SWEEP || (sent > 0 && start.elapsed() >= MODULE_BUDGET) {
                 break;
             }
             let i = self.priority[self.prio_at % n];
@@ -377,7 +497,12 @@ impl Modules {
                 continue;
             }
             if let Some(o) = self.ask(i, link, notes) {
+                let stop = failed(&o);
                 out.push((i, o));
+                sent += 1;
+                if stop {
+                    break;
+                }
             }
         }
         out
@@ -835,14 +960,12 @@ impl Recorder {
             Some(false) if self.ran => self.stopped = true,
             _ => {}
         }
-        // one module request in turn when one is due, then the watched ones (ICA-218), that module's first (only while the
-        // vehicle answers)
-        let mut module = Vec::new();
-        if let Some(m) = self.modules.as_mut().filter(|_| !s.values.is_empty()) {
-            module.extend(m.step(link, &mut s.notes));
-            let after = module.first().map(|x| x.0);
-            module.extend(m.watched_step(link, &mut s.notes, after));
-        }
+        // the module requests: one in turn when due, then the watched ones (ICA-218), within the sweep's budget (only while
+        // the vehicle answers)
+        let module = match self.modules.as_mut() {
+            Some(m) if !s.values.is_empty() => m.phase(link, &mut s.notes),
+            _ => Vec::new(),
+        };
         let mut cells = vec![Cell::Empty; self.names.len()];
         for (pid, v) in &s.values {
             if let Some(i) = self.pids.iter().position(|p| p == pid) {
@@ -1373,21 +1496,20 @@ pub fn watch_path() -> Option<PathBuf> {
     Some(base.join("icarus/record-watch"))
 }
 
-/// The watched names a `record-watch` file gives: one a line (`#` starts a comment); `none` on a line of its own watches
-/// nothing. A file naming nothing at all gives the defaults (`WATCH_DEFAULT`).
+/// The watched names a `record-watch` file gives: one a line, a line beginning with `#` a comment (a `#` within a name is
+/// part of it: "Cylinder #1 misfire count"); `none` as the only name watches nothing (`watch_names`). A file naming
+/// nothing at all gives the defaults (`WATCH_DEFAULT`).
 pub fn parse_watch(text: &str) -> Vec<String> {
     let names: Vec<String> = text
         .lines()
-        .map(|l| l.split('#').next().unwrap_or("").trim().to_string())
-        .filter(|l| !l.is_empty())
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(str::to_string)
         .collect();
-    if names.iter().any(|n| n.eq_ignore_ascii_case("none")) {
-        return Vec::new();
-    }
     if names.is_empty() {
         return WATCH_DEFAULT.iter().map(|w| w.to_string()).collect();
     }
-    names
+    watch_names(names)
 }
 
 /// A `record-watch` file's text for `names` (an empty list is written as `none`).
@@ -1554,15 +1676,14 @@ mod tests {
             drivelog::summarize(&text).is_ok(),
             "the summary reads it as any drive"
         );
-        // the module values come round less often than every row (in turn; a watched one, knock correction, no more often
-        // than the pacer's floor), the fast ones every row
+        // the module values in turn come round less often than every row, the fast ones every row
         let trim = s
             .find(&["short-term fuel trim, bank 1 (700 22 1f02)"])
             .unwrap();
         let knocks = s.cols[knock].iter().filter(|v| v.is_some()).count();
         let trims = s.cols[trim].iter().filter(|v| v.is_some()).count();
         assert!(knocks > 1 && knocks < rows, "{knocks} of {rows}");
-        assert!(trims > 1 && trims < knocks, "{trims} of {rows}");
+        assert!(trims > 1 && trims < rows, "{trims} of {rows}");
 
         // the set improved: knock correction is in quarter degrees, and a value is added from the same answer
         let mut files: Vec<(String, String)> = crate::sim::data()
@@ -1995,49 +2116,65 @@ mod tests {
     }
 
     /// The simulated vehicle at an adapter's pace (ICA-218): each AT command takes `at` and each request to the vehicle
-    /// `req`, roughly as an ELM327 over Bluetooth does; the commands are counted.
+    /// `req`, roughly as an ELM327 over Bluetooth does; every command is logged. From the first command starting with
+    /// `mute_on` the adapter says nothing more (a link that times out rather than breaks).
     struct Paced {
         car: SimCar,
         at: Duration,
         req: Duration,
-        sent: Arc<AtomicU32>,
+        log: Arc<Mutex<Vec<String>>>,
+        mute_on: Option<&'static str>,
+        muted: bool,
     }
 
     impl crate::port::Port for Paced {
         fn send(&mut self, data: &[u8]) -> std::io::Result<()> {
             let cmd = String::from_utf8_lossy(data).trim().to_uppercase();
             if !cmd.is_empty() {
-                self.sent.fetch_add(1, Ordering::SeqCst);
+                self.log.lock().unwrap().push(cmd.clone());
                 let at = cmd.starts_with("AT") || cmd.starts_with("ST");
                 std::thread::sleep(if at { self.at } else { self.req });
+                if self.mute_on.is_some_and(|m| cmd.starts_with(m)) {
+                    self.muted = true;
+                }
+            }
+            if self.muted {
+                return Ok(());
             }
             self.car.send(data)
         }
         fn recv(&mut self, buf: &mut [u8], timeout: Duration) -> std::io::Result<usize> {
+            if self.muted {
+                std::thread::sleep(timeout.min(Duration::from_millis(20)));
+                return Ok(0);
+            }
             self.car.recv(buf, timeout)
         }
     }
 
-    fn paced() -> (Elm, Arc<AtomicU32>) {
-        let sent = Arc::new(AtomicU32::new(0));
+    fn paced(car: SimCar, mute_on: Option<&'static str>) -> (Elm, Arc<Mutex<Vec<String>>>) {
+        let log = Arc::new(Mutex::new(Vec::new()));
         let port = Paced {
-            car: SimCar::new(),
-            at: Duration::from_millis(8),
-            req: Duration::from_millis(40),
-            sent: sent.clone(),
+            car,
+            at: Duration::from_millis(15),
+            req: Duration::from_millis(53),
+            log: log.clone(),
+            mute_on,
+            muted: false,
         };
-        (Elm::connect(Box::new(port)).unwrap(), sent)
+        (Elm::connect(Box::new(port)).unwrap(), log)
     }
 
-    /// A recording of `secs` on the paced vehicle watching `watch` (None: the defaults): its rows a second, the file's
-    /// series, what it said when it started and the notes of its sweeps.
+    /// A recording of `secs` on the paced vehicle `car` watching `watch` (None: the defaults): its rows a second, the
+    /// file's series, what it said when it started and the notes of its sweeps.
     fn paced_drive(
         tag: &str,
+        car: SimCar,
         watch: Option<&[&str]>,
         secs: f64,
     ) -> (f64, drivelog::Series, Vec<String>, Vec<String>) {
         let dir = scratch(tag);
-        let (mut elm, _) = paced();
+        let (mut elm, _) = paced(car, None);
         let mut p = plan(&mut elm, &dir, true);
         if let Some(w) = watch {
             p.modules = p.modules.map(|m| m.watching(w));
@@ -2051,53 +2188,58 @@ mod tests {
             let s = r.sweep(&mut elm, &[], t0.elapsed().as_secs_f64()).unwrap();
             notes.extend(s.notes.into_iter().chain(s.rate));
         }
-        let rate = r.rows as f64 / t0.elapsed().as_secs_f64();
         let paths = r.close().unwrap();
         let s = drivelog::series(&std::fs::read_to_string(&paths[0]).unwrap()).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
+        // the rows a second once settled: after the first 2 s (one answer pending, one refusal asked twice, at the start)
+        let late: Vec<f64> = s.t.iter().copied().filter(|t| *t >= 2.0).collect();
+        let rate = match (late.first(), late.last()) {
+            (Some(a), Some(b)) if b > a => (late.len() - 1) as f64 / (b - a),
+            _ => 0.0,
+        };
         (rate, s, said, notes)
     }
 
-    /// ICA-218's done on the simulated vehicle: the watched module values (by default knock correction, and the gear and
-    /// lock-up in the transmission's request) are read in every sweep while the others rotate, which is said at the start,
-    /// and the rows a second (said too) stay within `RATE_KEPT` of a recording that watches nothing (as before ICA-218).
+    /// ICA-218's done on the simulated vehicle: the watched module values (by default the gear and lock-up, in the
+    /// transmission's request) are read in every sweep while the others rotate, which is said at the start, and the rows
+    /// a second (said too) stay at `RATE_KEPT` or more of a recording that watches nothing (as before ICA-218). The first
+    /// build kept 0.39 here.
     #[test]
     fn watched_module_values_come_every_sweep_and_the_rest_in_turn() {
-        let (before, old, said_before, _) = paced_drive("unwatched", Some(&[]), 4.0);
+        let (before, old, said_before, _) = paced_drive("unwatched", SimCar::new(), Some(&[]), 6.0);
         assert!(
             said_before[0].contains("nothing watched"),
             "{said_before:?}"
         );
-        let (rate, s, said, notes) = paced_drive("watched", None, 4.0);
+        let (rate, s, said, notes) = paced_drive("watched", SimCar::new(), None, 6.0);
         assert!(
             said[0].contains("every sweep")
-                && said[0].contains("knock correction (700 22 1F01)")
-                && said[0].contains("gear, torque converter lock-up (701 22 1F11)"),
+                && said[0].contains("gear, torque converter lock-up (701 22 1F11)")
+                && !said[0].contains("1F01"),
             "{said:?}"
         );
         let rows = s.t.len();
         assert!(rows >= 8, "{rows} rows");
         let col = |name: &str| s.find(&[name]).unwrap_or_else(|| panic!("{name}"));
         let count = |c: usize| s.cols[c].iter().filter(|v| v.is_some()).count();
-        // watched: in every row (both requests, each carrying a watched value)
-        for name in [
-            "knock correction (700 22 1f01)",
-            "transmission fluid temperature (701 22 1f11)",
-        ] {
-            assert_eq!(count(col(name)), rows, "{name}: {:?}", s.cols[col(name)]);
-        }
+        // watched: in every row
+        let atf = col("transmission fluid temperature (701 22 1f11)");
+        assert_eq!(count(atf), rows, "{:?}", s.cols[atf]);
         // in turn: they still come, less often
         for name in [
+            "knock correction (700 22 1f01)",
             "short-term fuel trim, bank 1 (700 22 1f02)",
             "idle speed control (7e0 21 a7)",
         ] {
             let n = count(col(name));
             assert!(n >= 1 && n < rows, "{name}: {n} of {rows}");
         }
-        // before ICA-218 knock correction came only in its turn
-        let k_old = old.find(&["knock correction (700 22 1f01)"]).unwrap();
-        let old_knocks = old.cols[k_old].iter().filter(|v| v.is_some()).count();
-        assert!(old_knocks < old.t.len(), "{old_knocks} of {}", old.t.len());
+        // before ICA-218 the transmission's request came only in its turn
+        let a_old = old
+            .find(&["transmission fluid temperature (701 22 1f11)"])
+            .unwrap();
+        let old_atf = old.cols[a_old].iter().filter(|v| v.is_some()).count();
+        assert!(old_atf < old.t.len(), "{old_atf} of {}", old.t.len());
         // the rate kept, and said
         assert!(
             rate >= RATE_KEPT * before,
@@ -2114,52 +2256,175 @@ mod tests {
         eprintln!("ICA-218 on the paced simulated vehicle: {before:.2} rows a second before, {rate:.2} watching ({line})");
     }
 
-    /// More watched requests than `PRIORITY_PER_SWEEP`: no sweep reads more than that many, and they take turns, so each
-    /// still comes; a name nothing carries is said; the watch matches ignoring case, spaces and punctuation.
+    /// Review of ICA-218: a module busy for good (7F 22 21 to every read) does not hold the sweep up: its slowdown is
+    /// never waited out, so the standard values keep their pace (no gap of several seconds between rows).
     #[test]
-    fn a_long_watch_list_takes_turns_and_a_name_nothing_carries_is_said() {
+    fn a_busy_module_does_not_hold_the_standard_values_up() {
+        let (rate, s, _, _) = paced_drive("busy", SimCar::new().busy_module(0x701), None, 5.0);
+        let gap = s.t.windows(2).map(|w| w[1] - w[0]).fold(0.0f64, f64::max);
+        // one busy read (four sends, 300 ms apart) can still be in a sweep; waiting out the slowdown (up to 2 s) is not
+        assert!(gap < 2.0, "a gap of {gap:.2} s between rows");
+        assert!(rate >= 1.5, "{rate:.2} rows a second");
+        let atf = s
+            .find(&["transmission fluid temperature (701 22 1f11)"])
+            .unwrap();
+        assert!(s.cols[atf].iter().all(Option::is_none), "busy: no answer");
+        eprintln!(
+            "ICA-218 review, a busy module: {rate:.2} rows a second, the longest gap {gap:.2} s"
+        );
+    }
+
+    /// Review of ICA-218: a link that stops answering during the module requests ends them for that sweep (one time-out,
+    /// not one a request), so the next standard read finds the adapter gone at once.
+    #[test]
+    fn a_link_that_times_out_ends_the_module_requests() {
+        let dir = scratch("mute");
+        let (mut elm, log) = paced(SimCar::new(), Some("221F01"));
+        let mut p = plan(&mut elm, &dir, true);
+        // two watched requests, the engine's first (by module): its time-out must end the sweep's module requests
+        p.modules = p.modules.map(|m| m.watching(&["knock correction", "gear"]));
+        assert_eq!(p.modules.as_ref().unwrap().priority.len(), 2);
+        let mut r = Recorder::start(p).unwrap();
+        let sent = |log: &Arc<Mutex<Vec<String>>>| {
+            log.lock().unwrap().iter().any(|c| c.starts_with("221F01"))
+        };
+        let mut took = Duration::ZERO;
+        for k in 0..5 {
+            let t0 = Instant::now();
+            let s = r.sweep(&mut elm, &[], k as f64).unwrap();
+            took = t0.elapsed();
+            assert!(s.row, "the standard values written");
+            if sent(&log) {
+                break;
+            }
+            std::thread::sleep(moddata::MIN_EVERY);
+        }
+        let log = log.lock().unwrap();
+        let at = log.iter().position(|c| c.starts_with("221F01")).unwrap();
+        assert!(
+            !log[at + 1..]
+                .iter()
+                .any(|c| c.starts_with("22") || c.starts_with("21")),
+            "nothing asked after the time-out: {:?}",
+            &log[at..]
+        );
+        assert!(took < Duration::from_secs(8), "one time-out: {took:?}");
+        drop(log);
+        r.close().unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Review of ICA-218: matching by whole words, one request a module and name (the most often asked, then the shortest),
+    /// never a request asked every minute or less often, at most `PRIORITY_PER_SWEEP` a sweep taking turns, nothing
+    /// re-sent within the pacer's floor, and what found nothing said in the right words.
+    #[test]
+    fn the_watch_picks_its_requests_and_says_what_it_could_not() {
         assert!(
             watched("Lock up state", "lockup") && watched("torque converter lock-up", "lock up")
         );
-        assert!(watched("Shift SW status, parking", "shift sw status"));
-        assert!(watched(
-            "Knock correction, learned value",
-            "KNOCK CORRECTION"
-        ));
-        assert!(!watched("Knock feedback value", "knock correction") && !watched("Gear", ""));
-        let mut m = sim_modules().watching(&["e", "a value nobody has"]);
-        let n = m.priority.len();
-        assert!(n > PRIORITY_PER_SWEEP, "{n}");
-        let said = m.watch_lines();
-        assert!(said[0].contains("4 a sweep in turn"), "{said:?}");
+        assert!(watched("Torque converter lockup", "lock-up"));
+        assert!(!watched("Clock update", "lock up") && !watched("Gearbox oil", "gear"));
         assert!(
-            said[1].contains("\"a value nobody has\"") && said[1].contains("set sim"),
+            watched("Current gear", "gear")
+                && watched("Shift SW status, parking", "shift sw status")
+        );
+        assert!(!watched("Knock feedback value", "knock correction") && !watched("Gear", ""));
+        assert!(watched("Cylinder #1 misfire count", "cylinder 1"));
+        // one request a module: 22 1F06 and 22 1F07 both carry "bytes"; the shorter answer is the one watched
+        let m = sim_modules().watching(&["bytes"]);
+        assert_eq!(m.watching, vec!["22 1F07 (3 bytes) (700 22 1F07)"]);
+        // a request asked every minute or less often is left in turn
+        let mut m = sim_modules();
+        for r in m.set.modules.iter_mut().flat_map(|m| m.requests.iter_mut()) {
+            if r.ident == 0x1F01 {
+                r.every = Some(3600.0);
+            }
+        }
+        let m = m.watching(&["knock correction"]);
+        assert!(m.priority.is_empty());
+        assert!(
+            m.watch_lines()[1]
+                .contains("only in request(s) read every 60 s or less often (700 22 1F01)"),
+            "{:?}",
+            m.watch_lines()
+        );
+        // what found nothing: a name no value has, one only a request the gates leave out carries, a none among names
+        let mut m = sim_modules().watching(&[
+            "knock correction",
+            "fuel trim",
+            "idle speed control",
+            "gear",
+            "a value nobody has",
+            "a value behind a session",
+            "none",
+        ]);
+        let said = m.watch_lines();
+        assert!(said[0].contains("2 a sweep in turn"), "{said:?}");
+        assert!(
+            said.iter()
+                .any(|l| l.contains("no value of the set sim is named \"a value nobody has\"")),
             "{said:?}"
         );
+        assert!(
+            said.iter().any(|l| l.contains(
+                "\"a value behind a session\" is only in request(s) the gates leave out (700 22 1F05)"
+            )),
+            "{said:?}"
+        );
+        assert!(
+            said.iter().any(|l| l.contains("\"none\" was ignored")),
+            "{said:?}"
+        );
+        assert_eq!(m.priority.len(), 4);
+        // two a sweep at most, taking turns: within four sweeps a real adapter's time apart, each comes
         let mut elm = Elm::connect(Box::new(SimCar::new())).unwrap();
         let mut seen = std::collections::BTreeSet::new();
         let mut notes = Vec::new();
         for _ in 0..4 {
-            let sent = m.watched_step(&mut elm, &mut notes, None);
+            let sent: Vec<usize> = m
+                .phase(&mut elm, &mut notes)
+                .into_iter()
+                .map(|x| x.0)
+                .filter(|i| m.priority.contains(i))
+                .collect();
             assert!(
                 !sent.is_empty() && sent.len() <= PRIORITY_PER_SWEEP,
                 "{sent:?}"
             );
-            seen.extend(sent.iter().map(|x| x.0));
-            // a sweep's time on a real adapter: each watched request is due again (the pacer's floor)
+            seen.extend(sent);
             std::thread::sleep(moddata::MIN_EVERY);
         }
         let still: Vec<usize> = m.priority.iter().copied().filter(|i| m.asked[*i]).collect();
         assert!(still.iter().all(|i| seen.contains(i)), "{still:?} {seen:?}");
-        // nothing in turn is watched; watching nothing puts every request back in turn
-        assert!(m
-            .step(&mut elm, &mut notes)
-            .is_none_or(|x| !m.priority.contains(&x.0)));
+        // watching nothing puts every request back in turn
         let m = m.watching::<&str>(&[]);
         assert!(m.priority.is_empty() && m.watch_lines()[0].contains("nothing watched"));
     }
 
-    /// The window's setting and `icarus record`'s default: a name a line, `none` for nothing, the defaults when empty.
+    /// Review of ICA-218: two sweeps in quick succession (a fast adapter) do not send a watched request twice within the
+    /// pacer's floor.
+    #[test]
+    fn a_watched_request_is_not_sent_again_within_the_floor() {
+        let mut m = sim_modules();
+        let watched = m.priority.clone();
+        assert_eq!(watched.len(), 1, "the transmission's request");
+        let mut elm = Elm::connect(Box::new(SimCar::new())).unwrap();
+        let mut notes = Vec::new();
+        let first = m.phase(&mut elm, &mut notes);
+        assert!(first.iter().any(|x| x.0 == watched[0]), "{first:?}");
+        let t = Instant::now();
+        let second = m.phase(&mut elm, &mut notes);
+        assert!(t.elapsed() < moddata::MIN_EVERY);
+        assert!(!second.iter().any(|x| x.0 == watched[0]), "{second:?}");
+        std::thread::sleep(moddata::MIN_EVERY);
+        assert!(m
+            .phase(&mut elm, &mut notes)
+            .iter()
+            .any(|x| x.0 == watched[0]));
+    }
+
+    /// The window's setting and `icarus record`'s default: a name a line, a line beginning with # a comment (a # inside
+    /// a name is part of it), `none` alone for nothing, the defaults when empty.
     #[test]
     fn the_watch_file_reads_back() {
         let dir = scratch("watch");
@@ -2172,7 +2437,12 @@ mod tests {
         save_watch(&path, &[]).unwrap();
         assert!(load_watch(Some(&path)).is_empty(), "none: nothing watched");
         assert_eq!(parse_watch("# only a comment\n\n"), all);
-        assert_eq!(parse_watch(" lock up # the converter\n"), vec!["lock up"]);
+        assert_eq!(
+            parse_watch("Cylinder #1 misfire count\n   # a comment\nnone\ngear\n"),
+            vec!["Cylinder #1 misfire count", "none", "gear"],
+            "none among names is kept (and said ignored)"
+        );
+        assert!(parse_watch("none\n# nothing watched\nNONE\n").is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

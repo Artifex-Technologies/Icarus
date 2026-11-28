@@ -1356,7 +1356,7 @@ pub(crate) mod tests {
         until(
             &erx,
             "the watched values said",
-            &|e| matches!(e, Event::Recording(Rec::Said(l)) if l.contains("knock correction (700 22 1F01)")),
+            &|e| matches!(e, Event::Recording(Rec::Said(l)) if l.contains("torque converter lock-up (701 22 1F11)")),
         );
         until(&erx, "a new connection", &|e| {
             matches!(e, Event::Connected(_))

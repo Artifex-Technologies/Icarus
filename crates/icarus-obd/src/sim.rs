@@ -211,6 +211,8 @@ pub struct SimCar {
     meter_busy: bool,
     /// The engine's UDS side (700) answers its first `22 1F02` with "response pending" (7F 22 78).
     data_busy: bool,
+    /// A module that answers every data read (22) with "busy, repeat request" (7F 22 21): `busy_module`.
+    busy_data: Option<u32>,
     /// The engine runs (`sim`), or the ignition is on with the engine off (`sim:off`).
     engine_on: bool,
     /// Whether the engine runs, asked before each command (`with_engine`, `drive`): a drive's engine off, then running,
@@ -397,6 +399,7 @@ impl SimCar {
             ms: false,
             meter_busy: true,
             data_busy: true,
+            busy_data: None,
             engine_on: true,
             engine_from: None,
             dies_in: None,
@@ -806,6 +809,15 @@ impl SimCar {
     pub fn with_engine(self, running: Engine) -> SimCar {
         SimCar {
             engine_from: Some(running),
+            ..self
+        }
+    }
+
+    /// The same vehicle with module `tx` busy for good: every data read (22) sent to it is answered "busy, repeat request"
+    /// (7F 22 21), as a module working hard can (ICA-218 review: a recording must not wait on it).
+    pub fn busy_module(self, tx: u32) -> SimCar {
+        SimCar {
+            busy_data: Some(tx),
             ..self
         }
     }
@@ -1250,6 +1262,9 @@ impl SimCar {
     /// silence.
     fn module(&mut self, tx: u32, req: &[u8]) -> Option<Vec<u8>> {
         let refuse = |code: u8| Some(vec![0x7F, req[0], code]);
+        if self.busy_data == Some(tx) && req.first() == Some(&0x22) {
+            return refuse(0x21);
+        }
         let engine = self.engine();
         let ms = self.ms;
         if ms && self.make != Make::Ford {

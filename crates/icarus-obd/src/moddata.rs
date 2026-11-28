@@ -1398,6 +1398,21 @@ impl Pacer {
         (self.stop)()
     }
 
+    /// How long `before` would wait now before asking `k` (the least gap, and a busy module's own slowdown), without
+    /// waiting or counting anything: a recording asks first, and leaves a slowed module for a later sweep rather than
+    /// hold its standard values up (ICA-218).
+    pub fn would_wait(&self, k: Key) -> Duration {
+        let now = (self.now)();
+        let mut until = self.last.map(|l| l + self.gap);
+        if let (Some((slow, _)), Some(t)) = (self.slow.get(&k.0), self.last_module.get(&k.0)) {
+            let u = *t + *slow;
+            until = Some(until.map_or(u, |x| x.max(u)));
+        }
+        until
+            .filter(|u| *u > now)
+            .map_or(Duration::ZERO, |u| u - now)
+    }
+
     /// Before a request: waits out the gap, or says why it must not go now.
     fn before(&mut self, k: Key, every: Option<f64>) -> Result<(), Outcome> {
         if let Some(why) = (self.stop)() {

@@ -2854,7 +2854,7 @@ impl App {
         ui.add_space(8.0);
         ui.label("Module values read every sweep");
         ui.add(egui::Label::new(RichText::new(format!(
-            "Part of a value's name, one a line (empty: the defaults; none: every value in turn). The requests carrying them are read every sweep, up to {} a sweep (more take turns); each costs the rows a second a little, the rest stay in turn. icarus record takes this too, unless given --watch.",
+            "Whole words of a value's name, one a line (empty: the defaults; none alone: every value in turn; # starts a comment line). The requests carrying them are read every sweep, up to {} a sweep (more take turns); each costs the rows a second a little, the rest stay in turn. icarus record takes this too, unless given --watch.",
             icarus_obd::drive::PRIORITY_PER_SWEEP
         )).weak()).wrap());
         let edit = ui.add(
@@ -2863,7 +2863,7 @@ impl App {
                 .desired_width(320.0),
         );
         let defaults = ui.button("Defaults").on_hover_text(
-            "Knock feedback and correction, gear, lock-up, the shift lever's switches, sport mode and neutral",
+            "Knock feedback, gear, lock-up, the shift lever's switches and sport mode",
         );
         if defaults.clicked() {
             self.record_watch = watch_field(
@@ -2873,7 +2873,8 @@ impl App {
                     .collect::<Vec<_>>(),
             );
         }
-        if edit.lost_focus() || defaults.clicked() {
+        // kept as it is typed, so `icarus record --auto` (the service) reads the latest whenever it starts a drive
+        if edit.changed() || defaults.clicked() {
             let names = icarus_obd::drive::parse_watch(&self.record_watch);
             if let Some(p) = icarus_obd::drive::watch_path() {
                 if let Err(e) = icarus_obd::drive::save_watch(&p, &names) {
