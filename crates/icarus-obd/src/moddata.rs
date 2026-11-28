@@ -1062,37 +1062,8 @@ pub fn fetch_request(
     r: &RequestDef,
     scope: &Scope,
 ) -> Result<Vec<u8>, Outcome> {
-    if let Err(why) = reachable(m) {
-        return Err(Outcome::Skipped(why.into()));
-    }
-    if let Some(why) = gates.request_refused(m, r) {
-        return Err(Outcome::Skipped(why));
-    }
-    if r.needs_session.is_some() {
-        return Err(Outcome::Skipped(
-            "needs a diagnostic session (Icarus does not open one)".into(),
-        ));
-    }
-    if !r.years.is_empty() {
-        match scope.year {
-            Some(y) if !md::year_in(&r.years, y) => {
-                return Err(Outcome::Skipped(format!("not for {y}")))
-            }
-            None if !scope.all_years => {
-                return Err(Outcome::Skipped(
-                    "for some model years only, and the year is not known (--year or --all-years)"
-                        .into(),
-                ))
-            }
-            _ => {}
-        }
-    }
+    may_send(gates, m, r, scope)?;
     let k = key(m, r);
-    if scope.refused_before.contains(&k) && !scope.retry {
-        return Err(Outcome::Skipped(
-            "this vehicle refused it before (--all asks again)".into(),
-        ));
-    }
     pacer.before(k, r.every)?;
     // `reachable` and the gates hold both to 11 bits
     let (tx, rx) = (m.module.tx, m.module.rx());
@@ -1124,6 +1095,48 @@ pub fn fetch_request(
         },
     );
     out
+}
+
+/// Whether `read_request` would send `r` to `m` at all, before the pacer is asked: every gate (reachable, the module and
+/// request gates, no session, the model years, a refusal kept for this vehicle); the outcome saying why not otherwise. A
+/// recording builds its columns from what passes.
+pub fn may_send(
+    gates: &Gates,
+    m: &ModuleDef,
+    r: &RequestDef,
+    scope: &Scope,
+) -> Result<(), Outcome> {
+    if let Err(why) = reachable(m) {
+        return Err(Outcome::Skipped(why.into()));
+    }
+    if let Some(why) = gates.request_refused(m, r) {
+        return Err(Outcome::Skipped(why));
+    }
+    if r.needs_session.is_some() {
+        return Err(Outcome::Skipped(
+            "needs a diagnostic session (Icarus does not open one)".into(),
+        ));
+    }
+    if !r.years.is_empty() {
+        match scope.year {
+            Some(y) if !md::year_in(&r.years, y) => {
+                return Err(Outcome::Skipped(format!("not for {y}")))
+            }
+            None if !scope.all_years => {
+                return Err(Outcome::Skipped(
+                    "for some model years only, and the year is not known (--year or --all-years)"
+                        .into(),
+                ))
+            }
+            _ => {}
+        }
+    }
+    if scope.refused_before.contains(&key(m, r)) && !scope.retry {
+        return Err(Outcome::Skipped(
+            "this vehicle refused it before (--all asks again)".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// A refusal asking again cannot change in this session: not there (11, 12, 31), security access (33), or a session

@@ -333,6 +333,8 @@ pub fn series(text: &str) -> Result<Series, String> {
         cols: vec![vec![]; names.len()],
         ..Default::default()
     };
+    // a module's raw answers (`"700 22 1F01 answer [hex]"`, drive.rs) are bytes, never a number, even when they look like one
+    let hex: Vec<bool> = names.iter().map(|n| n.ends_with("[hex]")).collect();
     for l in lines {
         let f = split(l);
         let Some(t) = f.first().and_then(|x| x.trim().parse::<f64>().ok()) else {
@@ -340,7 +342,11 @@ pub fn series(text: &str) -> Result<Series, String> {
         };
         s.t.push(t);
         for (i, c) in s.cols.iter_mut().enumerate() {
-            c.push(f.get(i + 1).and_then(|x| x.trim().parse::<f64>().ok()));
+            c.push(
+                f.get(i + 1)
+                    .filter(|_| !hex[i])
+                    .and_then(|x| x.trim().parse::<f64>().ok()),
+            );
         }
     }
     if s.t.is_empty() {

@@ -23,6 +23,7 @@ pub trait Port {
 ///   `sim` or `sim:off`             Icarus's simulated car, engine running or ignition on with the engine off
 ///   `sim:listen`                   a second simulated adapter on the same simulated bus, for listening (ICA-80)
 ///   `sim:j1939`                    a simulated heavy-duty vehicle on J1939, for watching (ICA-94)
+///   `sim:drive`                    the simulated car on a short drive: engine off, running, off (ICA-208)
 ///   `/dev/ttyUSB0` or `/dev/ttyUSB0@115200`   a USB adapter (38400 baud unless given)
 ///   `bt:AA:BB:CC:DD:EE:FF` or `...#2`         a paired Bluetooth adapter, RFCOMM channel 1 unless given
 ///   `tcp:192.168.0.10:35000`       a Wi-Fi adapter
@@ -41,6 +42,8 @@ pub enum Target {
         listen: bool,
         /// `sim:j1939`: a heavy-duty vehicle whose modules talk J1939 (watched on protocol A).
         j1939: bool,
+        /// `sim:drive`: the engine off, then running, then off again (`SimCar::drive`), for `icarus record --auto`.
+        drive: bool,
     },
     Serial {
         path: String,
@@ -244,11 +247,15 @@ impl Target {
             }
             return Ok(Target::J2534(J2534Device::OpenPort(Some(path.to_string()))));
         }
-        if matches!(s, "sim" | "sim:off" | "sim:listen" | "sim:j1939") {
+        if matches!(
+            s,
+            "sim" | "sim:off" | "sim:listen" | "sim:j1939" | "sim:drive"
+        ) {
             return Ok(Target::Sim {
                 engine_on: s != "sim:off",
                 listen: s == "sim:listen",
                 j1939: s == "sim:j1939",
+                drive: s == "sim:drive",
             });
         }
         if let Some(rest) = s.strip_prefix("slcan:") {
@@ -364,6 +371,7 @@ impl Target {
                 ))
             }
             Target::Sim { j1939: true, .. } => Box::new(crate::sim::SimCar::truck()),
+            Target::Sim { drive: true, .. } => Box::new(crate::sim::SimCar::drive()),
             Target::Sim { listen: true, .. } => Box::new(crate::sim::SimCar::listening()),
             Target::Sim { engine_on: true, .. } => Box::new(crate::sim::SimCar::new()),
             Target::Sim { engine_on: false, .. } => Box::new(crate::sim::SimCar::engine_off()),
@@ -736,7 +744,7 @@ impl Port for TcpPort {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     #[test]
     fn a_signal_while_waiting_is_nothing_yet_not_an_error() {
         // a pipe stands in for the serial port; SIGUSR1 (handled, not restarted) interrupts the wait as Ctrl+C does
@@ -1035,7 +1043,7 @@ mod tests {
 
     /// A pseudo-terminal made for a test, standing in for a cable's serial port, its other end kept open as socat keeps
     /// one: (that other end, the port's path).
-    fn pty() -> (OwnedFd, String) {
+    pub(crate) fn pty() -> (OwnedFd, String) {
         let m = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC) };
         assert!(m >= 0, "{}", io::Error::last_os_error());
         let m = unsafe { OwnedFd::from_raw_fd(m) };
@@ -1277,6 +1285,7 @@ mod tests {
                 engine_on: true,
                 listen: false,
                 j1939: false,
+                drive: false,
             }
         );
         assert_eq!(
@@ -1285,6 +1294,7 @@ mod tests {
                 engine_on: false,
                 listen: false,
                 j1939: false,
+                drive: false,
             }
         );
         assert_eq!(

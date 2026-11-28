@@ -15,6 +15,13 @@ use std::time::Duration;
 
 pub const VIN: &str = "5TFICARUSSIM00001";
 
+/// Whether a simulated engine runs now (`SimCar::with_engine`).
+pub type Engine = std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
+
+/// `sim:drive`'s engine: off until this many seconds after the program's first `sim:drive` adapter, running until the
+/// second, then off.
+pub const DRIVE: [f64; 2] = [6.0, 36.0];
+
 /// One bus for every simulated adapter in this program (ICA-80): a simulated adapter that answers a request puts the request
 /// and its answers on it as CAN frames, and one watching the bus (monitor mode) sees them besides the vehicle's own traffic,
 /// as an adapter listening on a Y-splitter sees another tool's requests. (the next line's number, the last lines)
@@ -206,6 +213,11 @@ pub struct SimCar {
     data_busy: bool,
     /// The engine runs (`sim`), or the ignition is on with the engine off (`sim:off`).
     engine_on: bool,
+    /// Whether the engine runs, asked before each command (`with_engine`, `drive`): a drive's engine off, then running,
+    /// then off again, for recording by itself (ICA-208).
+    engine_from: Option<Engine>,
+    /// The adapter's link dies after this many more commands (`dying_after`): unplugged, or a Bluetooth link lost.
+    dies_in: Option<u32>,
     /// How many times `22 1F07` was answered: the brake pedal is pressed for its 30th to 59th answers and its 90th to
     /// 119th (as if someone pressed it twice), for naming by marks (`naming`).
     brake_reads: u32,
@@ -301,6 +313,8 @@ impl SimCar {
             meter_busy: true,
             data_busy: true,
             engine_on: true,
+            engine_from: None,
+            dies_in: None,
             brake_reads: 0,
             extended: Default::default(),
             driven: Default::default(),
@@ -561,6 +575,35 @@ impl SimCar {
             engine_on: false,
             ..SimCar::new()
         }
+    }
+
+    /// The same vehicle with its engine running whenever `running` says so (asked before each command): a test switches it.
+    pub fn with_engine(self, running: Engine) -> SimCar {
+        SimCar {
+            engine_from: Some(running),
+            ..self
+        }
+    }
+
+    /// The same vehicle behind an adapter whose link dies after `commands` more commands: every send and receive fails
+    /// from then on (ICA-112: the recording must go on once the adapter is opened again).
+    pub fn dying_after(self, commands: u32) -> SimCar {
+        SimCar {
+            dies_in: Some(commands),
+            ..self
+        }
+    }
+
+    /// A short drive (`sim:drive`): ignition on with the engine off for the first `DRIVE[0]` seconds of the program, the
+    /// engine running until `DRIVE[1]`, then off again (ignition still on). Every `sim:drive` adapter this program opens
+    /// follows the same clock, so connecting again goes on where the drive was.
+    pub fn drive() -> SimCar {
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        let start = *START.get_or_init(std::time::Instant::now);
+        SimCar::new().with_engine(std::sync::Arc::new(move || {
+            let s = start.elapsed().as_secs_f64();
+            (DRIVE[0]..DRIVE[1]).contains(&s)
+        }))
     }
 
     /// The cluster answers the next write to A002 as taken (6E), but keeps the value with `flip`'s bits flipped; later
@@ -1334,6 +1377,9 @@ impl SimCar {
     }
 
     fn handle(&mut self, cmd: &str) {
+        if let Some(running) = &self.engine_from {
+            self.engine_on = running();
+        }
         let raw = cmd.trim();
         if self.echo {
             self.output.extend(raw.as_bytes());
@@ -1549,6 +1595,15 @@ impl SimCar {
 
 impl Port for SimCar {
     fn send(&mut self, data: &[u8]) -> io::Result<()> {
+        if self.dies_in == Some(0) {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "the simulated adapter's link is gone",
+            ));
+        }
+        if let Some(n) = self.dies_in.as_mut() {
+            *n -= 1;
+        }
         if self.monitoring.is_some() && !data.is_empty() {
             // any character ends monitor mode
             self.monitoring = None;
@@ -1567,6 +1622,12 @@ impl Port for SimCar {
     }
 
     fn recv(&mut self, buf: &mut [u8], _timeout: Duration) -> io::Result<usize> {
+        if self.dies_in == Some(0) && self.output.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "the simulated adapter's link is gone",
+            ));
+        }
         if let Some(t) = self.monitoring {
             if self.output.len() < 4096 {
                 std::thread::sleep(Duration::from_millis(5));

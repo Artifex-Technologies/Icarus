@@ -526,7 +526,8 @@ struct App {
     gauges_on: bool,
     chosen: BTreeSet<u8>,
     history: HashMap<u8, VecDeque<(f64, f64)>>,
-    recorder: Option<logs::Recorder>,
+    /// A drive being recorded by the worker (icarus_obd::drive): its file, values a row and rows so far.
+    recording: Option<Recording>,
     logs: logs::Logs,
     maps: Maps,
 }
@@ -693,7 +694,7 @@ impl App {
             gauges_on: false,
             chosen: [0x0C, 0x05, 0x06, 0x07, 0x44].into_iter().collect(),
             history: HashMap::new(),
-            recorder: None,
+            recording: None,
             logs: logs::Logs::default(),
             maps: Maps::empty(),
             start,
@@ -734,72 +735,83 @@ impl App {
     }
 
     /// While a known adapter does not answer (asleep with the engine off), try again every few seconds.
-    /// What is polled: the chosen values (or the trail gauges', when their page started them), and while recording the
-    /// recording's too (its rest in turn).
+    /// What is polled: the chosen values (or the trail gauges', when their page started them); while recording, the
+    /// recording's sweep reads them besides its own.
     fn send_live(&self) {
         let wanted: Vec<u8> = if self.gauges_on {
             gauges::gauge_pids(self.info.as_ref().map_or(&[][..], |i| &i.live))
         } else {
             self.chosen.iter().copied().collect()
         };
-        let mut fast: Vec<u8> = self
-            .recorder
-            .as_ref()
-            .map(|r| r.fast.clone())
-            .unwrap_or_default();
-        for p in &wanted {
-            if !fast.contains(p) {
-                fast.push(*p);
-            }
-        }
-        let _ = self.tx.send(Cmd::Live(fast));
-        if let Some(r) = &self.recorder {
-            let rest: Vec<u8> = r
-                .rest
-                .iter()
-                .copied()
-                .filter(|p| !wanted.contains(p))
-                .collect();
-            let _ = self.tx.send(Cmd::LiveRotate(rest));
-        }
+        let _ = self.tx.send(Cmd::Live(wanted));
     }
 
-    /// Records a drive: every value the vehicle offers (logs::drive_set), live data started for it.
+    /// Records a drive: every value the vehicle offers and its module data (icarus_obd::drive, in the worker), live data
+    /// started for it.
     fn start_recording(&mut self) {
-        let Some(info) = &self.info else {
+        if self.info.is_none() {
             self.status = "Connect first: a recording starts once the vehicle answers.".into();
             return;
-        };
-        let (fast, rest) = logs::drive_set(&info.live);
+        }
         let gps = (self.record_gps && !self.gps_src.trim().is_empty())
             .then(|| self.gps_src.trim().to_string());
-        match logs::Recorder::start(&fast, &rest, &info.adapter, gps.as_deref()) {
-            Ok(r) => {
-                self.status = format!(
-                    "Recording {} values to {} (the Logs page shows it as it comes in).",
-                    fast.len() + rest.len(),
-                    r.path
-                        .file_name()
-                        .map(|f| f.to_string_lossy().into_owned())
-                        .unwrap_or_default()
-                );
-                self.recorder = Some(r);
-                self.live_on = true;
-                self.send_live();
-            }
-            Err(e) => self.status = format!("Could not record: {e}"),
-        }
+        let _ = self.tx.send(Cmd::Record(Some(worker::RecordStart {
+            gps,
+            quiet: self.levels.record_quiet,
+        })));
+        self.status = "Starting the recording...".into();
+        self.live_on = true;
+        self.send_live();
     }
 
     fn stop_recording(&mut self) {
-        if let Some(r) = self.recorder.take() {
-            self.status = format!(
-                "Saved {} rows to {} (see the Logs page).",
-                r.rows,
-                r.path.display()
-            );
-            if self.live_on {
-                self.send_live();
+        if self.recording.is_some() {
+            let _ = self.tx.send(Cmd::Record(None));
+        }
+    }
+
+    /// What the worker's recording did.
+    fn on_recording(&mut self, r: worker::Rec) {
+        let name = |p: &std::path::Path| {
+            p.file_name()
+                .map(|f| f.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        };
+        match r {
+            worker::Rec::Started { path, values } => {
+                // a new part keeps the rows counted so far
+                let rows = self.recording.as_ref().map_or(0, |r| r.rows);
+                self.status = format!(
+                    "Recording {values} values to {} (the Logs page shows it as it comes in).",
+                    name(&path)
+                );
+                self.recording = Some(Recording { path, values, rows });
+            }
+            worker::Rec::Rows(n) => {
+                if let Some(r) = self.recording.as_mut() {
+                    r.rows = n;
+                }
+            }
+            worker::Rec::Stopped { rows, paths } => {
+                self.recording = None;
+                self.status = format!(
+                    "Saved {rows} rows to {} (see the Logs page).",
+                    paths
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                if self.live_on {
+                    self.send_live();
+                }
+            }
+            worker::Rec::Failed(why) => {
+                if self.recording.take().is_some() {
+                    self.status = format!("The recording ended: {why}");
+                } else {
+                    self.status = format!("Could not record: {why}");
+                }
             }
         }
     }
@@ -811,7 +823,7 @@ impl App {
         if self.last_try.elapsed() >= autoconn::RETRY {
             self.last_try = std::time::Instant::now();
             // a recording in the background has the adapter: show it (Logs follows it) rather than try for the adapter
-            if let Some(p) = logs::recording_now().filter(|_| self.recorder.is_none()) {
+            if let Some(p) = logs::recording_now().filter(|_| self.recording.is_none()) {
                 let name = p
                     .file_name()
                     .map(|f| f.to_string_lossy().into_owned())
@@ -832,7 +844,7 @@ impl App {
             // (single::listen in `new`); nothing makes it writable again
             if let Ok(st) = Start::parse(&args) {
                 if st.record {
-                    if self.link == Link::On && self.recorder.is_none() {
+                    if self.link == Link::On && self.recording.is_none() {
                         self.start_recording();
                     } else {
                         self.start.record = true;
@@ -1025,7 +1037,7 @@ impl App {
                         self.send_live();
                     }
                     // a recording goes on where it was (the adapter dropped and came back), or starts when asked
-                    if self.recorder.is_some() {
+                    if self.recording.is_some() {
                         self.live_on = true;
                         self.send_live();
                         self.status = "Connected again: recording goes on.".into();
@@ -1042,7 +1054,14 @@ impl App {
                     }
                     self.scanning = false;
                     self.live_on = false;
-                    if self.auto && !self.user_off {
+                    if m.contains("speaks to an adapter") {
+                        // one program per adapter: another (icarus record, its service) holds it; said as it is
+                        self.status = format!(
+                            "The adapter is in use: {m}. A recording by icarus record (or its service) holds it: \
+                             systemctl --user stop icarus-record to use it here."
+                        );
+                        self.error = None;
+                    } else if self.auto && !self.user_off {
                         // asleep or out of reach: say so, and try again shortly (keep_trying)
                         self.status = format!(
                             "Waiting for the adapter ({}): start the engine, or switch the ignition on and press its button.",
@@ -1153,10 +1172,8 @@ impl App {
                     };
                     self.module_data = Some(r.map(|b| *b));
                 }
+                Event::Recording(r) => self.on_recording(r),
                 Event::Reading { pid, value, at } => {
-                    if let Some(r) = self.recorder.as_mut() {
-                        r.add(pid, value, at);
-                    }
                     let h = self.history.entry(pid).or_default();
                     h.push_back((at, value));
                     while h.len() > 300 {
@@ -2058,22 +2075,25 @@ impl App {
                 self.gauges_on = false;
                 self.send_live();
             }
-            if let Some((rows, n)) = self.recorder.as_ref().map(|r| (r.rows, r.fast.len() + r.rest.len())) {
+            if let Some((rows, n, file)) = self.recording.as_ref().map(|r| (r.rows, r.values, r.path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default())) {
                 if ui.button("Stop recording").clicked() {
                     self.stop_recording();
                 }
-                ui.label(RichText::new(format!("● recording {n} values, {rows} rows")).color(pal.red));
+                ui.label(RichText::new(format!("● recording {n} values, {rows} rows")).color(pal.red)).on_hover_text(file);
             } else if ui
                 .add_enabled(!self.scanning, egui::Button::new("Record drive"))
                 .on_hover_text(
                     "Record every value the vehicle offers (fuel trims, timing, air flow, throttle and mixture every sweep, \
-                     the rest every few seconds) until stopped, keeping the laptop awake; see it on the Logs page",
+                     the rest every few seconds) and each module's own values (transmission temperature, knock...: the \
+                     vehicle's module-data set, answers kept) until stopped, keeping the laptop awake and going on through \
+                     adapter drops; a tone and a notice when it starts, stalls, resumes and stops (Settings); see it on the \
+                     Logs page",
                 )
                 .clicked()
             {
                 self.start_recording();
             }
-            if self.recorder.is_none() && !self.gps_src.trim().is_empty() {
+            if self.recording.is_none() && !self.gps_src.trim().is_empty() {
                 ui.checkbox(&mut self.record_gps, "with GPS positions")
                     .on_hover_text("Latitude, longitude and GPS speed from the Tools page's GPS source, in the recording's file only");
             }
@@ -2212,7 +2232,7 @@ impl App {
                     self.gauges_on = false;
                     self.live_on = false;
                     // a recording goes on reading its own values
-                    if self.recorder.is_some() {
+                    if self.recording.is_some() {
                         self.send_live();
                     } else {
                         let _ = self.tx.send(Cmd::Live(vec![]));
@@ -2749,6 +2769,20 @@ impl App {
         if t != self.levels.theme {
             self.levels.theme = t;
             self.save_levels();
+        }
+        ui.add_space(14.0);
+        // ICA-209: what a recording tells the driver without a look at the screen
+        ui.label(RichText::new("Recording a drive").strong());
+        let mut sound = !self.levels.record_quiet;
+        ui.checkbox(
+            &mut sound,
+            "A tone and a notice when a recording starts, stalls, resumes and stops",
+        );
+        ui.add(egui::Label::new(RichText::new("Through the desktop's sound and notifications. icarus record has its own: --quiet, or ICARUS_QUIET=1.").weak()).wrap());
+        if sound == self.levels.record_quiet {
+            self.levels.record_quiet = !sound;
+            self.save_levels();
+            let _ = self.tx.send(Cmd::RecordQuiet(self.levels.record_quiet));
         }
         ui.add_space(18.0);
 
@@ -5512,13 +5546,20 @@ fn main() -> eframe::Result {
     )
 }
 
+/// What the Live data page shows of a recording the worker writes.
+pub(crate) struct Recording {
+    pub(crate) path: std::path::PathBuf,
+    pub(crate) values: usize,
+    pub(crate) rows: usize,
+}
+
 /// A home of a test's own for the tests that run the worker (it reads the config folder and writes the vehicle's record,
 /// code history and folder): HOME and the XDG folders point into a temp folder, one such test at a time, and the folder
 /// is removed after. The variables are not put back: a worker still running after a failed test can then only write into
 /// the removed folder, never the real home.
 #[cfg(test)]
 pub(crate) struct TestHome {
-    dir: std::path::PathBuf,
+    pub(crate) dir: std::path::PathBuf,
     _one_at_a_time: std::sync::MutexGuard<'static, ()>,
 }
 

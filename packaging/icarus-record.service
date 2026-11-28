@@ -1,0 +1,29 @@
+# Icarus records every drive by itself (ICA-208): waits for the adapter (the one named in ICARUS_ADAPTER, else the one the
+# window connected to last), starts recording once the engine runs, and ends each drive once the engine has been off for
+# two minutes. Recordings go to ~/Documents/Icarus/logs, as the window's Record drive.
+#
+# Installed off. To turn it on:   systemctl --user enable --now icarus-record
+# To name the adapter:            systemctl --user edit icarus-record   ([Service] Environment=ICARUS_ADAPTER=/dev/ttyUSB0@115200)
+# Silent (no sounds or notices):  the same, with Environment=ICARUS_QUIET=1
+# What it did:                    journalctl --user -u icarus-record
+#
+# While it holds the adapter, the window cannot have it (one program per adapter): stop the service first
+# (systemctl --user stop icarus-record), or record from here and watch the Logs page.
+
+[Unit]
+Description=Icarus: record each drive by itself
+Documentation=https://github.com/Artifex-Technologies/Icarus
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/icarus record --auto
+# SIGTERM ends the recording between two sweeps and closes its file
+KillSignal=SIGTERM
+TimeoutStopSec=20
+Restart=on-failure
+RestartSec=15
+Nice=5
+
+[Install]
+WantedBy=default.target

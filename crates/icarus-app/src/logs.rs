@@ -1,5 +1,5 @@
-//! The Logs page and recording: drives recorded as CSV (by the window's Record button on the Live data page, or by `icarus obd
-//! live --csv`), listed, summarized (icarus-obd's drivelog, the same summary assistants read through `icarus mcp`'s drive_logs)
+//! The Logs page: drives recorded as CSV (by the window's Record button on the Live data page or `icarus record`, both through
+//! icarus-obd's `drive` recorder, or by `icarus obd live --csv`), listed, summarized (icarus-obd's drivelog, the same summary assistants read through `icarus mcp`'s drive_logs)
 //! and drawn: stacked charts on one time line (fuel trims of both banks, engine speed and road speed, throttle, the rear
 //! oxygen sensors, timing, air flow, coolant), with a line under the pointer that reads every chart at that moment. The
 //! Compare view puts two drives or more side by side at matching conditions (icarus-obd's drivelog::compare, the same
@@ -8,33 +8,8 @@
 use eframe::egui::{self, vec2, Color32, CornerRadius, RichText, Sense, Stroke};
 use icarus_obd::drivelog::compare::{self, Comparison, Table};
 use icarus_obd::drivelog::{self, Series, Summary};
-use icarus_obd::j1979;
-use std::collections::HashMap;
-use std::io::Write;
 use std::path::PathBuf;
 use yggdrasil_ui::theme;
-
-/// The values read every sweep while recording a drive, when the vehicle offers them: what fuel trims, timing, air flow,
-/// the throttle and the mixture are read from. Engine speed comes first: a row is written each time it comes round.
-pub const DRIVE_FAST: &[u8] = &[
-    0x0C, 0x0D, 0x04, 0x06, 0x07, 0x08, 0x09, 0x0E, 0x10, 0x11, 0x49, 0x15, 0x19, 0x44, 0x24, 0x28,
-    0x34, 0x38,
-];
-
-/// A drive's values from what the vehicle offers: (read every sweep, the rest read in turn).
-pub fn drive_set(offered: &[u8]) -> (Vec<u8>, Vec<u8>) {
-    let fast: Vec<u8> = DRIVE_FAST
-        .iter()
-        .copied()
-        .filter(|p| offered.contains(p))
-        .collect();
-    let rest = offered
-        .iter()
-        .copied()
-        .filter(|p| !fast.contains(p))
-        .collect();
-    (fast, rest)
-}
 
 /// Whether miles per hour, °F and psi are the custom here (the locale's measurement: en_US and the few like it).
 pub fn us_units() -> bool {
@@ -137,135 +112,9 @@ fn unit_of(name: &str) -> &str {
         .unwrap_or("")
 }
 
-/// Recording the live values to a CSV, one row per sweep.
-pub struct Recorder {
-    pub path: PathBuf,
-    file: std::fs::File,
-    /// Read every sweep, and the rest read in turn (two a sweep).
-    pub fast: Vec<u8>,
-    pub rest: Vec<u8>,
-    pids: Vec<u8>,
-    row: HashMap<u8, f64>,
-    t0: Option<f64>,
-    pub rows: usize,
-    /// `systemd-inhibit ... cat` reading from a pipe of ours: the laptop doesn't sleep (closing the lid included) while a
-    /// drive is recorded, until the recording stops or the window ends however it ends (the pipe closes, cat and the
-    /// inhibitor end with it).
-    awake: Option<std::process::Child>,
-    /// A GPS receiver followed while recording (opted into): its columns after the values.
-    gps: Option<icarus_obd::gps::Follower>,
-}
-
-impl Drop for Recorder {
-    fn drop(&mut self) {
-        if let Some(mut c) = self.awake.take() {
-            drop(c.stdin.take());
-            let _ = c.kill();
-            let _ = c.wait();
-        }
-    }
-}
-
-/// `drive-YYYY-MM-DD_HHMMSS.csv` from the local time.
-fn file_name() -> String {
-    format!("drive-{}.csv", stamp())
-}
-
 /// Now, for a file's name: 2026-11-24_221500.
 pub fn stamp() -> String {
-    std::process::Command::new("date")
-        .arg("+%Y-%m-%d_%H%M%S")
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "now".into())
-}
-
-impl Recorder {
-    /// Starts a recording in ~/Documents/Icarus/logs: `fast` read every sweep, `rest` in turn; its first line names the
-    /// `adapter` (drivelog::adapter_line).
-    pub fn start(
-        fast: &[u8],
-        rest: &[u8],
-        adapter: &str,
-        gps: Option<&str>,
-    ) -> Result<Recorder, String> {
-        // the receiver first: a source that does not open stops the recording before a file is made
-        let gps = gps.map(icarus_obd::gps::Follower::start).transpose()?;
-        let pids: Vec<u8> = fast
-            .iter()
-            .chain(rest)
-            .copied()
-            .filter(|p| j1979::pid(*p).is_some())
-            .collect();
-        let dir = drivelog::folders()
-            .into_iter()
-            .next()
-            .ok_or("no home folder")?;
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let path = dir.join(file_name());
-        let mut file =
-            std::fs::File::create(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let mut names: Vec<String> = pids
-            .iter()
-            .filter_map(|p| j1979::pid(*p))
-            .map(|d| format!("{} [{}]", d.name, d.unit))
-            .collect();
-        if gps.is_some() {
-            names.extend(icarus_obd::gps::COLUMNS.iter().map(|c| c.to_string()));
-        }
-        writeln!(
-            file,
-            "{}\n{}",
-            drivelog::adapter_line(adapter),
-            drivelog::csv_header(&names)
-        )
-        .map_err(|e| e.to_string())?;
-        let awake = std::process::Command::new("systemd-inhibit")
-            .args([
-                "--what=sleep:idle:handle-lid-switch",
-                "--who=Icarus",
-                "--why=Recording a drive",
-                "cat",
-            ])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .ok();
-        Ok(Recorder {
-            path,
-            file,
-            fast: fast.to_vec(),
-            rest: rest.to_vec(),
-            pids,
-            row: HashMap::new(),
-            t0: None,
-            rows: 0,
-            awake,
-            gps,
-        })
-    }
-
-    /// One reading: when the first value of a sweep comes round again, the sweep before it becomes a row.
-    pub fn add(&mut self, pid: u8, value: f64, at: f64) {
-        if !self.pids.contains(&pid) {
-            return;
-        }
-        let t0 = *self.t0.get_or_insert(at);
-        if pid == self.pids[0] && !self.row.is_empty() {
-            let mut values: Vec<Option<f64>> =
-                self.pids.iter().map(|p| self.row.get(p).copied()).collect();
-            if let Some(g) = &self.gps {
-                values.extend(g.cells());
-            }
-            let _ = writeln!(self.file, "{}", drivelog::csv_row(at - t0, &values));
-            self.rows += 1;
-            self.row.clear();
-        }
-        self.row.insert(pid, value);
-    }
+    icarus_obd::drive::stamp()
 }
 
 /// What the page holds: the recordings, the one chosen, and it read.
@@ -1083,31 +932,7 @@ mod tests {
     }
 
     #[test]
-    fn a_recording_writes_one_row_per_sweep() {
-        let dir = std::env::temp_dir().join(format!("icarus-rec-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("r.csv");
-        let file = std::fs::File::create(&path).unwrap();
-        let mut r = Recorder {
-            path: path.clone(),
-            file,
-            fast: vec![0x0C, 0x06],
-            rest: vec![],
-            pids: vec![0x0C, 0x06],
-            row: HashMap::new(),
-            t0: None,
-            rows: 0,
-            awake: None,
-            gps: None,
-        };
-        r.add(0x0C, 650.0, 10.0);
-        r.add(0x06, -1.5, 10.2);
-        r.add(0x0C, 660.0, 10.5);
-        r.add(0x06, 0.8, 10.7);
-        r.add(0x0C, 670.0, 11.0);
-        drop(r);
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(text, "0.50,650.00,-1.50\n1.00,660.00,0.80\n");
+    fn a_value_under_the_pointer_and_a_unit() {
         let s = Series {
             t: vec![0.0, 1.0, 2.0],
             names: vec!["a".into()],
@@ -1115,14 +940,7 @@ mod tests {
         };
         assert_eq!(value_at(&s, 0, 1.9), Some(3.0));
         assert_eq!(value_at(&s, 0, 0.4), None);
-        let (fast, rest) = drive_set(&[0x05, 0x06, 0x0C, 0x2F, 0x34]);
-        assert_eq!(
-            (fast, rest),
-            (vec![0x0C, 0x06, 0x34], vec![0x05, 0x2F]),
-            "engine speed first, the rest in turn"
-        );
         assert_eq!(unit_of("Vehicle speed [km/h]"), "km/h");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

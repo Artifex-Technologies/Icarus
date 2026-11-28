@@ -14,6 +14,7 @@ use icarus_obd::{
 mod data;
 mod gps;
 mod mcp;
+mod record;
 
 use std::io::Write;
 use std::process::ExitCode;
@@ -49,6 +50,20 @@ Vehicle, through an OBD adapter (read-only: nothing is cleared or written):
   icarus obd pids  --adapter A               the live values each module offers, and what they mean
   icarus obd live  --adapter A [PID...] [--every MS] [--count N] [--csv FILE] [--gps SOURCE] [--all]
                                              watch live values (PIDs in hex, e.g. 0C 05 06 07); Ctrl+C stops
+  icarus record [--adapter A] [--auto [--off-after SECS]] [--quiet] [--gps SOURCE] [--no-modules]
+                                             record a drive (~/Documents/Icarus/logs, as the window's Record drive):
+                                             every value the vehicle offers, the fast ones every sweep, and each
+                                             module's own values (the set obd data would choose) in turn, their answers
+                                             kept. From now until Ctrl+C or SIGTERM; --auto waits for the adapter and
+                                             for the engine to run, and ends each drive once the engine has been off
+                                             or the adapter gone for SECS (120). The adapter is held by this program
+                                             alone; adapter glitches do not end it; an engine started again goes into a
+                                             part file. A sound and a desktop notification when it starts, stalls (no
+                                             rows for 10 s), resumes and stops, unless --quiet or ICARUS_QUIET=1. Its
+                                             service: systemctl --user enable --now icarus-record
+  icarus record redecode FILE.csv [--set SET] [--year YYYY] [--out NEW.csv]
+                                             a recording's module values decoded again from its kept answers with the
+                                             set as it is now (a better definition), into a new file
   icarus obd scan  --adapter A [--make NAME] [--sweep]
                                              find every module (ABS, airbags, cluster...): identity and trouble codes,
                                              as dealer tools do. The make comes from the VIN (or --make, see icarus
@@ -251,6 +266,7 @@ fn main() -> ExitCode {
         Some("recalls") => cmd_recalls(&args[1..]),
         Some("import") => data::cmd_import(&args[1..]),
         Some("data") => data::cmd_data(&args[1..]),
+        Some("record") => record::cmd_record(&args[1..]),
         Some("mcp") => mcp::serve(),
         Some("devices") => cmd_devices(),
         Some("-h" | "--help" | "help") | None => {
@@ -303,6 +319,9 @@ fn parse_args(a: &[String], with_value: &[&str]) -> Result<Args, String> {
             "--position",
             "--keep",
             "--signed",
+            "--auto",
+            "--quiet",
+            "--no-modules",
         ]
         .contains(&a[i].as_str())
         {
@@ -867,22 +886,38 @@ fn adapter_target(args: &Args) -> Result<(String, Target), String> {
 fn connect(args: &Args) -> Result<Box<dyn Link>, String> {
     let (spec, target) = adapter_target(args)?;
     eprintln!("connecting to {spec}...");
-    if let Target::J2534(dev) = &target {
-        return icarus_obd::passthru::open_link(dev).map_err(|e| format!("{spec}: {e}"));
-    }
-    if let Target::Can(ifn) = &target {
-        let sock = socketcan::open(ifn).map_err(|x| x.to_string())?;
-        // the interface's bit rate from the kernel (ICA-68): shown, and 250 kbit/s named as such
-        return icarus_obd::canlink::CanLink::connect(sock, ifn)
-            .map(|l| Box::new(l.with_bitrate(socketcan::bitrate(ifn))) as Box<dyn Link>)
-            .map_err(|x| x.to_string());
-    }
-    let (elm, note) =
-        icarus_obd::elm::connect_target(&target).map_err(|e| format!("{spec}: {e}"))?;
+    let (link, note) = open_link(&spec, &target)?;
     if let Some(n) = note {
         eprintln!("note: {n}");
     }
-    Ok(Box::new(elm) as Box<dyn Link>)
+    Ok(link)
+}
+
+/// The link `target` names, opened and set up, with a note on how (a serial adapter found at another speed), saying nothing.
+pub(crate) fn open_link(
+    spec: &str,
+    target: &Target,
+) -> Result<(Box<dyn Link>, Option<String>), String> {
+    if let Target::J2534(dev) = target {
+        return icarus_obd::passthru::open_link(dev)
+            .map(|l| (l, None))
+            .map_err(|e| format!("{spec}: {e}"));
+    }
+    if let Target::Can(ifn) = target {
+        let sock = socketcan::open(ifn).map_err(|x| x.to_string())?;
+        // the interface's bit rate from the kernel (ICA-68): shown, and 250 kbit/s named as such
+        return icarus_obd::canlink::CanLink::connect(sock, ifn)
+            .map(|l| {
+                (
+                    Box::new(l.with_bitrate(socketcan::bitrate(ifn))) as Box<dyn Link>,
+                    None,
+                )
+            })
+            .map_err(|x| x.to_string());
+    }
+    let (elm, note) =
+        icarus_obd::elm::connect_target(target).map_err(|e| format!("{spec}: {e}"))?;
+    Ok((Box::new(elm) as Box<dyn Link>, note))
 }
 
 /// The Linux CAN interface to watch: `--can can0`, or `--adapter can0` / `can:can0`.

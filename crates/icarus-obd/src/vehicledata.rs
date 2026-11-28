@@ -139,14 +139,21 @@ impl VehicleValues {
     }
 }
 
-/// Reads the vehicle's module data once: every module of the chosen set with data requests, or only the one whose label
-/// or request ID is `module` ("701", "750.2A"). Values in US units when `us`.
-pub fn read(
-    link: &mut dyn Link,
-    profiles: &[Profile],
-    module: Option<&str>,
-    us: bool,
-) -> Result<VehicleValues, String> {
+/// The set chosen for the vehicle on `link`, as `read` and a drive recording use it: the VIN read, its model year, make
+/// and model (the garage), the vehicle's state (what it refused before), and the set as `choose` picks it, gated for the
+/// vehicle (`on_vehicle`).
+pub struct Chosen {
+    pub set: Loaded,
+    pub scope: Scope,
+    pub state: State,
+    pub state_path: Option<std::path::PathBuf>,
+    /// The state names another set than the one chosen now (it is to be kept).
+    pub new_set: bool,
+    pub notes: Vec<String>,
+}
+
+/// Chooses the vehicle's module-data set (`Chosen`): one VIN read, the user's sets and the vehicle's state read.
+pub fn choose_for(link: &mut dyn Link, profiles: &[Profile]) -> Result<Chosen, String> {
     let vin_s = j1979::vin(link).map_err(|e| e.to_string())?;
     let vin = vin_s.as_deref();
     let year = vin.and_then(|v| vin::decode(v).ok()).and_then(|d| d.year);
@@ -194,6 +201,32 @@ pub fn read(
         refused_before: state.refused_keys(),
         retry: false,
     };
+    Ok(Chosen {
+        set,
+        scope,
+        state,
+        state_path,
+        new_set,
+        notes,
+    })
+}
+
+/// Reads the vehicle's module data once: every module of the chosen set with data requests, or only the one whose label
+/// or request ID is `module` ("701", "750.2A"). Values in US units when `us`.
+pub fn read(
+    link: &mut dyn Link,
+    profiles: &[Profile],
+    module: Option<&str>,
+    us: bool,
+) -> Result<VehicleValues, String> {
+    let Chosen {
+        set,
+        scope,
+        mut state,
+        state_path,
+        new_set,
+        notes,
+    } = choose_for(link, profiles)?;
     let today = report::now()[..10].to_string();
     let wanted = |m: &icarus_core::moddata::ModuleDef| match module {
         None => !m.requests.is_empty(),

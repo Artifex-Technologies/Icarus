@@ -5,7 +5,8 @@
 //! Read-Only in the Garage stays read-only at every level.
 //!
 //! The same file keeps the window's other settings (ICA-79, the gear's page): the units (Imperial, Metric, both side by side,
-//! or the system's custom) and the theme (the desktop's, dark or light). Every setting is written each time, so changing
+//! or the system's custom), the theme (the desktop's, dark or light) and whether a recording's tones and notices are
+//! silenced (ICA-209). Every setting is written each time, so changing
 //! one never drops another.
 
 use std::path::PathBuf;
@@ -89,6 +90,8 @@ pub struct Levels {
     pub theme: Theme,
     /// The first-start welcome was seen (ICA-78).
     pub welcomed: bool,
+    /// A recording's tones and notices silenced (ICA-209).
+    pub record_quiet: bool,
 }
 
 impl Levels {
@@ -121,6 +124,7 @@ impl Levels {
                 match k.trim() {
                     "advanced" => l.advanced = on,
                     "welcomed" => l.welcomed = on,
+                    "record_quiet" => l.record_quiet = on,
                     "tuning" => l.tuning = on,
                     "units" => {
                         l.units = Units::ALL
@@ -146,12 +150,13 @@ impl Levels {
 
     pub fn text(self) -> String {
         format!(
-            "# Icarus's window: its levels (Basic unless these say otherwise), units and theme\nadvanced = {}\ntuning = {}\nunits = \"{}\"\ntheme = \"{}\"\nwelcomed = {}\n",
+            "# Icarus's window: its levels (Basic unless these say otherwise), units and theme\nadvanced = {}\ntuning = {}\nunits = \"{}\"\ntheme = \"{}\"\nwelcomed = {}\nrecord_quiet = {}\n",
             self.advanced,
             self.advanced && self.tuning,
             self.units.word(),
             self.theme.word(),
-            self.welcomed
+            self.welcomed,
+            self.record_quiet
         )
     }
 

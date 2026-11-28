@@ -579,9 +579,32 @@ After its first minute, `obd live` stops asking for a value the vehicle never an
 value at every reading while both changed (a vehicle may list PID 46 ambient and never fill it, or answer PID 3D catalyst
 bank 2 with a copy of 3C), and says which it dropped; the column stays in the log, empty, and the other values are read more often. Two values
 that only sat at the same number (fuel trims at 0 while the engine warms) are not copies and stay. `--all` asks every value
-the whole time. The window's Record drive does the same for the values it reads in turn: one asked at least three times in
-the first minute without an answer is no longer read, and the status line says so (copies are not judged there: those
+the whole time. A recording (the window's Record drive, `icarus record`) does the same for the values it reads in turn: one
+asked at least three times in the first minute without an answer is no longer read, and the status line says so (copies are not judged there: those
 values are read at different moments).
+
+### Recording drives with no window
+
+```sh
+icarus record --adapter /dev/ttyUSB0@115200    # record now, until Ctrl+C (or SIGTERM)
+icarus record --auto                           # wait for the adapter and the engine; one recording per drive
+systemctl --user enable --now icarus-record    # the same as a user service (installed off)
+icarus record redecode ~/Documents/Icarus/logs/drive-2026-11-27_183005.csv   # module values decoded again
+```
+
+`icarus record` and the window's Record drive use one recorder: every standard value the vehicle offers (fuel trims,
+timing, air flow, throttle and mixture every sweep, the rest in turn) and each module's own values (transmission fluid
+temperature, knock correction...) from the vehicle's module-data set, as `icarus obd data` chooses it, one request at a
+time through module data's gates and pacer. Each module request's raw answer is kept in the file beside its decoded
+values, so `icarus record redecode` decodes an old drive again once the set is improved. `--auto` (what the service runs)
+waits for the adapter (`--adapter`, `ICARUS_ADAPTER`, else the one the window connected to last), starts once the engine
+runs, and ends the drive once the engine has been off, or the adapter gone, for `--off-after` seconds (120); an engine
+started again within that time goes into a part file of the same drive. The adapter is held by one program at a time:
+while the service has it, the window says it is in use. A glitch does not end a recording: a failed sweep is tried again,
+and after a few the adapter is opened again and the same file goes on. A tone and a desktop notification say when a
+recording starts, stalls (no rows for 10 s), resumes and stops (with its row count); `--quiet` or `ICARUS_QUIET=1` silences
+them for `icarus record`, and the window's Settings for the window. `sim:drive` is a simulated drive (engine off, running,
+then off) for trying it.
 
 `scan` and `module` work like a dealer tool (Techstream, FORScan): they talk to each module directly in UDS (ISO 14229) or
 the older KWP2000 that many Toyota modules still use, not only to the engine's standard OBD-II side. A guard in the code lets

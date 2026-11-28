@@ -24,8 +24,9 @@ Used by: Sarina (through a definition file named by `SARINA_MCP_FILE`, opt-in).
 
 `cargo build --release -p icarus -p icarus-app` gives `icarus` (the command) and `icarus-app` (the window); `cargo test
 --workspace` must pass with no vehicle, adapter or network, and with HOME pointed at a scratch folder. `packaging/` holds the
-desktop entry, the icons and the udev rule `70-icarus-tuners.rules` (the person at the seat may open the listed tuners and
-cables). `VERSION` is Icarus's own version. Used by: Labyrinth OS's `icarus-git` recipe (and through it Agora's catalog).
+desktop entry, the icons, the udev rule `70-icarus-tuners.rules` (the person at the seat may open the listed tuners and
+cables) and the user service `icarus-record.service` (`icarus record --auto`; installed to `/usr/lib/systemd/user/`, never
+enabled by the package: I turn it on with `systemctl --user enable --now icarus-record`). `VERSION` is Icarus's own version. Used by: Labyrinth OS's `icarus-git` recipe (and through it Agora's catalog).
 
 ### Vehicle profiles (`crates/icarus-obd/vehicles/*.toml`, `~/.config/icarus/vehicles/`)
 

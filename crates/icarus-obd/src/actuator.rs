@@ -349,6 +349,16 @@ pub fn catch_interrupt() {
     }
 }
 
+/// The same for SIGTERM (what `systemctl stop` and a shutdown send): a recording closes its file before the program ends.
+pub fn catch_terminate() {
+    unsafe {
+        libc::signal(
+            libc::SIGTERM,
+            on_interrupt as *const () as libc::sighandler_t,
+        );
+    }
+}
+
 pub fn interrupted() -> bool {
     INTERRUPTED.load(std::sync::atomic::Ordering::SeqCst)
 }

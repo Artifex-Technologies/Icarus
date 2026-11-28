@@ -41,6 +41,41 @@ impl Inhibit {
         }
         Ok(Inhibit(Some(child)))
     }
+
+    /// While a drive is recorded (ICA-208): sleep, idle actions and the lid switch blocked, as the window's recording always
+    /// did, but not a shutdown asked for (the recording's file is closed then). Fails when logind refuses (a service outside
+    /// the seat's session may not be let block sleep): a recording goes on without it.
+    pub fn recording(why: &str) -> Result<Inhibit, String> {
+        if cfg!(test) {
+            return Ok(Inhibit(None));
+        }
+        let mut child = Command::new("systemd-inhibit")
+            .args(recording_args(why))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("could not keep the computer awake (systemd-inhibit: {e})"))?;
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        if let Ok(Some(st)) = child.try_wait() {
+            return Err(format!(
+                "could not keep the computer awake (systemd-inhibit ended: {st})"
+            ));
+        }
+        Ok(Inhibit(Some(child)))
+    }
+}
+
+/// The systemd-inhibit command line while recording a drive.
+pub fn recording_args(why: &str) -> Vec<String> {
+    vec![
+        "--what=sleep:idle:handle-lid-switch".into(),
+        "--who=Icarus".into(),
+        format!("--why={why}"),
+        "--mode=block".into(),
+        "sleep".into(),
+        "infinity".into(),
+    ]
 }
 
 impl Drop for Inhibit {

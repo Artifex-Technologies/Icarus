@@ -21,11 +21,14 @@ pub enum Cmd {
         profile: Option<String>,
         sweep: bool,
     },
-    /// Poll these live values (empty stops); any rotation (LiveRotate) ends with it.
+    /// Poll these live values (empty stops). While a drive is recorded, the recording's sweep reads them besides its own.
     Live(Vec<u8>),
-    /// Also poll these, two of them after each sweep of the live values in turn (a recording: every value the vehicle
-    /// offers, with the ones that change fast read every sweep and the rest every few seconds).
-    LiveRotate(Vec<u8>),
+    /// Record a drive (`icarus_obd::drive`, the recorder `icarus record` uses): every value the vehicle offers, the fast ones
+    /// every sweep and the rest in turn, and each module's own values; None stops it and closes the file. It goes on through
+    /// adapter glitches (ICA-112: the adapter is opened again by the worker).
+    Record(Option<RecordStart>),
+    /// The recording's sounds and notifications silenced (true) or not (ICA-209).
+    RecordQuiet(bool),
     /// Read everything again and save a report (with every module when true).
     Report(bool),
     /// Read each module's own values once (icarus_obd::vehicledata): every module of the set that fits, read only.
@@ -67,6 +70,34 @@ pub enum Cmd {
     },
     TestHold,
     TestStop,
+}
+
+/// How a recording is started from the window.
+#[derive(Clone, Debug, Default)]
+pub struct RecordStart {
+    /// A GPS receiver followed (the Tools page's source), its columns in the file only.
+    pub gps: Option<String>,
+    /// No sound or notification (the window's settings).
+    pub quiet: bool,
+}
+
+/// What the recording is doing, for the Live data page.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Rec {
+    /// Started into this file, with this many values a row.
+    Started {
+        path: std::path::PathBuf,
+        values: usize,
+    },
+    /// Rows written so far.
+    Rows(usize),
+    /// Stopped (asked, or the vehicle changed): the rows and every part's file.
+    Stopped {
+        rows: usize,
+        paths: Vec<std::path::PathBuf>,
+    },
+    /// Could not start, or could not close cleanly: why.
+    Failed(String),
 }
 
 /// One connection to a vehicle, as a write's confirmation names it (ICA-105): its number (the worker counts one each time it
@@ -242,13 +273,15 @@ pub enum Event {
         value: f64,
         at: f64,
     },
+    Recording(Rec),
 }
 
 /// How long a recording's values read in turn are watched before one never answered stops being read (ICA-87).
-#[cfg(not(test))]
 const PRUNE_AFTER_S: f64 = icarus_obd::prune::WATCH_S;
-#[cfg(test)]
-const PRUNE_AFTER_S: f64 = 2.0;
+
+/// Failed sweeps in a row before a recording opens the adapter again (ICA-112), and how often it tries while it is gone.
+const GLITCHES: u32 = 3;
+const REOPEN: Duration = Duration::from_secs(3);
 
 /// The worker: commands from `rx`, what it found to `tx`. `fence` gives the key modules' fence when a bus watch starts
 /// (`icarus_obd::fence::current`; a test gives its own, so no test reads the home folder through it).
@@ -299,10 +332,12 @@ pub(crate) fn run_with(
     let mut connection: Option<Connection> = None;
     let mut connections: u64 = 0;
     let mut live: Vec<u8> = Vec::new();
-    let mut rotate: Vec<u8> = Vec::new();
-    let mut rotate_at = 0usize;
-    // a recording's values read in turn that never answer stop being read after its first minute (ICA-87)
-    let mut unanswered = icarus_obd::prune::Unanswered::new(PRUNE_AFTER_S);
+    // the values the vehicle offers (as connected), a drive being recorded, and what it tells the driver (ICA-209)
+    let mut offered: Vec<u8> = Vec::new();
+    let mut recorder: Option<icarus_obd::drive::Recorder> = None;
+    let mut notifier = icarus_obd::notify::Notifier::system(false);
+    let mut glitches = 0u32;
+    let mut reopened = Instant::now();
     let mut test: Option<actuator::Running> = None;
     let mut last_hold = Instant::now();
     let mut last_watch = Instant::now();
@@ -327,7 +362,7 @@ pub(crate) fn run_with(
                     .collect(),
             ));
         }
-        let busy = test.is_some() || (!live.is_empty() && elm.is_some());
+        let busy = test.is_some() || recorder.is_some() || (!live.is_empty() && elm.is_some());
         // the vehicle's record: written every few seconds while busy, and whenever the worker is about to wait
         if let Some(e) = elm.as_mut() {
             outcomes.extend(e.take_outcomes());
@@ -360,8 +395,9 @@ pub(crate) fn run_with(
                 Ok(c) => Some(c),
                 Err(RecvTimeoutError::Timeout) => None,
                 Err(RecvTimeoutError::Disconnected) => {
-                    // the window is gone: hand control back before the thread ends
+                    // the window is gone: hand control back before the thread ends, and close the recording's file
                     end_test(&mut elm, &mut test, "the window closed", &send);
+                    stop_recording(&mut recorder, &mut notifier, &send);
                     return;
                 }
             }
@@ -417,6 +453,12 @@ pub(crate) fn run_with(
                 send(Event::Status(format!("Connecting to {spec}...")));
                 match connect(open, &spec, &profiles) {
                     Ok((mut e, mut info)) => {
+                        offered = info.live.clone();
+                        // a recording goes on through a new connection to the same vehicle, never into another's
+                        if recorder.as_ref().is_some_and(|r| r.vin != info.vin) {
+                            stop_recording(&mut recorder, &mut notifier, &send);
+                        }
+                        glitches = 0;
                         vin = info.vin.clone();
                         connections += 1;
                         info.connection = Connection {
@@ -437,6 +479,7 @@ pub(crate) fn run_with(
                 }
             }
             Some(Cmd::Disconnect) => {
+                stop_recording(&mut recorder, &mut notifier, &send);
                 elm = None;
                 vin = None;
                 connection = None;
@@ -455,14 +498,36 @@ pub(crate) fn run_with(
                 }
             }
             Some(Cmd::Live(pids)) => {
-                rotate.clear();
-                unanswered = icarus_obd::prune::Unanswered::new(PRUNE_AFTER_S);
                 live = pids;
             }
-            Some(Cmd::LiveRotate(pids)) => {
-                rotate = pids;
-                rotate_at = 0;
-                unanswered = icarus_obd::prune::Unanswered::new(PRUNE_AFTER_S);
+            Some(Cmd::RecordQuiet(q)) => notifier.quiet = q,
+            Some(Cmd::Record(None)) => stop_recording(&mut recorder, &mut notifier, &send),
+            Some(Cmd::Record(Some(how))) => {
+                if recorder.is_some() {
+                    continue;
+                }
+                let Some(e) = elm.as_mut() else {
+                    send(Event::Recording(Rec::Failed(
+                        "connect first: a recording starts once the vehicle answers".into(),
+                    )));
+                    continue;
+                };
+                notifier.quiet = how.quiet;
+                match start_recording(e, &offered, &profiles, &how, vin.clone()) {
+                    Ok((r, notes)) => {
+                        for n in notes {
+                            send(Event::Status(n));
+                        }
+                        notifier.started(start.elapsed().as_secs_f64(), &r.name());
+                        send(Event::Recording(Rec::Started {
+                            path: r.path().map(|p| p.to_path_buf()).unwrap_or_default(),
+                            values: r.values(),
+                        }));
+                        glitches = 0;
+                        recorder = Some(r);
+                    }
+                    Err(why) => send(Event::Recording(Rec::Failed(why))),
+                }
             }
             Some(Cmd::Report(scan)) => {
                 let Some(e) = elm.as_mut() else { continue };
@@ -749,23 +814,96 @@ pub(crate) fn run_with(
                     }
                 }
             }
+            None if recorder.is_some() => {
+                let t = start.elapsed().as_secs_f64();
+                notifier.tick(t);
+                let Some(e) = elm.as_mut() else {
+                    // ICA-112: the adapter dropped while recording: opened again every few seconds, the same recording
+                    // going on once it answers (a new connection, so no earlier confirmation carries over)
+                    if reopened.elapsed() >= REOPEN && !spec.is_empty() {
+                        reopened = Instant::now();
+                        if let Ok((mut e, mut info)) = connect(open, &spec, &profiles) {
+                            if recorder.as_ref().is_some_and(|r| r.vin != info.vin) {
+                                stop_recording(&mut recorder, &mut notifier, &send);
+                            }
+                            offered = info.live.clone();
+                            vin = info.vin.clone();
+                            connections += 1;
+                            info.connection = Connection {
+                                number: connections,
+                                vin: vin.clone(),
+                            };
+                            connection = Some(info.connection.clone());
+                            if let Some(v) = vin.as_deref() {
+                                if let Ok(p) = icarus_obd::record::path(v) {
+                                    e.remember(&icarus_obd::record::load_in(&p));
+                                }
+                            }
+                            glitches = 0;
+                            elm = Some(e);
+                            send(Event::Connected(Box::new(info)));
+                        }
+                    } else {
+                        std::thread::sleep(Duration::from_millis(80));
+                    }
+                    continue;
+                };
+                let r = recorder.as_mut().expect("recording");
+                match r.sweep(e, &live, t) {
+                    Ok(mut s) => {
+                        glitches = 0;
+                        for (pid, value) in &s.values {
+                            send(Event::Reading {
+                                pid: *pid,
+                                value: *value,
+                                at: t,
+                            });
+                        }
+                        for n in std::mem::take(&mut s.notes) {
+                            send(Event::Status(n));
+                        }
+                        if let Some(p) = s.new_part.take() {
+                            send(Event::Status(format!(
+                                "The engine started again: recording goes on in {}.",
+                                p.file_name()
+                                    .map(|f| f.to_string_lossy().into_owned())
+                                    .unwrap_or_default()
+                            )));
+                            send(Event::Recording(Rec::Started {
+                                path: p,
+                                values: r.values(),
+                            }));
+                        }
+                        if s.row {
+                            notifier.row(t, s.running() == Some(false));
+                            send(Event::Recording(Rec::Rows(r.rows)));
+                        } else {
+                            // nothing answered (the ignition off?): not at full speed
+                            std::thread::sleep(Duration::from_millis(150));
+                        }
+                    }
+                    Err(err) => {
+                        glitches += 1;
+                        if matches!(err, ObdError::Io(_)) || glitches >= GLITCHES {
+                            elm = None;
+                            connection = None;
+                            reopened = Instant::now();
+                            send(Event::Status(format!(
+                                "The adapter stopped answering ({err}): the recording goes on once it is back."
+                            )));
+                        } else {
+                            std::thread::sleep(Duration::from_millis(150));
+                        }
+                    }
+                }
+            }
             None => {
                 let Some(e) = elm.as_mut() else { continue };
-                let mut sweep = live.clone();
-                let mut turn = Vec::new();
-                for _ in 0..rotate.len().min(2) {
-                    let p = rotate[rotate_at % rotate.len()];
-                    sweep.push(p);
-                    turn.push(p);
-                    rotate_at += 1;
-                }
                 // up to six values a request on CAN (j1979::read_many)
-                let answered = match j1979::read_many(e, &sweep) {
+                match j1979::read_many(e, &live) {
                     Ok(all) => {
-                        let mut got = Vec::new();
                         for (pid, r) in all {
                             if let Some(x) = r.iter().find(|x| x.from == "7E8").or(r.first()) {
-                                got.push(pid);
                                 send(Event::Reading {
                                     pid,
                                     value: x.value,
@@ -773,36 +911,80 @@ pub(crate) fn run_with(
                                 });
                             }
                         }
-                        Some(got)
                     }
-                    Err(ObdError::NoData) => Some(Vec::new()),
+                    Err(ObdError::NoData) => {}
                     Err(err) => {
                         live.clear();
                         send(Event::Failed(err.to_string()));
-                        None
-                    }
-                };
-                if let Some(answered) = answered.filter(|_| !turn.is_empty()) {
-                    let t = start.elapsed().as_secs_f64();
-                    unanswered.see(t, &turn, &answered);
-                    if let Some(gone) = unanswered.decide(t).filter(|g| !g.is_empty()) {
-                        rotate.retain(|p| !gone.contains(p));
-                        let names: Vec<String> = gone
-                            .iter()
-                            .map(|p| match j1979::pid(*p) {
-                                Some(d) => format!("PID {p:02X} ({})", d.name),
-                                None => format!("PID {p:02X}"),
-                            })
-                            .collect();
-                        send(Event::Status(format!(
-                            "Recording: {} never answered in the first minute and is no longer read (its column stays empty)",
-                            names.join(", ")
-                        )));
                     }
                 }
             }
         }
     }
+}
+
+/// Starts a recording on the open connection: the values the vehicle offers, its module data (the set chosen as `icarus obd
+/// data` chooses it; none when no set fits, said), the GPS when asked; and what to say about it.
+fn start_recording(
+    e: &mut Elm,
+    offered: &[u8],
+    profiles: &[Profile],
+    how: &RecordStart,
+    vin: Option<String>,
+) -> Result<(icarus_obd::drive::Recorder, Vec<String>), String> {
+    use icarus_obd::moddata::{self, Pacer};
+    let mut notes = Vec::new();
+    // module data's pacer, stopping for nothing but the recording's end (this recording owns the adapter)
+    fn never() -> Option<String> {
+        None
+    }
+    let modules = match icarus_obd::vehicledata::choose_for(e, profiles) {
+        Ok(c) => {
+            notes.push(format!(
+                "Recording module data from the set {} too (read in turn, its answers kept).",
+                c.set.set.name
+            ));
+            Some(icarus_obd::drive::Modules::new(
+                c.set,
+                c.scope,
+                Pacer::new(Instant::now, std::thread::sleep, never).with_gap(moddata::MIN_GAP),
+            ))
+        }
+        Err(why) => {
+            notes.push(format!("Recording standard values only: {why}"));
+            None
+        }
+    };
+    let dir = icarus_obd::drivelog::folders()
+        .into_iter()
+        .next()
+        .ok_or("no home folder")?;
+    let plan = icarus_obd::drive::Plan {
+        offered: offered.to_vec(),
+        adapter: icarus_obd::link::Link::adapter(e),
+        modules,
+        gps: how.gps.clone(),
+        dir,
+        keep_awake: !cfg!(test),
+        vin,
+    };
+    let r = icarus_obd::drive::Recorder::start_pruning(plan, PRUNE_AFTER_S)?;
+    Ok((r, notes))
+}
+
+/// Ends a recording, its file closed; says so (and how many rows), or why it could not be closed.
+fn stop_recording(
+    recorder: &mut Option<icarus_obd::drive::Recorder>,
+    notifier: &mut icarus_obd::notify::Notifier,
+    send: &impl Fn(Event),
+) {
+    let Some(r) = recorder.take() else { return };
+    let (rows, name) = (r.rows, r.name());
+    notifier.stopped(rows, &name);
+    send(Event::Recording(match r.close() {
+        Ok(paths) => Rec::Stopped { rows, paths },
+        Err(e) => Rec::Failed(format!("the recording's file was not closed cleanly: {e}")),
+    }));
 }
 
 /// Ends a running test: control handed back, the session left; says so either way.
@@ -1019,64 +1201,82 @@ pub(crate) mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    /// ICA-87: a recording on the simulated vehicle with PID 3D (which it never answers) among the values read in turn: after
-    /// the first watch (2 s in tests, a minute in use) the worker says 3D is no longer read and asks for it no more; 46,
-    /// which it answers, stays.
+    /// ICA-208/112 through the window's worker: Record drive writes rows with standard and module columns, goes on when the
+    /// adapter dies (opened again by the worker: the same file), and Stop closes it with its row count.
     #[test]
-    fn a_recording_stops_reading_a_value_that_never_answers() {
-        // the simulated vehicle's record goes to a home of the test's own, not the real one
-        let home = crate::TestHome::new("worker-prune");
+    fn a_recording_through_the_window_goes_on_after_the_adapter_drops() {
+        let home = crate::TestHome::new("worker-record");
         let (ctx, crx) = mpsc::channel();
         let (etx, erx) = mpsc::channel();
-        let worker =
-            std::thread::spawn(move || run(crx, etx, icarus_obd::fence::Fence::default, || {}));
+        let opens = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let o = opens.clone();
+        let worker = std::thread::spawn(move || {
+            let open = move |spec: &str| -> Result<Elm, String> {
+                assert_eq!(spec, "sim");
+                let n = o.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                // the first connection dies a little into the recording
+                let car = if n == 0 {
+                    icarus_obd::sim::SimCar::new().dying_after(400)
+                } else {
+                    icarus_obd::sim::SimCar::new()
+                };
+                Elm::connect(Box::new(car)).map_err(|e| e.to_string())
+            };
+            run_with(
+                crx,
+                etx,
+                icarus_obd::fence::Fence::default,
+                || {},
+                &open,
+                &|| Ok(()),
+            )
+        });
         ctx.send(Cmd::Connect("sim".into())).unwrap();
-        let until = |what: &str, ok: &mut dyn FnMut(&Event) -> bool| {
-            let end = Instant::now() + Duration::from_secs(30);
-            while Instant::now() < end {
-                if let Ok(e) = erx.recv_timeout(Duration::from_millis(200)) {
-                    if ok(&e) {
-                        return e;
-                    }
-                }
-            }
-            panic!("no {what}");
+        until(&erx, "connection", &|e| matches!(e, Event::Connected(_)));
+        ctx.send(Cmd::Record(Some(RecordStart {
+            gps: None,
+            quiet: true,
+        })))
+        .unwrap();
+        let seen = until(&erx, "the start", &|e| {
+            matches!(
+                e,
+                Event::Recording(Rec::Started { .. }) | Event::Recording(Rec::Failed(_))
+            )
+        });
+        let Some(Event::Recording(Rec::Started { path, values })) = seen.last() else {
+            panic!("not started");
         };
-        until("connection", &mut |e| matches!(e, Event::Connected(_)));
-        ctx.send(Cmd::Live(vec![0x0C])).unwrap();
-        ctx.send(Cmd::LiveRotate(vec![0x3D, 0x46, 0x05])).unwrap();
-        let Event::Status(s) = until(
-            "note",
-            &mut |e| matches!(e, Event::Status(s) if s.starts_with("Recording:")),
-        ) else {
+        let path = path.clone();
+        assert!(path.starts_with(&home.dir), "{path:?}");
+        assert!(*values > 20, "{values}");
+        until(&erx, "a new connection", &|e| {
+            matches!(e, Event::Connected(_))
+        });
+        until(
+            &erx,
+            "rows after it",
+            &|e| matches!(e, Event::Recording(Rec::Rows(n)) if *n > 100),
+        );
+        ctx.send(Cmd::Record(None)).unwrap();
+        let seen = until(&erx, "the end", &|e| {
+            matches!(e, Event::Recording(Rec::Stopped { .. }))
+        });
+        let Some(Event::Recording(Rec::Stopped { rows, paths })) = seen.last() else {
             unreachable!()
         };
+        assert_eq!(paths, &vec![path.clone()], "one file through the drop");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let s = icarus_obd::drivelog::series(&text).unwrap();
+        assert_eq!(s.t.len(), *rows);
+        assert!(s.find(&["engine speed [rpm]"]).is_some());
         assert!(
-            s.contains("PID 3D") && !s.contains("PID 46") && !s.contains("PID 05"),
-            "{s}"
+            s.find(&["knock correction (700 22 1f01)"]).is_some()
+                && s.find(&["700 22 1f01 answer [hex]"]).is_some(),
+            "module values and their answers: {:?}",
+            s.names
         );
-        // what goes onto the bus from now on: never 3D again, 46 still (the first batch is the sweep that decided)
-        until("the deciding sweep's requests", &mut |e| {
-            matches!(e, Event::Sent(_))
-        });
-        let mut asked_3d = false;
-        let mut asked_46 = false;
-        let end = Instant::now() + Duration::from_secs(3);
-        while Instant::now() < end {
-            if let Ok(Event::Sent(v)) = erx.recv_timeout(Duration::from_millis(100)) {
-                for (_, _, b) in v {
-                    if b.first() == Some(&0x01) {
-                        asked_3d |= b[1..].contains(&0x3D);
-                        asked_46 |= b[1..].contains(&0x46);
-                    }
-                }
-            }
-        }
-        assert!(
-            !asked_3d && asked_46,
-            "3D asked: {asked_3d}, 46 asked: {asked_46}"
-        );
-        ctx.send(Cmd::Live(Vec::new())).unwrap();
+        assert!(opens.load(std::sync::atomic::Ordering::SeqCst) >= 2);
         drop(ctx);
         worker.join().unwrap();
         drop(home);

@@ -20,11 +20,10 @@ fn remembered_path() -> Option<PathBuf> {
     Some(base.join("icarus/adapter"))
 }
 
-/// The adapter that last connected (one line, as `--adapter` takes it), when there is one.
+/// The adapter that last connected (one line, as `--adapter` takes it), when there is one: the same file `icarus record
+/// --auto` takes its known adapter from.
 pub fn remembered() -> Option<String> {
-    let t = std::fs::read_to_string(remembered_path()?).ok()?;
-    let a = t.lines().next()?.trim().to_string();
-    (!a.is_empty() && a != "sim").then_some(a)
+    icarus_obd::drive::remembered_adapter()
 }
 
 /// Keeps `spec` as the adapter to use next time (never the simulated vehicle).
