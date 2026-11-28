@@ -1,14 +1,3 @@
 name = "Nissan / Infiniti"
 wmi = ["JN", "1N", "3N", "5N1"]
-notes = "Only the OBD-II side and the airbag module are listed so far; --sweep finds the rest."
-
-# The airbag (SRS) module, listed so it is fenced by its address (identity and codes read, nothing else: no clearing, test,
-# setting or routine, no module data), whatever a sweep or a file calls it. Request 752, answering from 772 (request
-# + 0x20): the "ID Query" / "ID Response" table of the Nissan Leaf CAN bus messages README
-# (github.com/dalathegreat/leaf_can_bus_messages, "What about active CAN-polling?", the AIRBAG row). Seen on the Leaf
-# there, not yet by Icarus on any Nissan.
-[[module]]
-tx = 0x752
-rx = 0x772
-name = "airbags (SRS)"
-kind = "airbag"
+notes = "Only the OBD-II side is listed so far; --sweep finds the rest."

@@ -551,7 +551,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             dir.join("kart.toml"),
-            "name = \"Kart\"\n\
+            "name = \"Kart\"\n[[module]]\ntx = 0x7E0\nname = \"engine\"\n\
              [[setting]]\nname = \"Mirror fold\"\nmodule = 0x7D5\nprotocol = \"uds\"\nid = 0x1001\nvalues = { on = [1], off = [0] }\n\
              [[test]]\nname = \"Horn\"\nmodule = 0x7D6\nprotocol = \"uds\"\nid = 0x2001\n\
              [[service]]\nname = \"Window relearn\"\nmodule = 0x750\nroutine = 0x3001\n\

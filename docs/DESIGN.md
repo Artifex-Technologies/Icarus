@@ -50,7 +50,13 @@ bidirectional shop scanner, a tuning suite and a bus analyser: on Linux, for man
 The smaller writes (clearing codes, actuator tests, settings, service routines) each have their own module and allow-list,
 keep what was there first and have a way back; flashing and coding open only when the conditions below are built.
 
-**The airbag list** (ICA-108, `actuator::is_airbag_at`): airbag modules by request and answer ID, 11- and 29-bit CAN (Nissan's 752/772 and Honda's 18DA53F1/18DAF153 added, each with its public source in the code and the profile), and K-line and DoIP addresses (none confirmed yet), checked by actuator tests, clearing, settings, service routines, module data and the as-built sweep. A 29-bit or K-line module whose kind is not known gets identity only on any make, since the list knows few such addresses. GM's and Stellantis' airbag addresses stay out until a public source confirms them; until then their modules of unknown kind get identity only.
+**The airbag list** (ICA-108, `actuator::is_airbag_at`): airbag modules by request and answer ID, 11- and 29-bit CAN (Nissan's 752/772 and Honda's 18DA53F1/18DAF153 added, each with its public source in the code; Honda's also in its
+profile, Nissan's not: one Leaf-only source must not lift the unknown-kind caution for every Nissan and Infiniti, my
+decision of 2026-11-28, so Nissan keeps it), VW's 715 answering from 77F as its profile has it, and K-line and DoIP addresses (none confirmed yet), checked by actuator tests, clearing, settings, service routines, module data and the as-built sweep. A 29-bit or K-line module whose kind is not known gets identity only on any make, since the list knows few such addresses. GM's and Stellantis' airbag addresses stay out until a public source confirms them; until then their modules of unknown kind get identity only. The same caution holds for every write (ICA-200): where
+the vehicle's profile names no airbag module on 11-bit CAN (or the make is not known), an actuator test, a setting, a
+service routine or a clear aimed at a module the profile does not name is refused: a profile's entry is left out when the
+profiles load, a learned one is not added to the user's file, and at the moment of the write (the make picked by the VIN
+read then) nothing is sent to the module.
 
 **The key modules' fence** (ICA-101, `crates/icarus-obd/src/fence.rs`). Immobilizer, smart-key and certification
 modules are fenced by address, whatever a definition calls itself: a profile's `[[module]]` or a module-data file's

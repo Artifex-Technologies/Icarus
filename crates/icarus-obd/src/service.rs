@@ -166,6 +166,8 @@ pub fn run(link: &mut dyn Link, s: &ServiceDef, wired: bool) -> Result<String, S
     }
     battery_holds(link, MIN_VOLTS, "a service routine")?;
     conditions_hold(link, &s.conditions)?;
+    // where the vehicle's profile names no airbag module, not on a module it does not name (ICA-200)
+    crate::vehicles::caution_holds(link, s.module, s.rx(), "a service routine")?;
     let _awake = crate::power_guard::Inhibit::take(&format!("Service: {}", s.name)).ok();
     if s.extended {
         send(link, s, &[0x10, 0x03])?;

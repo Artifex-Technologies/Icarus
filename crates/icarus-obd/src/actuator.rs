@@ -247,11 +247,15 @@ const AIRBAG_WORDS: &[&str] = &[
 const AIRBAG_ACRONYMS: &[&str] = &[
     "orc", "acu", "sdm", "sir", "ocs", "ods", "ocm", "rcm", "acsm", "mrs",
 ];
-/// Airbag and occupant-detection modules on CAN: (request ID, answer ID), each as a built-in profile names it.
-/// - Toyota/Subaru/Mazda 780 and 781, Ford RCM 737, VW 715, Hyundai/Kia 7D2: request IDs in the profiles, the answer
-///   taken as request + 8.
+/// Airbag and occupant-detection modules on CAN: (request ID, answer ID).
+/// - Toyota and Subaru 780, Toyota 781, Ford and Mazda RCM 737, Hyundai/Kia 7D2: request IDs in the profiles, which
+///   give no answer ID, so it is taken as request + 8.
+/// - VW 715, answering from 77F as the VW profile has it (its modules answer 6A above their request ID); request + 8
+///   (71D), which the list held before, stays fenced too.
 /// - Nissan 752, answering from 772: the "ID Query" and "ID Response" table of the Nissan Leaf CAN bus messages README
-///   (github.com/dalathegreat/leaf_can_bus_messages, "What about active CAN-polling?", the AIRBAG row).
+///   (github.com/dalathegreat/leaf_can_bus_messages, "What about active CAN-polling?", the AIRBAG row). Fenced here by
+///   ID on every make, but not named in the Nissan profile: one Leaf-only source must not lift the unknown-kind caution
+///   for every Nissan and Infiniti (my decision, 2026-11-28), so Nissan keeps it.
 /// - Honda 18DA53F1, answering from 18DAF153: module address 53 is "SRS airbags" in the Honda Civic Type R (FL5)
 ///   diagnostic reference (github.com/Caldis/fl5-can-signals, its module table), which addresses a module as request
 ///   18DA<module>F1 and answer 18DAF1<module> (ISO 15765-4's normal fixed addressing, the tester at F1).
@@ -263,6 +267,7 @@ const SRS_CAN: &[(u32, u32)] = &[
     (0x780, 0x788),
     (0x781, 0x789),
     (0x737, 0x73F),
+    (0x715, 0x77F),
     (0x715, 0x71D),
     (0x7D2, 0x7DA),
     (0x752, 0x772),
@@ -462,6 +467,8 @@ pub fn start(elm: &mut dyn Link, def: &TestDef, value: f64) -> Result<Running, S
     crate::lock::writes_allowed(elm)?;
     battery_holds(elm, MIN_VOLTS, "an actuator test")?;
     conditions_hold(elm, &def.conditions)?;
+    // where the vehicle's profile names no airbag module, not on a module it does not name (ICA-200)
+    crate::vehicles::caution_holds(elm, def.module, def.rx(), "an actuator test")?;
     let session = def.protocol == Protocol::Uds;
     if session {
         send(elm, def, &[0x10, 0x03])?;
@@ -578,12 +585,13 @@ mod tests {
     /// ICA-108: the leads' airbag modules are on the list by request and answer ID, 29-bit included: Nissan's 752
     /// (answering from 772) and Honda's 18DA53F1 (answering from 18DAF153); a K-line or DoIP address is its own kind of
     /// address, not a CAN ID. A test, a setting and a routine aimed at Nissan's, by its request ID or its answer ID, are
-    /// refused with nothing sent; aimed at Honda's 29-bit one, they cannot be written into a profile (these entries take
-    /// 11-bit IDs), so the file is refused when it loads.
+    /// refused by the list with nothing sent; aimed at Honda's 29-bit one, they cannot be written into a profile (these
+    /// entries take 11-bit IDs), so the file is refused when it loads. VW's 715 answers from 77F, as its profile has it.
     #[test]
     fn writes_to_the_leads_airbag_modules_are_refused() {
-        for id in [0x752, 0x772, 0x18DA_53F1, 0x18DA_F153] {
+        for id in [0x752, 0x772, 0x18DA_53F1, 0x18DA_F153, 0x715, 0x77F] {
             assert!(is_airbag(id, ""), "{id:X}");
+            assert!(is_airbag_at(Address::Can(id), ""), "{id:X}");
             assert!(airbag_address(Address::Can(id)), "{id:X}");
         }
         assert!(
@@ -627,11 +635,18 @@ mod tests {
                 ),
             ] {
                 let why = why.unwrap_or_else(|| panic!("{what} at {module:X} went"));
-                assert!(why.contains("airbag"), "{what} at {module:X}: {why}");
+                // by the airbag list itself (the simulated vehicle is Toyota-like, whose profile names its airbag
+                // module, so the unknown-kind caution does not apply)
+                assert!(
+                    why.contains("airbag and occupant-detection") && !why.contains("could be"),
+                    "{what} at {module:X}: {why}"
+                );
             }
             assert!(e.take_sent().is_empty(), "nothing sent");
         }
         assert!(!log.exists(), "nothing logged as changed");
+        // Honda's 29-bit one cannot be aimed at by these entries at all: they take 11-bit IDs, so the file is refused
+        // whatever the airbag list says (the list itself is asserted above)
         for entry in [
             "[[test]]\nname = \"Horn\"\nmodule = 0x18DA53F1\nprotocol = \"uds\"\nid = 0x2001\n",
             "[[setting]]\nname = \"Chime\"\nmodule = 0x18DA53F1\nprotocol = \"uds\"\nid = 0x1001\nvalues = { on = [1], off = [0] }\n",

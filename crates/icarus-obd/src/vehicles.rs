@@ -333,7 +333,131 @@ pub fn load(dir: Option<&Path>) -> (Vec<Profile>, Vec<String>) {
             );
         }
     }
+    // and an entry the airbag caution keeps off (ICA-200): on a make whose profile names no airbag module on 11-bit CAN,
+    // a test, setting or routine aimed at a module the profile does not name could be aimed at the airbag module
+    let cautioned: Vec<(usize, Vec<Cautioned>)> = all
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (i, cautioned_entries(p, &all)))
+        .filter(|(_, c)| !c.is_empty())
+        .collect();
+    for (i, refused) in cautioned {
+        let p = &mut all[i];
+        let out = |what: &str, name: &str| refused.iter().any(|r| r.0 == what && r.1 == name);
+        p.tests.retain(|t| !out("test", &t.name));
+        p.settings.retain(|s| !out("setting", &s.name));
+        p.services.retain(|s| !out("service", &s.name));
+        problems.extend(
+            refused.iter().map(|(what, name, why)| {
+                format!("{}: {what} \"{name}\": {why} (left out)", p.source)
+            }),
+        );
+    }
     (all, problems)
+}
+
+/// An entry the airbag caution keeps off: ("test", "setting" or "service"; its name; why).
+type Cautioned = (&'static str, String, String);
+
+/// Each test, setting and service routine of `p` that the airbag caution keeps off on its make (ICA-200,
+/// `moddata::Gates::write_caution` with `all` the profiles): (what, its name, why).
+fn cautioned_entries(p: &Profile, all: &[Profile]) -> Vec<Cautioned> {
+    let tests = p.tests.iter().map(|t| ("test", &t.name, t.module, t.rx()));
+    let settings = p
+        .settings
+        .iter()
+        .map(|s| ("setting", &s.name, s.module, s.rx()));
+    let services = p
+        .services
+        .iter()
+        .map(|s| ("service", &s.name, s.module, s.rx()));
+    tests
+        .chain(settings)
+        .chain(services)
+        .filter_map(|(what, name, tx, rx)| {
+            caution_words(all, Some(&p.id), tx, rx).map(|why| (what, name.clone(), why))
+        })
+        .collect()
+}
+
+/// Why a test, setting or routine aimed at the module at `tx`/`rx` on a vehicle of `make` is refused by what the profiles
+/// say (ICA-200: `moddata::Gates::write_caution`), if it is.
+pub fn caution_words(profiles: &[Profile], make: Option<&str>, tx: u16, rx: u16) -> Option<String> {
+    use crate::moddata::Caution;
+    match crate::moddata::Gates::write_caution(profiles, make, tx.into(), rx.into())? {
+        Caution::Airbag => Some(format!(
+            "refused: a vehicle profile names {tx:03X} as an airbag or occupant-detection module, and Icarus never \
+             tests it, changes its settings or runs a routine in it"
+        )),
+        Caution::Unknown(why) => Some(format!(
+            "{why}; Icarus tests, changes settings of and runs routines in a module of unknown kind only once the \
+             vehicle profile names it (a [[module]] in ~/.config/icarus/vehicles/)"
+        )),
+    }
+}
+
+/// The airbag caution at the moment of a write (ICA-200), for an actuator test, a setting or a service routine aimed at
+/// the module at `tx`/`rx` (`what` says which, for the action log): the vehicle's make is the one its VIN, read now,
+/// picks from the profiles as they stand (`current`), and with no VIN or no profile for it the make is not known, so a
+/// module of unknown kind is refused. Only the VIN is read; nothing is sent to the module.
+pub fn caution_holds(
+    link: &mut dyn crate::link::Link,
+    tx: u16,
+    rx: u16,
+    what: &str,
+) -> Result<(), String> {
+    let profiles = current();
+    let make = crate::j1979::vin(link)
+        .ok()
+        .flatten()
+        .and_then(|v| for_vin(&profiles, &v).map(|p| p.id.clone()));
+    match caution_words(&profiles, make.as_deref(), tx, rx) {
+        None => Ok(()),
+        Some(why) => {
+            crate::audit::log(&format!(
+                "{what} on {tx:03X} refused: it could be the airbag module"
+            ));
+            Err(why)
+        }
+    }
+}
+
+/// The profiles as they stand: the built-in ones and the home folder's (`load(user_dir())`), read again when the last
+/// reading is more than a few seconds old. In this crate's tests, the test's own (`profiles_for_test`) or the built-in
+/// ones: tests never read the home folder.
+#[cfg(not(test))]
+pub fn current() -> Vec<Profile> {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    static LAST: Mutex<Option<(Instant, Vec<Profile>)>> = Mutex::new(None);
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, p)) = last.as_ref() {
+        if at.elapsed() < Duration::from_secs(5) {
+            return p.clone();
+        }
+    }
+    let p = load(user_dir().as_deref()).0;
+    *last = Some((Instant::now(), p.clone()));
+    p
+}
+
+/// In tests: the test's own profiles (`profiles_for_test`), else the built-in ones.
+#[cfg(test)]
+pub fn current() -> Vec<Profile> {
+    FOR_TEST
+        .with(|t| t.borrow().clone())
+        .unwrap_or_else(builtin)
+}
+
+#[cfg(test)]
+thread_local! {
+    static FOR_TEST: std::cell::RefCell<Option<Vec<Profile>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Sets this test thread's profiles (None: the built-in ones again).
+#[cfg(test)]
+pub(crate) fn profiles_for_test(p: Option<Vec<Profile>>) {
+    FOR_TEST.with(|t| *t.borrow_mut() = p);
 }
 
 /// Each test, setting and service routine of `p` aimed at a key module of `fence`, with the reason.
@@ -402,6 +526,13 @@ fn merge(base: &mut Profile, user: Profile) {
             None => base.settings.push(t),
         }
     }
+    // service routines too (they were dropped: a routine learned on a built-in make never loaded)
+    for t in user.services {
+        match base.services.iter_mut().find(|b| b.name == t.name) {
+            Some(b) => *b = t,
+            None => base.services.push(t),
+        }
+    }
     base.source = user.source;
 }
 
@@ -430,6 +561,10 @@ pub fn add_test_to_user_file(profile_id: &str, entry: &str) -> Result<PathBuf, S
         .next()
     {
         return Err(format!("the new entry: {why}"));
+    }
+    // a learned entry on a make whose profile names no airbag module, aimed at a module it does not name (ICA-200)
+    if let Some((what, name, why)) = cautioned_entries(&new, &current()).into_iter().next() {
+        return Err(format!("the new entry: {what} \"{name}\": {why}"));
     }
     let dir = user_dir().ok_or("no config folder")?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -824,6 +959,157 @@ mod tests {
         }
     }
 
+    /// ICA-200 for tests, settings and routines: where the make's profile names no airbag module (GM's, a new make's), an
+    /// entry aimed at a module the profile does not name is left out when the profiles load (said), a new entry for such a
+    /// module is not added to the user's file, and at the moment of the write one is refused after the VIN read with no
+    /// write sent. An entry on a module the profile names (GM's 7E0, the new make's 7E0) stays; on Toyota, whose profile
+    /// names its airbag module, every entry stays and the simulated vehicle's chime, oil-life reset and throttle test go as
+    /// before.
+    #[test]
+    fn entries_on_a_module_of_unknown_kind_are_refused_where_the_profile_names_no_airbag_module() {
+        let dir =
+            std::env::temp_dir().join(format!("icarus-vehicles-ica200-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let setting = |name: &str, module: u16| {
+            format!("[[setting]]\nname = \"{name}\"\nmodule = 0x{module:03X}\nprotocol = \"uds\"\nid = 0x1001\nvalues = {{ on = [1], off = [0] }}\n")
+        };
+        let test = |name: &str, module: u16| {
+            format!("[[test]]\nname = \"{name}\"\nmodule = 0x{module:03X}\nprotocol = \"uds\"\nid = 0x2001\n")
+        };
+        let service = |name: &str, module: u16| {
+            format!("[[service]]\nname = \"{name}\"\nmodule = 0x{module:03X}\nroutine = 0x3001\n")
+        };
+        std::fs::write(
+            dir.join("gm.toml"),
+            format!(
+                "{}{}{}",
+                setting("Door chime", 0x7A4),
+                test("Wiper", 0x7A5),
+                test("Fan", 0x7E0)
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("kart.toml"),
+            format!(
+                "name = \"Kart\"\nwmi = [\"ZZK\"]\n[[module]]\ntx = 0x7E0\nname = \"engine\"\nkind = \"engine\"\n{}{}",
+                service("Relearn", 0x7A6),
+                service("Idle relearn", 0x7E0)
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("toyota.toml"),
+            format!(
+                "{}{}{}",
+                setting("Cluster beep", 0x7C0),
+                test("Horn", 0x7A5),
+                test("Throttle", 0x7E0)
+            ),
+        )
+        .unwrap();
+        let (all, problems) = load(Some(&dir));
+        let names = |p: &Profile| {
+            let mut n: Vec<String> = p.tests.iter().map(|t| t.name.clone()).collect();
+            n.extend(p.settings.iter().map(|s| s.name.clone()));
+            n.extend(p.services.iter().map(|s| s.name.clone()));
+            n
+        };
+        assert_eq!(names(find(&all, "gm").unwrap()), ["Fan"]);
+        assert_eq!(names(find(&all, "kart").unwrap()), ["Idle relearn"]);
+        assert_eq!(
+            names(find(&all, "toyota").unwrap()),
+            ["Horn", "Throttle", "Cluster beep"],
+            "Toyota keeps everything"
+        );
+        assert_eq!(problems.len(), 3, "{problems:?}");
+        for (what, at) in [
+            ("setting \"Door chime\"", "7A4"),
+            ("test \"Wiper\"", "7A5"),
+            ("service \"Relearn\"", "7A6"),
+        ] {
+            assert!(
+                problems.iter().any(|p| p.contains(what)
+                    && p.contains(&format!("what {at} is, is not known"))
+                    && p.contains("could be the airbag module")
+                    && p.ends_with("(left out)")),
+                "{what}: {problems:?}"
+            );
+        }
+        // a new entry (a learned one) for such a module is not added: refused before the user's folder is looked at
+        let why = add_setting_to_user_file("gm", &setting("Learned", 0x7A4)).unwrap_err();
+        assert!(why.contains("could be the airbag module"), "{why}");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // at the moment of the write: the simulated vehicle answering the new make's VIN
+        crate::lock::switch_for_test(&[]);
+        crate::fence::fence_for_test(Some(crate::fence::Fence::default()));
+        profiles_for_test(Some(all.clone()));
+        let log = crate::settings::log_path(&dir);
+        let connect = |vin: &str| {
+            let mut e =
+                crate::elm::Elm::connect(Box::new(crate::sim::SimCar::engine_off().with_vin(vin)))
+                    .unwrap();
+            e.take_sent();
+            e
+        };
+        let writes = |e: &mut crate::elm::Elm| {
+            e.take_sent()
+                .into_iter()
+                .filter(|(_, _, d)| matches!(d.first(), Some(0x10 | 0x2E | 0x2F | 0x31 | 0x3B)))
+                .count()
+        };
+        let chime = crate::sim::settings().remove(0);
+        let off = chime.values["off"].clone();
+        let oil = crate::sim::services()
+            .into_iter()
+            .find(|s| s.name.starts_with("Oil"))
+            .unwrap();
+        let throttle = crate::sim::tests()
+            .into_iter()
+            .find(|t| t.name.starts_with("Throttle"))
+            .unwrap();
+        let mut e = connect("ZZKICARUSKART0001");
+        for (what, r) in [
+            (
+                "changing a setting",
+                crate::settings::change(&mut e, &chime, &off, &log).err(),
+            ),
+            (
+                "reading a setting",
+                crate::settings::read(&mut e, &chime).err(),
+            ),
+            (
+                "a service routine",
+                crate::service::run(&mut e, &oil, true).err(),
+            ),
+        ] {
+            let why = r.unwrap_or_else(|| panic!("{what} went"));
+            assert!(
+                why.contains("what 7C0 is, is not known")
+                    && why.contains("could be the airbag module"),
+                "{what}: {why}"
+            );
+        }
+        assert_eq!(writes(&mut e), 0, "no write sent");
+        assert!(!log.exists(), "nothing logged as changed");
+        // the engine, named in the new make's profile: its test goes
+        let mut run = crate::actuator::start(&mut e, &throttle, 30.0).unwrap();
+        crate::actuator::stop(&mut e, &mut run, "test").unwrap();
+        // Toyota: as before
+        let mut e = connect(crate::sim::VIN);
+        assert!(crate::settings::change(&mut e, &chime, &off, &log)
+            .unwrap()
+            .is_some());
+        assert!(crate::service::run(&mut e, &oil, true).is_ok());
+        let mut run = crate::actuator::start(&mut e, &throttle, 30.0).unwrap();
+        crate::actuator::stop(&mut e, &mut run, "test").unwrap();
+        profiles_for_test(None);
+        crate::fence::fence_for_test(None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn user_files_add_and_replace_and_bad_ones_are_reported() {
         let dir = std::env::temp_dir().join(format!("icarus-vehicles-{}", std::process::id()));
@@ -838,7 +1124,7 @@ mod tests {
         .unwrap();
         std::fs::write(dir.join("typo.toml"), "name = \"y\"\nmodul = 1\n").unwrap();
         std::fs::write(dir.join("sneaky.toml"), "name = \"z\"\n[[test]]\nname = \"Seat belt pretensioner\"\nmodule = 0x7E0\nprotocol = \"uds\"\nid = 0x1234\n").unwrap();
-        std::fs::write(dir.join("ok-test.toml"), "name = \"w\"\n[[test]]\nname = \"Radiator fan\"\nmodule = 0x7E0\nprotocol = \"uds\"\nid = 0x1234\nconditions = [\"stationary\"]\n").unwrap();
+        std::fs::write(dir.join("ok-test.toml"), "name = \"w\"\n[[module]]\ntx = 0x7E0\nname = \"engine\"\n[[test]]\nname = \"Radiator fan\"\nmodule = 0x7E0\nprotocol = \"uds\"\nid = 0x1234\nconditions = [\"stationary\"]\n").unwrap();
         let (all, problems) = load(Some(&dir));
         let t = find(&all, "toyota").unwrap();
         assert_eq!(t.name, "My Toyota notes");

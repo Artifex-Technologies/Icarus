@@ -769,6 +769,78 @@ mod tests {
         assert_eq!(s.changed_at, vec![0.0, 0.5, 0.0], "byte 1 changed at 0.5 s");
     }
 
+    /// ICA-200: a setting, a routine and an output test another tool ran on a module a GM car's profile does not name
+    /// (7A4; the learner does not know the make) are learned as entries, but on GM they stay unusable: not added to the
+    /// user's GM file, left out when a GM file holding them loads, and refused at the moment of the write. The same entries
+    /// on Toyota's cluster (7C0, which Toyota's profile names beside its airbag module) load as before.
+    #[test]
+    fn what_is_learned_on_a_module_of_unknown_kind_stays_unusable_where_the_profile_names_no_airbag_module(
+    ) {
+        let mut a = Analyzer::default();
+        let convo: &[(u32, &[u8])] = &[
+            (0x7A4, &[0x03, 0x22, 0xA0, 0x01]),
+            (0x7AC, &[0x04, 0x62, 0xA0, 0x01, 0x01]),
+            (0x7A4, &[0x04, 0x2E, 0xA0, 0x01, 0x00]),
+            (0x7AC, &[0x03, 0x6E, 0xA0, 0x01]),
+            (0x7A4, &[0x04, 0x31, 0x01, 0x02, 0x03]),
+            (0x7AC, &[0x04, 0x71, 0x01, 0x02, 0x03]),
+            (0x7A4, &[0x05, 0x2F, 0x00, 0x10, 0x03, 0x01]),
+            (0x7AC, &[0x04, 0x6F, 0x00, 0x10, 0x03]),
+        ];
+        for (i, (id, d)) in convo.iter().enumerate() {
+            a.add(&f(*id, d, i as f64));
+        }
+        assert_eq!(
+            (a.settings.len(), a.services.len(), a.learned.len()),
+            (1, 1, 1),
+            "{:?}",
+            a.log
+        );
+        let entries = [
+            crate::settings::to_toml(&a.settings[0]),
+            crate::service::to_toml(&a.services[0]),
+            to_toml(&a.learned[0]),
+        ];
+        let dir = std::env::temp_dir().join(format!("icarus-bus-ica200-{}", std::process::id()));
+        for e in &entries {
+            let why = crate::vehicles::add_test_to_user_file("gm", e).unwrap_err();
+            assert!(why.contains("could be the airbag module"), "{why}");
+            // a new make's file holding it, as a person might paste it: left out when it loads
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("kart.toml"),
+                format!("name = \"Kart\"\nwmi = [\"ZZK\"]\n{e}"),
+            )
+            .unwrap();
+            let (all, problems) = crate::vehicles::load(Some(&dir));
+            let kart = crate::vehicles::find(&all, "kart").unwrap();
+            assert!(
+                kart.tests.is_empty() && kart.settings.is_empty() && kart.services.is_empty(),
+                "{e}"
+            );
+            assert!(
+                problems
+                    .iter()
+                    .any(|p| p.contains("could be the airbag module") && p.ends_with("(left out)")),
+                "{problems:?}"
+            );
+            // on Toyota's cluster, the same entry loads
+            let on_cluster = e.replace("module = 0x7A4", "module = 0x7C0");
+            std::fs::write(dir.join("kart.toml"), "name = \"Kart\"\nwmi = [\"ZZK\"]\n").unwrap();
+            std::fs::write(dir.join("toyota.toml"), &on_cluster).unwrap();
+            let (all, problems) = crate::vehicles::load(Some(&dir));
+            let t = crate::vehicles::find(&all, "toyota").unwrap();
+            assert_eq!(
+                t.tests.len() + t.settings.len() + t.services.len(),
+                1,
+                "{on_cluster} {problems:?}"
+            );
+            std::fs::remove_file(dir.join("toyota.toml")).unwrap();
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_setting_the_module_accepted_is_learned() {
         let mut a = Analyzer::default();

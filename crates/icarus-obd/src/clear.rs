@@ -14,9 +14,9 @@
 
 use crate::actuator::{battery_holds, conditions_hold, Condition};
 use crate::link::Link;
+use crate::moddata::Caution;
 use crate::uds::Dialect;
 use crate::vehicles::Profile;
-use icarus_core::moddata::{Ids, ModuleHead};
 
 /// The battery a clear needs, measured at the port: as for an actuator test (one short request, engine off).
 const MIN_VOLTS: f64 = 11.5;
@@ -111,40 +111,20 @@ pub fn refused_on(
     rx: u32,
     name: &str,
 ) -> Option<String> {
-    let profile = make.and_then(|m| profiles.iter().find(|p| p.id.eq_ignore_ascii_case(m)));
-    let named = profile.and_then(|p| p.modules.iter().find(|a| a.tx == tx && a.ext.is_none()));
-    let name = named.map_or(name, |a| a.name.as_str());
     if let Some(why) = refused(tx, rx, name) {
         return Some(why);
     }
-    let head = ModuleHead {
-        name: name.to_string(),
-        tx,
-        rx: Some(rx),
-        ext: None,
-        tester: None,
-        ids: if tx > 0x7FF { Ids::Can29 } else { Ids::Can11 },
-        bus: None,
-        dialect: None,
-        kind: named.map(|a| a.kind.clone()).unwrap_or_default(),
-        identity: Vec::new(),
-        protocol: None,
-        header_byte: None,
-    };
-    let gates = crate::moddata::Gates::for_make(profiles, make);
-    if gates.is_airbag(&head) {
-        return Some(format!(
+    match crate::moddata::Gates::write_caution(profiles, make, tx, rx)? {
+        Caution::Airbag => Some(format!(
             "refused: a vehicle profile names {} as an airbag or occupant-detection module, and Icarus never clears \
              its codes (a dealer or an airbag specialist does, after the repair)",
             id_text(tx)
-        ));
-    }
-    gates.unknown_kind(&head).map(|why| {
-        format!(
+        )),
+        Caution::Unknown(why) => Some(format!(
             "{why}; Icarus clears the codes of a module of unknown kind only once the vehicle profile names it \
              (a [[module]] in ~/.config/icarus/vehicles/)"
-        )
-    })
+        )),
+    }
 }
 
 /// All of one module's codes (UDS or KWP2000, as the module spoke when its codes were read), on a vehicle of `make` (a
@@ -234,8 +214,13 @@ mod tests {
                 for (t, r, hit) in [(tx, rx, tx), (0x7A0, rx, rx)] {
                     let mut e = connect();
                     let why = clear_module(&mut e, t, r, Dialect::Uds, &ps, make).unwrap_err();
+                    // the airbag list's own refusal, naming the ID it matched (not the unknown-kind caution, which
+                    // also says "airbag": on toyota it does not apply, and on the others the list answers first)
                     assert!(
-                        why.contains("airbag") && why.contains(&id_text(hit)),
+                        why.starts_with(&format!(
+                            "refused: {} is an airbag or occupant-detection module, and Icarus never clears",
+                            id_text(hit)
+                        )),
                         "{make:?} {t:X}/{r:X}: {why}"
                     );
                     assert!(e.take_sent().is_empty(), "{make:?} {t:X}: nothing sent");

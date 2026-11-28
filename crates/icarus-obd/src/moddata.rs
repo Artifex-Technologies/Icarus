@@ -276,6 +276,15 @@ fn chassis_named<'p>(
     out
 }
 
+/// Why the profiles keep a write off a module (`Gates::write_caution`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Caution {
+    /// A profile names the address as the airbag or occupant-detection module (or gives it such a name).
+    Airbag,
+    /// What the module is, is not known where it could be the airbag module: why, in module data's words.
+    Unknown(String),
+}
+
 /// What a sweep may read on one module (ICA-100): a sweep reads identifiers no module-data file lists (the as-built
 /// block's DE00-DEFF, and discovery's, ICA-126), so it passes `Gates::sweep` first.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -535,6 +544,41 @@ impl Gates {
             g.caution = Some("this vehicle's make is not known".into());
         }
         g
+    }
+
+    /// What the profiles say about a write (clearing codes, an actuator test, a setting, a service routine) aimed at the
+    /// module at `tx`/`rx` on a vehicle of `make` (a profile's id; None: not known), as module data asks it (ICA-200): the
+    /// airbag module, when a profile names that address (or the make's profile gives it an airbag name) whatever the
+    /// write calls it; else, where the make's profile names no airbag module on 11-bit CAN (or the make is not known), a
+    /// module the make's profile does not name, which could be it (`unknown_kind`). A module the make's profile names
+    /// (with its name, or a `kind`) is of known kind. None: the profiles let it through.
+    pub fn write_caution(
+        profiles: &[Profile],
+        make: Option<&str>,
+        tx: u32,
+        rx: u32,
+    ) -> Option<Caution> {
+        let profile = make.and_then(|m| profiles.iter().find(|p| p.id.eq_ignore_ascii_case(m)));
+        let named = profile.and_then(|p| p.modules.iter().find(|a| a.tx == tx && a.ext.is_none()));
+        let head = ModuleHead {
+            name: named.map(|a| a.name.clone()).unwrap_or_default(),
+            tx,
+            rx: Some(rx),
+            ext: None,
+            tester: None,
+            ids: if tx > 0x7FF { Ids::Can29 } else { Ids::Can11 },
+            bus: None,
+            dialect: None,
+            kind: named.map(|a| a.kind.clone()).unwrap_or_default(),
+            identity: Vec::new(),
+            protocol: None,
+            header_byte: None,
+        };
+        let gates = Gates::for_make(profiles, make);
+        if gates.is_airbag(&head) {
+            return Some(Caution::Airbag);
+        }
+        gates.unknown_kind(&head).map(Caution::Unknown)
     }
 
     /// Adds the key modules of `fence` to the ones the profiles name: another set's files' (`load_all`), or the whole
@@ -2682,15 +2726,32 @@ mod tests {
         let mut unknown = module("0x7A2", "");
         unknown.module.kind.clear();
         unknown.module.name = "module (7A2)".into();
-        // GM's profile names no airbag module: a module that is only an address could be it; Honda's names only a 29-bit
-        // one, so an 11-bit module could still be it (ICA-108)
-        for make in ["gm", "honda", "stellantis", "bmw", "", "nosuchmake"] {
+        // GM's profile names no airbag module: a module that is only an address could be it; nor does Nissan's (752 is
+        // fenced by ID, not named in its profile: one Leaf-only source does not lift the caution); Honda's names only a
+        // 29-bit one, so an 11-bit module could still be it (ICA-108)
+        for make in [
+            "gm",
+            "honda",
+            "nissan",
+            "stellantis",
+            "bmw",
+            "",
+            "nosuchmake",
+        ] {
             let gates = Gates::new(&profiles, std::slice::from_ref(&unknown), make);
             let why = gates
                 .module_refused(&unknown)
                 .unwrap_or_else(|| panic!("{make}"));
             assert!(why.contains("could be the airbag module"), "{make}: {why}");
         }
+        let honda = Gates::new(&profiles, std::slice::from_ref(&unknown), "honda");
+        assert!(
+            honda
+                .module_refused(&unknown)
+                .unwrap()
+                .contains("the honda profile names no airbag module on 11-bit CAN"),
+            "Honda's 29-bit airbag entry leaves its 11-bit modules under the caution"
+        );
         // with a kind, or named by the profile (GM's 7E0 engine), or on a make whose profile knows its airbag module
         let gates = Gates::new(&profiles, std::slice::from_ref(&unknown), "gm");
         assert_eq!(

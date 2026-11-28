@@ -265,7 +265,16 @@ fn send(link: &mut dyn Link, s: &SettingDef, data: &[u8]) -> Result<Answer, Stri
 }
 
 /// The setting's value now (and its name, when it is one of the setting's values). Reads only.
+/// Not on a module that could be the airbag module where the vehicle's profile names none (`vehicles::caution_holds`,
+/// ICA-200): module data reads nothing there either.
 pub fn read(link: &mut dyn Link, s: &SettingDef) -> Result<(Vec<u8>, Option<String>), String> {
+    s.allowed()?;
+    crate::vehicles::caution_holds(link, s.module, s.rx(), "reading a setting")?;
+    read_value(link, s)
+}
+
+/// `read` once its checks have passed (a change reads before and after writing, past the same checks).
+fn read_value(link: &mut dyn Link, s: &SettingDef) -> Result<(Vec<u8>, Option<String>), String> {
     s.allowed()?;
     let a = send(link, s, &s.read_request())?;
     let v = s
@@ -405,12 +414,14 @@ pub fn change(
         return Err(format!("{} takes {len} byte(s)", s.name));
     }
     ready(link, s)?;
+    // where the vehicle's profile names no airbag module, not on a module it does not name (ICA-200)
+    crate::vehicles::caution_holds(link, s.module, s.rx(), "changing a setting")?;
     let session = s.extended && s.protocol == Protocol::Uds;
     if session {
         send(link, s, &[0x10, 0x03])?;
     }
     let result = (|| {
-        let (before, _) = read(link, s)?;
+        let (before, _) = read_value(link, s)?;
         if s.mask.is_some() && before.len() != len {
             return Err(format!(
                 "not changed: the module's value is {} byte(s), and {} covers {len}, so its other bits cannot be kept",
@@ -435,7 +446,7 @@ pub fn change(
         append(log, &c)
             .map_err(|e| format!("not changed: the change log could not be written ({e})"))?;
         send(link, s, &s.write_request(&target))?;
-        let (now, _) = read(link, s)?;
+        let (now, _) = read_value(link, s)?;
         if !s.same(&now, &target) {
             // only this setting's bits go back: whatever the module did with the others stays as it is
             let back = s.apply(&now, &before);

@@ -278,7 +278,9 @@ In the window (Tests page) a test runs only while its button is held. The fence 
 actuator.rs`): only output control goes out (UDS `2F`, KWP2000 `30`, the session and tester present they need); never
 security access, routines, coding, clearing or programming; never airbag or occupant-detection modules, nor an
 immobilizer, smart-key or certification module (`crates/icarus-obd/src/fence.rs`: by its address, whatever the test is
-called); conditions (engine off or running, vehicle stopped) checked before and every second during a test; at least
+called); where the vehicle's profile names no airbag module (Nissan, GM, Stellantis... today), never a module the profile
+does not name, which could be it (checked when the profiles load and again, by the VIN, before the test starts; settings,
+service routines and clearing codes follow the same rule); conditions (engine off or running, vehicle stopped) checked before and every second during a test; at least
 11.5 V; a time limit of at most 30 s; control handed back on every way out (release, time, condition, error, Ctrl+C,
 closed window), and by the module itself if Icarus dies (its diagnostic session times out); every start and stop in
 `~/.local/state/icarus/actions.log`.
@@ -402,7 +404,8 @@ services 21 and 22 only, built by Icarus from the identifier (files carry no raw
 identification, which is kept for a later build and never sent today); never on 7DF or any answer ID; airbag and occupant
 modules identity only, and so immobilizer, smart-key and certification modules (by their file's `kind` or name, or an
 address a vehicle profile or another set's file gives that kind, 29-bit IDs included), and on a make whose profile names
-no airbag module, a module of unknown kind gets nothing either;
+no airbag module (GM, Nissan, Stellantis, BMW... today; Honda's names only its 29-bit one), a module of unknown kind
+gets nothing either, and on 29-bit CAN or K-line a module of unknown kind gets nothing on any make;
 nothing that needs a diagnostic session is sent (Icarus opens none); at least 50 ms between any two sends, a busy module
 slowed, a refused request, one that keeps failing or a silent module dropped. Modules behind a gateway that answer
 with their own address byte first (Toyota's 750: tire pressure 2A, as OBDb's Tacoma set has it) are read through the
