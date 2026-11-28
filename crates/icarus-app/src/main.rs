@@ -3,6 +3,7 @@
 //! bus, and maps from an image and a definition (with what a tune changed). Yggdrasil's look (yggdrasil-ui).
 
 mod autoconn;
+mod confirm;
 mod devices;
 mod gauges;
 mod levels;
@@ -251,6 +252,9 @@ struct Start {
     /// `--view cells|2d|3d`: how the Maps page shows a table at start.
     view: Option<View>,
     gps: Option<String>,
+    /// `--read-only`: the session floor (ICA-192): nothing is cleared, tested or changed on any vehicle while the window
+    /// runs, whatever its VIN.
+    read_only: bool,
 }
 
 impl Start {
@@ -260,6 +264,7 @@ impl Start {
         while i < a.len() {
             match a[i].as_str() {
                 "--connect" => s.connect = true,
+                icarus_obd::lock::SESSION_FLAG => s.read_only = true,
                 "--scan" => s.scan = true,
                 "--module-data" => s.module_data = true,
                 "--live" => s.live = true,
@@ -358,10 +363,9 @@ struct App {
     release_needed: bool,
     test_note: String,
     test_reading: Option<f64>,
-    /// A clear waiting for the person's yes: None = every OBD-II module, Some = one module (tx, rx, dialect).
-    confirm_clear: Option<(ClearTarget, String)>,
-    /// A service routine asked to run, waiting for "Run" in its confirmation.
-    confirm_service: Option<icarus_obd::service::ServiceDef>,
+    /// The clear, service routine and setting change waiting for the person's yes, each tied to the connection it was asked
+    /// on and closed when that one ends (ICA-105).
+    confirms: confirm::Confirms,
     selftests: Option<Vec<icarus_obd::mode06::TestResult>>,
     battery_agm: bool,
     /// NHTSA lookups run on their own thread; answers come back here.
@@ -381,11 +385,10 @@ struct App {
     /// What the vehicle profile calls the bus's IDs (ICA-17), and for which profile ("" for none): read again when it changes.
     bus_names: (String, std::collections::BTreeMap<u32, String>),
     bus: Option<worker::BusView>,
-    /// Settings: each one's value now (from the worker), the value picked per setting, a change waiting for the person's
-    /// yes (the setting and the value's name; None = undo), and whether the values were asked for since connecting.
+    /// Settings: each one's value now (from the worker), the value picked per setting, and whether the values were asked for
+    /// since connecting (a change waiting for the person's yes is in `confirms`).
     setting_views: Vec<worker::SettingView>,
     setting_pick: HashMap<String, String>,
-    confirm_setting: Option<(icarus_obd::settings::SettingDef, Option<String>)>,
     settings_asked: bool,
     /// Learning: the mark being typed, what the last watch learned (being named here; true once added to the file),
     /// where its session was saved, earlier sessions, and Sarina's answer.
@@ -525,8 +528,7 @@ impl App {
             release_needed: false,
             test_note: String::new(),
             test_reading: None,
-            confirm_clear: None,
-            confirm_service: None,
+            confirms: Default::default(),
             selftests: None,
             battery_agm: true,
             bg_tx: bg_tx.clone(),
@@ -544,7 +546,6 @@ impl App {
             bus: None,
             setting_views: Vec::new(),
             setting_pick: HashMap::new(),
-            confirm_setting: None,
             settings_asked: false,
             learn_mark: String::new(),
             learn_tests: Vec::new(),
@@ -759,6 +760,10 @@ impl App {
     fn take_handed(&mut self, ctx: &egui::Context) {
         while let Ok(args) = self.handed.try_recv() {
             if let Ok(st) = Start::parse(&args) {
+                // a later start asking for read-only makes this window read-only (it never makes it writable again)
+                if st.read_only {
+                    icarus_obd::lock::hold_session_read_only();
+                }
                 if st.record {
                     if self.link == Link::On && self.recorder.is_none() {
                         self.start_recording();
@@ -860,6 +865,8 @@ impl App {
             self.listener = None;
         }
         while let Ok(ev) = self.rx.try_recv() {
+            // a confirmation waiting for a yes closes when its connection ends, another starts or the link fails (ICA-105)
+            self.confirms.on_event(&ev);
             match ev {
                 Event::Sent(v) => {
                     for x in v {
@@ -1260,7 +1267,9 @@ impl App {
                     row(
                         ui,
                         "Writes",
-                        if info.vin.as_deref().is_some_and(|v| self.is_read_only(v)) {
+                        if icarus_obd::lock::session_read_only() {
+                            "none: this session is read-only (--read-only or ICARUS_READ_ONLY=1)"
+                        } else if info.vin.as_deref().is_some_and(|v| self.is_read_only(v)) {
                             "none: Read-Only is on (Garage)"
                         } else {
                             "allowed, each with its own checks (Read-Only is off)"
@@ -1659,8 +1668,8 @@ impl App {
             let _ = self.tx.send(Cmd::SelfTests);
         }
         if ask_clear {
-            self.confirm_clear =
-                Some((None, "every engine and transmission module (OBD-II)".into()));
+            self.confirms.clear =
+                self.ask((None, "every engine and transmission module (OBD-II)".into()));
         }
     }
 
@@ -1672,6 +1681,14 @@ impl App {
             .and_then(|i| i.vin.as_deref())
             .and_then(icarus_obd::garage::tires)
             .and_then(|t| t.factor().ok().map(|f| (t, f)));
+    }
+
+    /// A confirmation of `what` on the connection open now (None when there is none: nothing is asked).
+    fn ask<T>(&self, what: T) -> Option<confirm::Asked<T>> {
+        self.info.as_ref().map(|i| confirm::Asked {
+            what,
+            on: i.connection.clone(),
+        })
     }
 
     /// Whether this vehicle's Read-Only switch is on.
@@ -1920,7 +1937,7 @@ impl App {
             });
         }
         if let Some((tx, rx, d, label)) = ask_clear {
-            self.confirm_clear = Some((Some((tx, rx, d)), label));
+            self.confirms.clear = self.ask((Some((tx, rx, d)), label));
         }
         if !self.unreachable.is_empty() {
             card(ui, pal, "Not reachable yet", |ui| {
@@ -2221,13 +2238,17 @@ impl App {
         };
         let tests = info.tests.clone();
         let services = info.services.clone();
+        let on = info.connection.clone();
         if !services.is_empty() {
             card(ui, pal, "Service routines", |ui| {
                 ui.label(RichText::new("Relearns, resets, TPMS, coding: each the maker's own routine, run once after a confirmation. Its conditions, the battery and the Read-Only switch are checked first; every run is logged.").weak());
                 for s in &services {
                     ui.horizontal_wrapped(|ui| {
                         if ui.button("Run...").clicked() {
-                            self.confirm_service = Some(s.clone());
+                            self.confirms.service = Some(confirm::Asked {
+                                what: s.clone(),
+                                on: on.clone(),
+                            });
                         }
                         ui.label(RichText::new(&s.name).strong());
                         ui.label(
@@ -2976,8 +2997,8 @@ impl App {
                 });
             });
         }
-        if ask.is_some() {
-            self.confirm_setting = ask;
+        if let Some(a) = ask {
+            self.confirms.setting = self.ask(a);
         }
     }
 
@@ -5134,7 +5155,7 @@ impl eframe::App for App {
                 }
             }
         }
-        if let Some(def) = self.confirm_service.clone() {
+        if let Some(confirm::Asked { what: def, on }) = self.confirms.service.clone() {
             let mut go = false;
             let mut cancel = false;
             let resp = egui::Modal::new(egui::Id::new("confirm-service")).show(&ctx, |ui| {
@@ -5189,13 +5210,17 @@ impl eframe::App for App {
             });
             if go {
                 self.live_on = false;
-                let _ = self.tx.send(Cmd::Service(def));
-                self.confirm_service = None;
+                let _ = self.tx.send(Cmd::Service { def, on });
+                self.confirms.service = None;
             } else if cancel || resp.should_close() {
-                self.confirm_service = None;
+                self.confirms.service = None;
             }
         }
-        if let Some((target, label)) = self.confirm_clear.clone() {
+        if let Some(confirm::Asked {
+            what: (target, label),
+            on,
+        }) = self.confirms.clear.clone()
+        {
             let mut go = false;
             let mut cancel = false;
             let resp = egui::Modal::new(egui::Id::new("confirm-clear")).show(&ctx, |ui| {
@@ -5228,14 +5253,18 @@ impl eframe::App for App {
             });
             if go {
                 self.live_on = false;
-                let _ = self.tx.send(Cmd::Clear(target));
+                let _ = self.tx.send(Cmd::Clear { target, on });
                 self.status = "Saving a report, then clearing...".into();
-                self.confirm_clear = None;
+                self.confirms.clear = None;
             } else if cancel || resp.should_close() {
-                self.confirm_clear = None;
+                self.confirms.clear = None;
             }
         }
-        if let Some((def, value)) = self.confirm_setting.clone() {
+        if let Some(confirm::Asked {
+            what: (def, value),
+            on,
+        }) = self.confirms.setting.clone()
+        {
             let mut go = false;
             let mut cancel = false;
             let now = self
@@ -5297,12 +5326,16 @@ impl eframe::App for App {
                 if value.is_some() && bytes.is_none() {
                     self.error = Some(format!("{} has no value named {to}", def.name));
                 } else {
-                    let _ = self.tx.send(Cmd::SettingChange { def, value: bytes });
+                    let _ = self.tx.send(Cmd::SettingChange {
+                        def,
+                        value: bytes,
+                        on,
+                    });
                     self.status = "Changing the setting...".into();
                 }
-                self.confirm_setting = None;
+                self.confirms.setting = None;
             } else if cancel || resp.should_close() {
-                self.confirm_setting = None;
+                self.confirms.setting = None;
             }
         }
         chrome::outline(&ctx, &pal);
@@ -5352,7 +5385,13 @@ impl LearnSetting {
 }
 
 fn main() -> eframe::Result {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // ICARUS_READ_ONLY=1 is said as --read-only, so a window already open takes it with the rest (ICA-192)
+    if icarus_obd::lock::env_asks_read_only()
+        && !args.iter().any(|a| a == icarus_obd::lock::SESSION_FLAG)
+    {
+        args.push(icarus_obd::lock::SESSION_FLAG.into());
+    }
     // one Icarus at a time: an open one takes these arguments and comes to the front
     if single::hand_over(&args) {
         return Ok(());
@@ -5360,10 +5399,13 @@ fn main() -> eframe::Result {
     let start = match Start::parse(&args) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("icarus-app: {e}\nusage: icarus-app [--connect] [--adapter A] [--page vehicle|modules|live|logs|tests|settings|learning|bus|maps|garage|tools] [--scan] [--live] [--record] [--learn [--mark TEXT] [--learn-seconds N]] [--maps DEF.xdf|.a2l IMAGE.bin [SECOND.bin|VERSION.version.toml]] [--map NAME [--cell R,C]] [--view cells|2d|3d]");
+            eprintln!("icarus-app: {e}\nusage: icarus-app [--read-only] [--connect] [--adapter A] [--page vehicle|modules|live|logs|tests|settings|learning|bus|maps|garage|tools] [--scan] [--live] [--record] [--learn [--mark TEXT] [--learn-seconds N]] [--maps DEF.xdf|.a2l IMAGE.bin [SECOND.bin|VERSION.version.toml]] [--map NAME [--cell R,C]] [--view cells|2d|3d]");
             std::process::exit(2);
         }
     };
+    if start.read_only {
+        icarus_obd::lock::hold_session_read_only();
+    }
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1180.0, 760.0])
         .with_min_inner_size([760.0, 480.0])
@@ -5385,6 +5427,51 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| Ok(Box::new(App::new(&cc.egui_ctx, start)))),
     )
+}
+
+/// A home of a test's own for the tests that run the worker (it reads the config folder and writes the vehicle's record,
+/// code history and folder): HOME and the XDG folders point into a temp folder, one such test at a time, and the folder
+/// is removed after. The variables are not put back: a worker still running after a failed test can then only write into
+/// the removed folder, never the real home.
+#[cfg(test)]
+pub(crate) struct TestHome {
+    dir: std::path::PathBuf,
+    _one_at_a_time: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl TestHome {
+    pub(crate) fn new(tag: &str) -> TestHome {
+        static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let one = ONE.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!(
+            "icarus-app-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("HOME", &dir);
+        std::env::set_var("XDG_CONFIG_HOME", dir.join("config"));
+        std::env::set_var("XDG_STATE_HOME", dir.join("state"));
+        std::env::set_var("XDG_DATA_HOME", dir.join("data"));
+        // a session floor asked for in the shell that runs the tests is not this test's
+        std::env::remove_var(icarus_obd::lock::SESSION_ENV);
+        TestHome {
+            dir,
+            _one_at_a_time: one,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestHome {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
 }
 
 #[cfg(test)]
@@ -5607,15 +5694,17 @@ mod bus_dbc {
     /// names engine speed in 2C4's last bytes; an ID the DBC does not name has an empty cell.
     #[test]
     fn the_bus_page_names_the_signals() {
-        let state = std::env::temp_dir().join(format!("icarus-busdbc-{}", std::process::id()));
-        std::env::set_var("XDG_STATE_HOME", &state);
+        // the simulated vehicle's record and the config folder: a home of the test's own
+        let home = TestHome::new("busdbc");
         let dbc = icarus_core::dbc::parse(
             "BO_ 708 Engine: 8 ECM\n SG_ EngineSpeed : 7|16@0+ (1,0) [0|8000] \"rpm\" Vector__XXX\n",
         );
         let (ctx, crx) = std::sync::mpsc::channel();
         let (etx, erx) = std::sync::mpsc::channel();
         // an empty fence: the test reads no profile or module-data set from the home folder for its bus watch
-        std::thread::spawn(move || worker::run(crx, etx, icarus_obd::fence::Fence::default, || {}));
+        let worker = std::thread::spawn(move || {
+            worker::run(crx, etx, icarus_obd::fence::Fence::default, || {})
+        });
         ctx.send(Cmd::Connect("sim".into())).unwrap();
         let end = Instant::now() + Duration::from_secs(30);
         let mut connected = false;
@@ -5643,6 +5732,10 @@ mod bus_dbc {
             }
         }
         let _ = ctx.send(Cmd::BusStop);
+        // the worker ends once the watch has stopped and the window's side is gone
+        drop(ctx);
+        worker.join().unwrap();
+        drop(home);
         let cell = cell.expect("2C4 seen on the bus page");
         let rpm: f64 = cell
             .strip_prefix("Engine: EngineSpeed ")
@@ -5651,6 +5744,5 @@ mod bus_dbc {
             .unwrap_or_else(|| panic!("{cell}"));
         assert!((750.0..=830.0).contains(&rpm), "{cell}");
         assert_eq!(other.as_deref(), Some(""), "an ID the DBC does not name");
-        let _ = std::fs::remove_dir_all(&state);
     }
 }

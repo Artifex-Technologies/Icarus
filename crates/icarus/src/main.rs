@@ -211,10 +211,18 @@ Trouble codes:
 
   The adapter A: sim (a simulated vehicle), /dev/ttyUSB0[@baud], bt:AA:BB:CC:DD:EE:FF[#channel] (paired Bluetooth, such as
   an OBDLink MX+), tcp:host:port (Wi-Fi), can:can0 or can0 (a Linux CAN interface such as a CANable: Icarus speaks
-  ISO-TP over it itself). ICARUS_ADAPTER sets a default.";
+  ISO-TP over it itself). ICARUS_ADAPTER sets a default.
+
+  --read-only, on any command (or ICARUS_READ_ONLY=1): this run clears, tests and changes nothing on any vehicle, whatever
+  VIN it gives and whatever its Read-Only switch says (a spare ECM on the bench, a friend's vehicle). Reads all work.";
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // --read-only anywhere on the line: this run clears, tests and changes nothing on any vehicle (ICA-192), as with
+    // ICARUS_READ_ONLY=1, which the lock reads itself
+    if take_flag(&mut args, lock::SESSION_FLAG) {
+        lock::hold_session_read_only();
+    }
     let r = match args.first().map(String::as_str) {
         Some("def") => cmd_def(&args[1..]),
         Some("show") => cmd_show(&args[1..]),
@@ -249,6 +257,13 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Takes every `flag` out of `args`, wherever it stands; whether there was one.
+fn take_flag(args: &mut Vec<String>, flag: &str) -> bool {
+    let before = args.len();
+    args.retain(|a| a != flag);
+    args.len() != before
 }
 
 /// Positional arguments and `--name value` options.
@@ -952,6 +967,13 @@ fn cmd_obd(a: &[String]) -> Result<(), String> {
             "battery", "set", "year", "find", "note", "gps",
         ],
     )?;
+    // a read-only session refuses a write before the adapter is even opened (ICA-192): nothing is sent, not a read
+    if matches!(
+        a.first().map(String::as_str),
+        Some("clear" | "test" | "service" | "setting" | "setting-undo")
+    ) {
+        lock::session_allows_changes()?;
+    }
     // connected, run, and the senders any broadcast left out noted however it ended
     let module_reads = matches!(
         a.first().map(String::as_str),
@@ -1340,6 +1362,9 @@ fn obd_info(elm: &mut dyn Link) -> Result<(), String> {
         println!("Battery:   {v:.1} V at the OBD port");
     }
     println!("Protocol:  {}", elm.protocol().describe());
+    if lock::session_read_only() {
+        println!("Writes:    none: this session is read-only (--read-only or ICARUS_READ_ONLY=1)");
+    }
     println!(
         "VIN:       {}",
         j1979::vin(elm)
@@ -2833,6 +2858,32 @@ mod tests {
     }
 
     use super::*;
+
+    /// ICA-192: --read-only is taken out wherever it stands (before the command, after it, twice), and nothing else is: the
+    /// Garage's `read-only` word and the options around it stay.
+    #[test]
+    fn read_only_is_a_flag_of_every_command() {
+        let mut a: Vec<String> = [
+            "--read-only",
+            "garage",
+            "read-only",
+            "VIN",
+            "on",
+            "--read-only",
+        ]
+        .iter()
+        .map(|x| x.to_string())
+        .collect();
+        assert!(take_flag(&mut a, lock::SESSION_FLAG));
+        assert_eq!(a, ["garage", "read-only", "VIN", "on"]);
+        assert!(!take_flag(&mut a, lock::SESSION_FLAG), "taken once");
+        let mut b: Vec<String> = ["obd", "clear", "--adapter", "sim", "--yes"]
+            .iter()
+            .map(|x| x.to_string())
+            .collect();
+        assert!(!take_flag(&mut b, lock::SESSION_FLAG));
+        assert_eq!(b.len(), 5);
+    }
 
     /// A recording made with --gps has the GPS's three columns, one made without has none (both on the simulators, into
     /// a file of the test's own).

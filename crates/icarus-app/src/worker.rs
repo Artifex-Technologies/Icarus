@@ -30,8 +30,11 @@ pub enum Cmd {
     Report(bool),
     /// Read each module's own values once (icarus_obd::vehicledata): every module of the set that fits, read only.
     ModuleData,
-    /// Run a service routine (icarus_obd::service: its checks first).
-    Service(icarus_obd::service::ServiceDef),
+    /// Run a service routine (icarus_obd::service: its checks first), confirmed on the connection `on`.
+    Service {
+        def: icarus_obd::service::ServiceDef,
+        on: Connection,
+    },
     /// Start an actuator test (value for percent tests); it runs while TestHold keeps coming (at least every 0.5 s).
     TestStart {
         def: actuator::TestDef,
@@ -49,18 +52,53 @@ pub enum Cmd {
     BusMark(String),
     /// Read every setting's value now.
     SettingsRead,
-    /// Change a setting to these bytes (one of its values), or put back the value before its last change (None).
+    /// Change a setting to these bytes (one of its values), or put back the value before its last change (None); confirmed on
+    /// the connection `on`.
     SettingChange {
         def: SettingDef,
         value: Option<Vec<u8>>,
+        on: Connection,
     },
-    /// Clear codes: every OBD-II module (None) or one module (request ID, answer ID, its dialect). A report is saved first.
-    Clear(Option<(u16, u16, Dialect)>),
+    /// Clear codes: every OBD-II module (None) or one module (request ID, answer ID, its dialect), confirmed on the connection
+    /// `on`. A report is saved first.
+    Clear {
+        target: Option<(u16, u16, Dialect)>,
+        on: Connection,
+    },
     TestHold,
     TestStop,
 }
 
+/// One connection to a vehicle, as a write's confirmation names it (ICA-105): its number (the worker counts one each time it
+/// connects, from 1) and the VIN the vehicle gave then. A clear, a setting change or a service routine is carried out only
+/// on the connection it was confirmed on; one confirmed before the adapter connected again (another vehicle, maybe) is
+/// refused with nothing sent.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Connection {
+    pub number: u64,
+    pub vin: Option<String>,
+}
+
+/// Whether a write confirmed on `on` may go to the connection open now (`now`), and the session floor allows it (ICA-192);
+/// why not otherwise. Nothing is sent to ask.
+fn may_write(on: &Connection, now: Option<&Connection>) -> Result<(), String> {
+    match now {
+        None => Err("the connection it was confirmed on has ended; nothing was sent".into()),
+        Some(n) if n.number != on.number => Err(
+            "it was confirmed on an earlier connection (the adapter connected again since, maybe to another vehicle); \
+             nothing was sent: ask again"
+                .into(),
+        ),
+        Some(n) if n.vin != on.vin => {
+            Err("it was confirmed for another vehicle (its VIN differs); nothing was sent".into())
+        }
+        Some(_) => icarus_obd::lock::session_allows_changes(),
+    }
+}
+
 pub struct Info {
+    /// The connection this was read on (a confirmation given while it shows carries it).
+    pub connection: Connection,
     pub adapter: String,
     /// The connection's port is a cable all the way (`Elm::wired`, judged by the open port): changing a setting needs one.
     pub wired: bool,
@@ -214,6 +252,25 @@ pub fn run(
     fence: fn() -> icarus_obd::fence::Fence,
     repaint: impl Fn() + Send + 'static,
 ) {
+    run_with(rx, tx, fence, repaint, &open)
+}
+
+/// The adapter `spec` names, opened and set up (`Target::parse`, `connect_target`).
+fn open(spec: &str) -> Result<Elm, String> {
+    let target = Target::parse(spec)?;
+    icarus_obd::elm::connect_target(&target)
+        .map(|(e, _)| e)
+        .map_err(|e| format!("{spec}: {e}"))
+}
+
+/// `run`, with the adapters opened by `open` (a test opens simulated vehicles of its own).
+fn run_with(
+    rx: Receiver<Cmd>,
+    tx: Sender<Event>,
+    fence: fn() -> icarus_obd::fence::Fence,
+    repaint: impl Fn() + Send + 'static,
+    open: &dyn Fn(&str) -> Result<Elm, String>,
+) {
     let send = |e: Event| {
         let _ = tx.send(e);
         repaint();
@@ -223,6 +280,9 @@ pub fn run(
     // of the open port itself (`Elm::wired`), never of what the adapter's path leads to now
     let mut spec = String::new();
     let mut vin: Option<String> = None;
+    // the connection open now, and how many there have been: a write runs only on the one it was confirmed on (ICA-105)
+    let mut connection: Option<Connection> = None;
+    let mut connections: u64 = 0;
     let mut live: Vec<u8> = Vec::new();
     let mut rotate: Vec<u8> = Vec::new();
     let mut rotate_at = 0usize;
@@ -324,6 +384,7 @@ pub fn run(
                 spec = s.clone();
                 let spec = s;
                 elm = None;
+                connection = None;
                 live.clear();
                 // a device set to listen only is never talked through, whoever asks (ICA-80)
                 if let Err(why) = crate::devices::Roles::load().may_talk(&spec) {
@@ -331,9 +392,15 @@ pub fn run(
                     continue;
                 }
                 send(Event::Status(format!("Connecting to {spec}...")));
-                match connect(&spec, &profiles) {
-                    Ok((mut e, info)) => {
+                match connect(open, &spec, &profiles) {
+                    Ok((mut e, mut info)) => {
                         vin = info.vin.clone();
+                        connections += 1;
+                        info.connection = Connection {
+                            number: connections,
+                            vin: vin.clone(),
+                        };
+                        connection = Some(info.connection.clone());
                         // what this vehicle refused for good before is not asked again (ICA-71)
                         if let Some(v) = vin.as_deref() {
                             if let Ok(p) = icarus_obd::record::path(v) {
@@ -349,6 +416,7 @@ pub fn run(
             Some(Cmd::Disconnect) => {
                 elm = None;
                 vin = None;
+                connection = None;
                 live.clear();
                 send(Event::Disconnected);
             }
@@ -394,7 +462,12 @@ pub fn run(
                     icarus_obd::vehicledata::read(e, &profiles, None, us).map(Box::new),
                 ));
             }
-            Some(Cmd::Clear(target)) => {
+            Some(Cmd::Clear { target, on }) => {
+                // before anything goes out, the report's reads included
+                if let Err(why) = may_write(&on, connection.as_ref()) {
+                    send(Event::Failed(format!("not cleared: {why}")));
+                    continue;
+                }
                 let Some(e) = elm.as_mut() else { continue };
                 live.clear();
                 send(Event::Status("Saving a report before clearing...".into()));
@@ -416,9 +489,12 @@ pub fn run(
                         .map(|_| format!("Cleared module {tx:03X}")),
                 };
                 match result.and_then(|msg| gather(e, &profiles).map(|i| (msg, i))) {
-                    Ok((msg, info)) => send(Event::Cleared(
+                    Ok((msg, mut info)) => send(Event::Cleared(
                         format!("{msg}. The report from before is {}.", saved.display()),
-                        Box::new(info),
+                        Box::new({
+                            info.connection = on;
+                            info
+                        }),
                     )),
                     Err(m) => send(Event::Failed(format!(
                         "{m} (the report from before is {})",
@@ -457,7 +533,14 @@ pub fn run(
                 send(Event::Settings(read_settings(e, &defs, vin.as_deref())));
                 send(Event::Status(format!("{} setting(s) read.", defs.len())));
             }
-            Some(Cmd::Service(def)) => {
+            Some(Cmd::Service { def, on }) => {
+                if let Err(why) = may_write(&on, connection.as_ref()) {
+                    send(Event::ServiceDone(Err(format!(
+                        "{} did not run: {why}",
+                        def.name
+                    ))));
+                    continue;
+                }
                 let Some(e) = elm.as_mut() else { continue };
                 live.clear();
                 let wired = e.wired();
@@ -472,7 +555,15 @@ pub fn run(
                     }),
                 ));
             }
-            Some(Cmd::SettingChange { def, value }) => {
+            Some(Cmd::SettingChange { def, value, on }) => {
+                // refused before the change and before the settings are read again: nothing goes out
+                if let Err(why) = may_write(&on, connection.as_ref()) {
+                    send(Event::SettingDone(Err(format!(
+                        "{} was not changed: {why}",
+                        def.name
+                    ))));
+                    continue;
+                }
                 let Some(e) = elm.as_mut() else { continue };
                 live.clear();
                 // the port opened at connect, judged by its own device: a symlink moved since cannot make it wired
@@ -700,15 +791,17 @@ fn end_test(
     send(Event::TestStopped { name, why });
 }
 
-fn connect(spec: &str, profiles: &[Profile]) -> Result<(Elm, Info), String> {
-    let target = Target::parse(spec)?;
-    let (mut elm, _) =
-        icarus_obd::elm::connect_target(&target).map_err(|e| format!("{spec}: {e}"))?;
+fn connect(
+    open: &dyn Fn(&str) -> Result<Elm, String>,
+    spec: &str,
+    profiles: &[Profile],
+) -> Result<(Elm, Info), String> {
+    let mut elm = open(spec)?;
     let info = gather(&mut elm, profiles)?;
     Ok((elm, info))
 }
 
-/// Everything the Vehicle page shows, read again.
+/// Everything the Vehicle page shows, read again (its connection left for the caller to say).
 fn gather(elm: &mut Elm, profiles: &[Profile]) -> Result<Info, String> {
     let e = |x: ObdError| x.to_string();
     let vin = j1979::vin(elm).map_err(e)?;
@@ -774,6 +867,7 @@ fn gather(elm: &mut Elm, profiles: &[Profile]) -> Result<Info, String> {
     let services = vehicles::services_for(profile.as_ref(), vin.as_deref());
     let settings = vehicles::settings_for(profile.as_ref(), vin.as_deref());
     let info = Info {
+        connection: Connection::default(),
         adapter: format!(
             "{}{}",
             elm.id,
@@ -896,12 +990,12 @@ mod tests {
     /// which it answers, stays.
     #[test]
     fn a_recording_stops_reading_a_value_that_never_answers() {
-        // the simulated vehicle's record goes to a state folder of the test's own, not the real home's
-        let state = std::env::temp_dir().join(format!("icarus-worker-test-{}", std::process::id()));
-        std::env::set_var("XDG_STATE_HOME", &state);
+        // the simulated vehicle's record goes to a home of the test's own, not the real one
+        let home = crate::TestHome::new("worker-prune");
         let (ctx, crx) = mpsc::channel();
         let (etx, erx) = mpsc::channel();
-        std::thread::spawn(move || run(crx, etx, icarus_obd::fence::Fence::default, || {}));
+        let worker =
+            std::thread::spawn(move || run(crx, etx, icarus_obd::fence::Fence::default, || {}));
         ctx.send(Cmd::Connect("sim".into())).unwrap();
         let until = |what: &str, ok: &mut dyn FnMut(&Event) -> bool| {
             let end = Instant::now() + Duration::from_secs(30);
@@ -949,6 +1043,186 @@ mod tests {
             "3D asked: {asked_3d}, 46 asked: {asked_46}"
         );
         ctx.send(Cmd::Live(Vec::new())).unwrap();
-        let _ = std::fs::remove_dir_all(&state);
+        drop(ctx);
+        worker.join().unwrap();
+        drop(home);
+    }
+
+    /// Another vehicle's VIN, made up: the adapter comes back on a different vehicle.
+    const OTHER: &str = "5TFICARUSDONOR001";
+
+    /// The adapters this worker test opens: the simulated vehicle (`sim`, engine off) and the same one giving another VIN
+    /// (`other`).
+    fn two_vehicles(spec: &str) -> Result<Elm, String> {
+        let car = match spec {
+            "sim" => icarus_obd::sim::SimCar::engine_off(),
+            "other" => icarus_obd::sim::SimCar::engine_off().with_vin(OTHER),
+            s => return Err(format!("no adapter {s} in this test")),
+        };
+        Elm::connect(Box::new(car)).map_err(|e| e.to_string())
+    }
+
+    /// The events up to the first one `ok` takes, that one last; panics after 30 s.
+    fn until(erx: &mpsc::Receiver<Event>, what: &str, ok: &dyn Fn(&Event) -> bool) -> Vec<Event> {
+        let end = Instant::now() + Duration::from_secs(30);
+        let mut seen = Vec::new();
+        while Instant::now() < end {
+            if let Ok(e) = erx.recv_timeout(Duration::from_millis(200)) {
+                let done = ok(&e);
+                seen.push(e);
+                if done {
+                    return seen;
+                }
+            }
+        }
+        panic!("no {what}");
+    }
+
+    /// ICA-105: a clear (and a routine and a setting change) confirmed on the simulated vehicle, then the adapter connects
+    /// again and the vehicle there gives another VIN. The window's dialogs close on that Connected event; the stale
+    /// commands are each refused, with no request on the bus (not even the report's reads before a clear, or the settings
+    /// read again after a change). The same change confirmed on the new connection goes.
+    #[test]
+    fn a_write_confirmed_on_an_earlier_connection_is_refused_with_nothing_sent() {
+        use crate::confirm::{Asked, Confirms};
+        let home = crate::TestHome::new("worker-ica105");
+        let (ctx, crx) = mpsc::channel();
+        let (etx, erx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            run_with(
+                crx,
+                etx,
+                icarus_obd::fence::Fence::default,
+                || {},
+                &two_vehicles,
+            )
+        });
+        let connected = |erx: &mpsc::Receiver<Event>| -> Connection {
+            let seen = until(erx, "connection", &|e| matches!(e, Event::Connected(_)));
+            let Some(Event::Connected(info)) = seen.last() else {
+                unreachable!()
+            };
+            let c = info.connection.clone();
+            // what the connection read went out: reported once, before anything else is asked
+            until(erx, "the connection's requests", &|e| {
+                matches!(e, Event::Sent(_))
+            });
+            c
+        };
+        ctx.send(Cmd::Connect("sim".into())).unwrap();
+        let first = connected(&erx);
+        assert_eq!(first.number, 1);
+        assert_eq!(first.vin.as_deref(), Some(icarus_obd::sim::VIN));
+        // the person says yes on the first connection: the commands as the window builds them, and its dialogs open
+        let chime = icarus_obd::sim::settings().remove(0);
+        let off = chime.values["off"].clone();
+        let stale = || {
+            [
+                Cmd::Clear {
+                    target: None,
+                    on: first.clone(),
+                },
+                Cmd::Service {
+                    def: icarus_obd::sim::services().remove(1),
+                    on: first.clone(),
+                },
+                Cmd::SettingChange {
+                    def: chime.clone(),
+                    value: Some(off.clone()),
+                    on: first.clone(),
+                },
+            ]
+        };
+        let mut dialogs = Confirms {
+            clear: Some(Asked {
+                what: (None, "every module".into()),
+                on: first.clone(),
+            }),
+            ..Default::default()
+        };
+        // the adapter connects again, to another vehicle
+        ctx.send(Cmd::Connect("other".into())).unwrap();
+        let seen = until(&erx, "the second connection", &|e| {
+            matches!(e, Event::Connected(_))
+        });
+        for e in &seen {
+            dialogs.on_event(e);
+        }
+        assert!(dialogs.clear.is_none(), "the dialog closed on Connected");
+        let Some(Event::Connected(info)) = seen.last() else {
+            unreachable!()
+        };
+        let second = info.connection.clone();
+        assert_eq!(second.number, 2);
+        assert_eq!(second.vin.as_deref(), Some(OTHER));
+        until(&erx, "the connection's requests", &|e| {
+            matches!(e, Event::Sent(_))
+        });
+        // the stale yeses arrive: each refused, nothing sent
+        for c in stale() {
+            ctx.send(c).unwrap();
+        }
+        ctx.send(Cmd::Disconnect).unwrap();
+        let after = until(&erx, "the disconnect", &|e| {
+            matches!(e, Event::Disconnected)
+        });
+        let earlier = |m: &str| m.contains("earlier connection") && m.contains("nothing was sent");
+        assert!(after
+            .iter()
+            .any(|e| matches!(e, Event::Failed(m) if m.starts_with("not cleared") && earlier(m))));
+        assert!(after
+            .iter()
+            .any(|e| matches!(e, Event::ServiceDone(Err(m)) if earlier(m))));
+        assert!(after
+            .iter()
+            .any(|e| matches!(e, Event::SettingDone(Err(m)) if earlier(m))));
+        for e in &after {
+            assert!(
+                !matches!(e, Event::Sent(_) | Event::Settings(_) | Event::Cleared(..)),
+                "something went onto the bus for a stale yes"
+            );
+        }
+        // once disconnected, a yes for the connection that was last open is refused too
+        ctx.send(Cmd::SettingChange {
+            def: chime.clone(),
+            value: Some(off.clone()),
+            on: second.clone(),
+        })
+        .unwrap();
+        let ended = until(&erx, "the refusal", &|e| matches!(e, Event::SettingDone(_)));
+        assert!(
+            matches!(ended.last(), Some(Event::SettingDone(Err(m))) if m.contains("has ended")),
+            "{:?}",
+            ended.len()
+        );
+        // a change confirmed on the connection open now goes to that vehicle
+        ctx.send(Cmd::Connect("other".into())).unwrap();
+        let third = connected(&erx);
+        assert_eq!(third.number, 3);
+        ctx.send(Cmd::SettingChange {
+            def: chime,
+            value: Some(off),
+            on: third,
+        })
+        .unwrap();
+        let done = until(&erx, "the change", &|e| matches!(e, Event::SettingDone(_)));
+        assert!(
+            matches!(done.last(), Some(Event::SettingDone(Ok(_)))),
+            "the change on the connection open now went"
+        );
+        let sent = until(&erx, "the change's requests", &|e| {
+            matches!(e, Event::Sent(_))
+        });
+        let Some(Event::Sent(v)) = sent.last() else {
+            unreachable!()
+        };
+        assert!(
+            v.iter()
+                .any(|(_, id, b)| *id == 0x7C0 && b.first() == Some(&0x2E)),
+            "the write reached the cluster"
+        );
+        drop(ctx);
+        worker.join().unwrap();
+        drop(home);
     }
 }

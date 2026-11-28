@@ -526,8 +526,8 @@ impl Elm {
     }
 
     /// The backstop under every write path: a request that would change the vehicle (`lock::changes_vehicle`) is sent
-    /// only when its Read-Only switch is off, whichever part of Icarus asks. Reads, and the requests that hand control
-    /// back, always go.
+    /// only when the session is not read-only and the vehicle's Read-Only switch is off, whichever part of Icarus asks.
+    /// Reads, and the requests that hand control back, always go.
     fn read_only_check(&mut self, data: &[u8]) -> Result<(), ObdError> {
         if crate::lock::changes_vehicle(data) {
             crate::lock::writes_allowed(self).map_err(ObdError::ReadOnly)?;

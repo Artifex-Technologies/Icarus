@@ -7,10 +7,88 @@
 //! asks `writes_allowed` first. When any vehicle has the switch on, that reads the VIN from the vehicle on the port at that
 //! moment, so the switch follows the vehicle, not the one the window connected to earlier; a VIN that cannot be read then
 //! counts as switched on (it could be that vehicle). With no vehicle switched on, nothing is asked of the vehicle.
+//!
+//! Under the switch, the session floor (ICA-192), which does not depend on the VIN: a command or the window started with
+//! `--read-only`, or with ICARUS_READ_ONLY=1 in its environment, clears, tests and changes nothing on any vehicle for the
+//! whole run, whatever VIN it gives and whatever `read-only.toml` says. A donor ECM on the bench gives its donor's VIN, so
+//! the switch alone does not cover it. `writes_allowed` asks the floor first, before the VIN is read, so the write paths
+//! refuse with nothing sent, and the links (`Elm`, `CanLink`, `PassThruLink`, so the OpenPort and the Mongoose too) refuse
+//! the same requests `changes_vehicle` names that they refuse for a switched vehicle. The floor is turned on, never off.
 
 use crate::link::Link;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+
+/// The environment variable that turns the session floor on (`asks_read_only` says which values do).
+pub const SESSION_ENV: &str = "ICARUS_READ_ONLY";
+
+/// The flag that turns the session floor on, on the command line and in the window.
+pub const SESSION_FLAG: &str = "--read-only";
+
+#[cfg(not(test))]
+static SESSION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+thread_local! {
+    /// A test's own session floor, instead of the one for the whole run (tests run side by side in one process).
+    static SESSION_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether a value of ICARUS_READ_ONLY asks for the session floor: anything but empty, 0, no, false or off, so a value
+/// mistyped asks for it too.
+pub fn asks_read_only(value: &str) -> bool {
+    !matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "" | "0" | "no" | "false" | "off"
+    )
+}
+
+/// Whether this run's environment asks for the session floor (ICARUS_READ_ONLY).
+pub fn env_asks_read_only() -> bool {
+    std::env::var_os(SESSION_ENV).is_some_and(|v| asks_read_only(&v.to_string_lossy()))
+}
+
+/// Turns the session floor on for the rest of this run (`--read-only`). Nothing turns it off.
+pub fn hold_session_read_only() {
+    #[cfg(test)]
+    SESSION_FOR_TEST.with(|s| s.set(true));
+    #[cfg(not(test))]
+    SESSION.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Whether this run is read-only: `hold_session_read_only` was called, or ICARUS_READ_ONLY asks for it (kept once seen,
+/// so the variable unset later does not turn the floor off).
+#[cfg(not(test))]
+pub fn session_read_only() -> bool {
+    use std::sync::atomic::Ordering;
+    if SESSION.load(Ordering::SeqCst) {
+        return true;
+    }
+    if env_asks_read_only() {
+        SESSION.store(true, Ordering::SeqCst);
+        return true;
+    }
+    false
+}
+
+/// Whether this test's session is read-only (`hold_session_read_only` on its own thread; the environment is not asked).
+#[cfg(test)]
+pub fn session_read_only() -> bool {
+    SESSION_FOR_TEST.with(|s| s.get())
+}
+
+/// The session floor's answer, asked before anything is sent to a vehicle: the reason when this run is read-only.
+pub fn session_allows_changes() -> Result<(), String> {
+    if !session_read_only() {
+        return Ok(());
+    }
+    crate::audit::log("write refused: the session is read-only");
+    Err(
+        "session read-only: Icarus was started read-only this time (--read-only or ICARUS_READ_ONLY=1), so it clears, \
+         tests and changes nothing on any vehicle, whatever VIN it gives"
+            .into(),
+    )
+}
 
 pub fn path() -> Option<PathBuf> {
     crate::vehicles::user_dir().and_then(|d| d.parent().map(|p| p.join("read-only.toml")))
@@ -101,8 +179,10 @@ fn tail(vin: &str) -> &str {
     &vin[vin.len().saturating_sub(6)..]
 }
 
-/// Whether the vehicle on `link` may be written to now; the reason when its Read-Only switch is on.
+/// Whether the vehicle on `link` may be written to now; the reason when the session is read-only (asked first, before
+/// anything is sent) or the vehicle's Read-Only switch is on.
 pub fn writes_allowed(link: &mut dyn Link) -> Result<(), String> {
+    session_allows_changes()?;
     let list = read_only();
     if list.is_empty() {
         return Ok(());
@@ -289,6 +369,165 @@ mod tests {
             .sent
             .iter()
             .any(|f| f.id == 0x7C0 && is_write(&f.data[1..])));
+    }
+
+    /// A made-up VIN no vehicle is switched for: a donor ECM on the bench gives its donor's.
+    const DONOR: &str = "5TFICARUSDONOR001";
+
+    #[test]
+    fn what_icarus_read_only_asks_for() {
+        for on in ["1", "yes", "TRUE", "on", " 1 ", "y", "2"] {
+            assert!(asks_read_only(on), "{on:?}");
+        }
+        for off in ["", "0", "no", "False", "OFF", "  "] {
+            assert!(!asks_read_only(off), "{off:?}");
+        }
+    }
+
+    /// ICA-192: with no vehicle switched and a donor VIN on the port, the session floor refuses a clear (every module and
+    /// one), an actuator test, a setting change and a service routine, each with 'session read-only' and before any frame
+    /// goes out (not even the VIN read the switch would make).
+    #[test]
+    fn the_session_floor_refuses_every_write_path_whatever_the_vin() {
+        switched(&[]);
+        hold_session_read_only();
+        let car = || {
+            let mut c = Elm::connect(Box::new(SimCar::engine_off().with_vin(DONOR))).unwrap();
+            c.take_sent();
+            c
+        };
+        let refused = |c: &mut Elm, r: Result<(), String>| {
+            let e = r.unwrap_err();
+            assert!(e.starts_with("session read-only"), "{e}");
+            assert!(c.take_sent().is_empty(), "{e}: nothing went out");
+        };
+        let mut c = car();
+        let r = crate::clear::clear_obd(&mut c).map(|_| ());
+        refused(&mut c, r);
+        let mut c = car();
+        let r = crate::clear::clear_module(&mut c, 0x7E0, 0x7E8, crate::uds::Dialect::Uds);
+        refused(&mut c, r);
+        let mut c = car();
+        let t = crate::sim::tests().remove(0);
+        let r = crate::actuator::start(&mut c, &t, 30.0).map(|_| ());
+        refused(&mut c, r);
+        let mut c = car();
+        let s = crate::sim::settings().remove(0);
+        let v = s.values.values().next().unwrap().clone();
+        let log = std::env::temp_dir().join(format!("icarus-session-log-{}", std::process::id()));
+        let r = crate::settings::change(&mut c, &s, &v, &log).map(|_| ());
+        refused(&mut c, r);
+        assert!(!log.exists(), "nothing was logged as changed");
+        let mut c = car();
+        let srv = crate::sim::services().remove(0);
+        let r = crate::service::run(&mut c, &srv, true).map(|_| ());
+        refused(&mut c, r);
+    }
+
+    /// ICA-192 on one link, the session floor on: each request `changes_vehicle` names is refused with 'session
+    /// read-only' through `request` and `request_to` and puts nothing on the bus (`went_out` counts what went out since it
+    /// was last asked); the reads, tester present and the default session still go.
+    fn the_floor_holds_on<L: Link>(l: &mut L, went_out: &mut dyn FnMut(&mut L) -> usize) {
+        use crate::elm::ObdError;
+        use crate::j1979::{self, DtcKind};
+        let changes: [&[u8]; 8] = [
+            &[0x04],
+            &[0x14, 0xFF, 0xFF, 0xFF],
+            &[0x10, 0x03],
+            &[0x27, 0x01],
+            &[0x2E, 0xA0, 0x01, 0x00],
+            &[0x2F, 0x01, 0x23, 0x03, 0x50],
+            &[0x31, 0x01, 0xFF, 0x00],
+            &[0x11, 0x01],
+        ];
+        went_out(l);
+        for c in changes {
+            assert!(changes_vehicle(c), "{c:02X?}");
+            for e in [
+                l.request(c).unwrap_err(),
+                l.request_to(0x7E0, 0x7E8, c).unwrap_err(),
+            ] {
+                assert!(
+                    matches!(&e, ObdError::ReadOnly(m) if m.starts_with("session read-only")),
+                    "{c:02X?}: {e}"
+                );
+            }
+        }
+        assert_eq!(went_out(l), 0, "nothing went onto the bus");
+        assert_eq!(
+            j1979::vin(l).unwrap().as_deref(),
+            Some(DONOR),
+            "the VIN reads"
+        );
+        assert!(j1979::read(l, 0x0C).is_ok(), "live data reads");
+        assert!(j1979::supported(l).is_ok());
+        for kind in [DtcKind::Stored, DtcKind::Pending, DtcKind::Permanent] {
+            assert!(j1979::dtcs(l, kind).is_ok(), "{kind:?} codes read");
+        }
+        assert!(j1979::calibration_ids(l).is_ok());
+        assert!(
+            crate::uds::module_dtcs(l, 0x7E0, 0x7E8).is_ok(),
+            "a module's codes read"
+        );
+        assert!(crate::uds::module_identity_notes(l, 0x7E0, 0x7E8).is_ok());
+        assert!(
+            l.request_to(0x7E0, 0x7E8, &[0x3E, 0x00]).is_ok(),
+            "tester present"
+        );
+        assert!(
+            l.request_to(0x7E0, 0x7E8, &[0x10, 0x01]).is_ok(),
+            "the default session"
+        );
+        assert!(went_out(l) > 0, "the reads went out");
+    }
+
+    /// ICA-192 on every kind of link (the ELM327, SocketCAN and the Mongoose's CanLink, J2534 and so the OpenPort, and a
+    /// link boxed as the command line holds it), the donor VIN on the port and no vehicle switched.
+    #[test]
+    fn the_session_floor_holds_on_every_link_and_reads_still_go() {
+        use crate::canlink::{CanLink, SimBus};
+        use crate::passthru::{PassThruLink, SimPassThru};
+        switched(&[]);
+        hold_session_read_only();
+        let donor = || SimCar::engine_off().with_vin(DONOR);
+        let mut elm = Elm::connect(Box::new(donor())).unwrap();
+        the_floor_holds_on(&mut elm, &mut |e| e.take_sent().len());
+        let mut seen = 0;
+        let mut can = CanLink::connect(SimBus::new(donor()), "vcan0").unwrap();
+        the_floor_holds_on(&mut can, &mut |l| {
+            let n = l.frames().sent.len();
+            std::mem::replace(&mut seen, n).abs_diff(n)
+        });
+        let mut seen = 0;
+        let mut j2534 = PassThruLink::connect(SimPassThru::new(donor())).unwrap();
+        the_floor_holds_on(&mut j2534, &mut |l| {
+            let n = l.device().sent.len();
+            std::mem::replace(&mut seen, n).abs_diff(n)
+        });
+        let mut seen = 0;
+        let mut boxed = Box::new(CanLink::connect(SimBus::new(donor()), "vcan0").unwrap());
+        the_floor_holds_on(&mut boxed, &mut |l| {
+            let n = l.frames().sent.len();
+            std::mem::replace(&mut seen, n).abs_diff(n)
+        });
+    }
+
+    /// Without the floor (every test's start), the same donor vehicle takes a change as before: the floor alone refused it.
+    #[test]
+    fn without_the_floor_nothing_changes() {
+        switched(&[]);
+        assert!(!session_read_only());
+        assert!(session_allows_changes().is_ok());
+        let mut car = Elm::connect(Box::new(SimCar::engine_off().with_vin(DONOR))).unwrap();
+        assert!(writes_allowed(&mut car).is_ok());
+        assert!(!matches!(
+            car.request(&[0x04]),
+            Err(crate::elm::ObdError::ReadOnly(_))
+        ));
+        hold_session_read_only();
+        assert!(writes_allowed(&mut car)
+            .unwrap_err()
+            .starts_with("session read-only"));
     }
 
     /// A vehicle switched to read-only, ignition on and engine off, which every write path would otherwise accept: each

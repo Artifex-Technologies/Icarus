@@ -104,6 +104,13 @@ A module is bricked when a write stops halfway or puts the wrong thing in. Icaru
     tester present and hand-backs) to a switched vehicle, so a write path that forgets the check still cannot reach it.
     Any other link to a vehicle (a J2534 device, SocketCAN diagnostics) must do the same before it sends (done), and no
     link hands out what is under it (its socket, device or adapter commands) to send on past that check.
+    Under the switch, a session floor that does not depend on the VIN (done): any command or the window started with
+    `--read-only`, or with `ICARUS_READ_ONLY=1` in its environment (any value but empty, 0, no, false or off), refuses
+    every write for the whole run, whatever VIN the vehicle gives and whatever `read-only.toml` says. A spare ECM on the
+    bench gives its donor's VIN, so the switch alone does not cover it. `lock::writes_allowed` asks the floor first,
+    before the VIN is read, so the write paths and the links (the ELM327, SocketCAN, the Mongoose, J2534 and so the
+    OpenPort) refuse with "session read-only" and nothing sent; the command line refuses `obd clear`, `test`, `service`,
+    `setting` and `setting-undo` before it opens the adapter. Nothing turns the floor off during a run.
 11. **One program per adapter.** Two programs on one adapter garble each other's requests and could cut a write or a
     routine in two. A serial port (an ELM327 or STN cable, the OpenPort, the Mongoose, SLCAN, a GPS) is held by the
     program that opened it alone (done: `port::open_serial` locks it with flock and marks it exclusive with TIOCEXCL), so
@@ -113,6 +120,10 @@ A module is bricked when a write stops halfway or puts the wrong thing in. Icaru
     another program marked (gpsd does, without a lock), which root's open gets past, keeps that program's mark.
     ModemManager, which runs as root and would probe a ttyACM cable with AT commands past both, is told by the udev rule
     to leave the OpenPort alone. Tested on a pseudo-terminal standing in for the cable; not yet tried on a cable in hand.
+12. **A yes belongs to its connection.** The window's confirmations (a clear, a service routine, a setting change) are
+    asked on one connection and close when it ends, another starts or the link fails; the command a yes sends carries
+    that connection's number and VIN, and the worker refuses one given on an earlier connection, or once the connection
+    has ended, before anything is sent (done).
 
 ## Writing a module (flash): the conditions
 

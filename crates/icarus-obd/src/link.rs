@@ -2,8 +2,9 @@
 //! (`passthru`: Tactrix OpenPort, VF Tuner's WiFlash, ...), or the simulated car. Everything above this (OBD-II services,
 //! UDS/KWP, reports, tests) asks through a `Link` and does not care which.
 //!
-//! Every link to a real vehicle refuses, before sending, a request `lock::changes_vehicle` names when the vehicle's
-//! Read-Only switch is on (`lock::writes_allowed`), as `Elm` does: the write paths check too, but this is the floor.
+//! Every link to a real vehicle refuses, before sending, a request `lock::changes_vehicle` names when the session is read-only
+//! (`--read-only`, ICARUS_READ_ONLY=1) or the vehicle's Read-Only switch is on (`lock::writes_allowed`), as `Elm` does: the
+//! write paths check too, but this is the floor.
 //!
 //! Module IDs are CAN IDs: up to 7FF an 11-bit ID, above it a 29-bit one (Honda's 18DAxxF1).
 

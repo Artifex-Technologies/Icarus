@@ -108,6 +108,19 @@ change a switched vehicle, whichever part of Icarus sends it: only reads (OBD-II
 so a test already running can always be ended. The Vehicle page's Writes line shows the connected vehicle's switch. The list is
 `~/.config/icarus/read-only.toml`, on this computer only.
 
+The switch follows the VIN, and a spare ECM on the bench gives its donor's VIN, not mine. For that, and for a friend's
+vehicle, there is a read-only session: `--read-only` on any command (`icarus obd info --adapter /dev/ttyUSB0 --read-only`),
+`icarus-app --read-only`, or `ICARUS_READ_ONLY=1` in the environment (any value but empty, 0, no, false or off). For the
+whole run Icarus clears, tests and changes nothing on any vehicle, whatever VIN it gives and whatever the switch says;
+every read works as usual. `obd clear`, `test`, `service`, `setting` and `setting-undo` are refused before the adapter is
+opened, every other write path and the adapter link itself refuse with "session read-only" before anything is sent, and
+`obd info` and the Vehicle page's Writes line say the session is read-only. Nothing turns it off until the run ends; a
+window already open takes `--read-only` from a later start (or `ICARUS_READ_ONLY=1` in its environment) and stays read-only.
+
+A clear, a service routine or a setting change confirmed in the window belongs to the connection it was confirmed on: its
+dialog closes when the adapter disconnects, connects again or fails, and a yes that reaches the vehicle side after the
+adapter connected again (perhaps to another vehicle) is refused with nothing sent.
+
 ## Tires and gears
 
 ```sh
@@ -497,7 +510,8 @@ condition, with fuel cut while coasting and the warm-up counted apart and left o
 the mean of its readings), and draws the drive's GPS track coloured by speed when it was recorded with GPS (the shape only:
 no map is fetched). Start options:
 `--connect [--adapter A] --page modules --scan`, `--live`, `--page trail --gauges`, `--maps DEF.xdf|.a2l IMAGE.bin [SECOND.bin|VERSION.version.toml]` with `--map NAME` and `--view cells|2d|3d`, `--learn [--mark TEXT]
-[--learn-seconds N]` (a learning watch at start, for demonstrations).
+[--learn-seconds N]` (a learning watch at start, for demonstrations), `--read-only` (a read-only session: "The Read-Only
+switch").
 
 ## What it does today
 
@@ -619,7 +633,7 @@ The adapter `A` is one of:
 | `mongoose:/dev/ttyACM0` | a Drewtech Mongoose Pro J2534 cable on that port, through Icarus's own driver (11-bit CAN; docs/INTERFACES.md) |
 | `sim:j2534` | the simulated vehicle behind a simulated J2534 device |
 
-`ICARUS_ADAPTER` sets a default.
+`ICARUS_ADAPTER` sets a default; `--read-only` (or `ICARUS_READ_ONLY=1`) makes the run read-only on any adapter.
 
 Through a CAN interface Icarus speaks ISO 15765-2 (ISO-TP) itself over raw frames, with no ELM327 in between and no kernel
 `can-isotp` module: OBD-II's broadcast on `7DF` (or `18DB33F1`; it tries 11-bit CAN, then 29-bit), each module at its own

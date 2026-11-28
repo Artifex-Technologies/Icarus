@@ -15,7 +15,8 @@ numbers masked (bytes as `2A`, the line marked `[VIN masked]` or `[serial number
 Nothing that clears codes, runs a test or writes is offered to a model; a test fails if a tool with such a name appears.
 Nothing from an immobilizer, smart-key or certification module reaches a model: `vehicle_modules` does not ask them,
 `module_data` sends them no data request, and a learning session never holds their messages. The
-adapter comes from `ICARUS_ADAPTER` in the server's environment (`sim` for the simulated vehicle). The definition file for an
+adapter comes from `ICARUS_ADAPTER` in the server's environment (`sim` for the simulated vehicle); `ICARUS_READ_ONLY=1` there
+holds the session's Read-Only floor as for any command. The definition file for an
 assistant and the tools in full: [README.md](../README.md), "Sarina (or another assistant)".
 Used by: Sarina (through a definition file named by `SARINA_MCP_FILE`, opt-in).
 

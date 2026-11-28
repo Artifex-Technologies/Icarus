@@ -440,9 +440,9 @@ impl SimCar {
         self.hex(&id.to_be_bytes())
     }
 
-    /// The same vehicle answering another VIN: one that is not the simulated vehicle, for the read-only lock (`lock`).
-    #[cfg(test)]
-    pub(crate) fn with_vin(self, vin: &str) -> SimCar {
+    /// The same vehicle answering another VIN: one that is not the simulated vehicle, for the read-only lock (`lock`), a donor
+    /// ECM on the bench (ICA-192) and the window's tests of a connection to another vehicle (ICA-105).
+    pub fn with_vin(self, vin: &str) -> SimCar {
         SimCar {
             vin: vin.to_string(),
             ..self

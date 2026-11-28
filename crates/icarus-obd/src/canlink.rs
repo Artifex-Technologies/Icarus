@@ -191,7 +191,7 @@ impl<F: Frames> CanLink<F> {
     }
 
     /// The backstop under every write path, as on the ELM327 link: a request that would change the vehicle goes only when
-    /// its Read-Only switch is off.
+    /// the session is not read-only and the vehicle's Read-Only switch is off.
     fn read_only_check(&mut self, data: &[u8]) -> Result<(), ObdError> {
         if crate::lock::changes_vehicle(data) {
             crate::lock::writes_allowed(self).map_err(ObdError::ReadOnly)?;
