@@ -267,6 +267,9 @@ pub struct SimCar {
     pub acked: bool,
     /// The VIN it answers (`VIN`, unless a test gives another vehicle's).
     vin: String,
+    /// VINs to answer in turn instead, one each OBD-II VIN request (the last one kept): a VIN that reads differently from
+    /// one request to the next (`with_vins`).
+    vins: Vec<String>,
     /// The extended address byte the adapter puts first in each frame (ATCEA hh), for the modules behind the gateway at
     /// 750 (Toyota's body module 40, the tire pressure module 2A), which answer from 758 with the same byte first.
     cea: Option<u8>,
@@ -542,6 +545,7 @@ impl SimCar {
             loud: false,
             acked: false,
             vin: VIN.to_string(),
+            vins: Vec::new(),
             cea: None,
             bus_seen: 0,
             listener: false,
@@ -769,8 +773,27 @@ impl SimCar {
         self.hex(&id.to_be_bytes())
     }
 
-    /// The same vehicle answering another VIN: one that is not the simulated vehicle, for the read-only lock (`lock`), a donor
-    /// ECM on the bench (ICA-192) and the window's tests of a connection to another vehicle (ICA-105).
+    /// The same vehicle answering these VINs in turn, one each OBD-II VIN request, the last one from then on ("" answers
+    /// none): a VIN that reads differently from one request to the next (ICA-222 review: a bench make must not outlive the
+    /// blank VIN it was kept for).
+    pub fn with_vins(self, vins: &[&str]) -> SimCar {
+        SimCar {
+            vins: vins.iter().map(|v| v.to_string()).collect(),
+            ..self
+        }
+    }
+
+    /// The next VIN of `with_vins`, when it was given, for the VIN request being answered.
+    fn next_vin(&mut self) {
+        match self.vins.len() {
+            0 => {}
+            1 => self.vin = self.vins[0].clone(),
+            _ => self.vin = self.vins.remove(0),
+        }
+    }
+
+    /// The same vehicle answering another VIN: one that is not the simulated vehicle, for the read-only lock (`lock`), a
+    /// donor ECM on the bench (ICA-192) and the window's tests of a connection to another vehicle (ICA-105).
     pub fn with_vin(self, vin: &str) -> SimCar {
         SimCar {
             vin: vin.to_string(),
@@ -1787,10 +1810,13 @@ impl SimCar {
             }
             [0x07] => msgs.push(("7E8", vec![0x47, 0x00])),
             [0x0A] => msgs.push(("7E8", vec![0x4A, 0x00])),
-            [0x09, 0x02] => msgs.push((
-                "7E8",
-                [&[0x49, 0x02, 0x01][..], self.vin.as_bytes()].concat(),
-            )),
+            [0x09, 0x02] => {
+                self.next_vin();
+                msgs.push((
+                    "7E8",
+                    [&[0x49, 0x02, 0x01][..], self.vin.as_bytes()].concat(),
+                ))
+            }
             [0x09, 0x04] => {
                 msgs.push((
                     "7E8",

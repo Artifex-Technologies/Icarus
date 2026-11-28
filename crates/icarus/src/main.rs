@@ -2242,6 +2242,10 @@ fn obd_clear(elm: &mut dyn Link, args: &Args) -> Result<(), String> {
     match target {
         None => println!("Cleared: {}", clear::clear_obd(elm)?.join(", ")),
         Some((tx, rx, make, d)) => {
+            // the make asked again right before the clear (ICA-222 review): the VIN may read otherwise than at the prompt
+            let make = clear_recheck(elm, &ps, tx, rx, &make).inspect_err(|why| {
+                icarus_obd::audit::log(&format!("clear {tx:03X} refused: {why}"))
+            })?;
             if make.chosen {
                 icarus_obd::audit::log(&format!("clear {tx:03X}: {}", make.words()));
             }
@@ -2250,6 +2254,30 @@ fn obd_clear(elm: &mut dyn Link, args: &Args) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// The make a one-module clear follows, asked again right before it is sent (ICA-222 review): the VIN read now and the
+/// bench make kept on this connection (`write_make`) must give the make that was confirmed (`confirmed`), and the
+/// module must still pass the caution with it (`clear::refused_on`). Only the VIN is read.
+fn clear_recheck(
+    elm: &mut dyn Link,
+    profiles: &[vehicles::Profile],
+    tx: u32,
+    rx: u32,
+    confirmed: &benchmake::WriteMake,
+) -> Result<benchmake::WriteMake, String> {
+    let (_, _, now) = write_make(elm, profiles)?;
+    if now.make != confirmed.make || now.chosen != confirmed.chosen {
+        return Err(format!(
+            "not cleared: the make changed since the confirmation ({}; now {})",
+            confirmed.words(),
+            now.words()
+        ));
+    }
+    if let Some(why) = clear::refused_on(profiles, now.make.as_deref(), tx, rx, "") {
+        return Err(why);
+    }
+    Ok(now)
 }
 
 /// `icarus obd health` (ICA-214): one answer to "how does everything look?": codes, monitors, misfires and fuel trims,
@@ -3358,52 +3386,62 @@ mod tests {
         assert_eq!((tx, rx, make.make.as_deref()), (0x7E0, 0x7E8, Some("kart")));
     }
 
-    /// ICA-222 on the command line: `obd clear --module` on a simulated ECM with a blank VIN. Without --make the engine
-    /// at 7E0 is refused (the make is not known, and that is said); with --make toyota (bound to the connection) it gets
-    /// as far as its codes, named as the make chosen; 780 (the airbag module) stays refused; a new connection starts
-    /// without it; on a VIN that decodes to toyota --make gm is refused, and on a well-formed VIN of a make with no
-    /// profile any --make is. Only the VIN read goes out before each refusal.
+    /// ICA-222 on the command line: `obd clear --module` on a simulated ECM with a blank VIN. Without a bench make the
+    /// engine at 7E0 is refused (the make is not known, and that is said); with toyota kept on the connection (as
+    /// `benchmake::bind` keeps it, tested in icarus-obd; binding here would write the real action log) it gets as far as
+    /// its codes, named as the make chosen; 780 (the airbag module) stays refused; a new connection starts without it;
+    /// and on a well-formed VIN of a make with no profile the kept make is refused. Only the VIN read goes out before each
+    /// refusal. Review: the make is asked again right before the clear, so a VIN that reads otherwise after the prompt
+    /// refuses it.
     #[test]
     fn clear_module_on_a_blank_vin_bench_ecm_takes_a_named_make() {
         let ps = vehicles::builtin();
-        let bench = |vin: &str| {
-            let car = icarus_obd::sim::SimCar::engine_off().with_vin(vin);
+        let bench = |vins: &[&str]| {
+            let car = icarus_obd::sim::SimCar::engine_off().with_vins(vins);
             let mut e = Elm::connect(Box::new(car)).unwrap();
             e.take_sent();
             e
         };
         let only_vin = |e: &mut Elm| e.take_sent().iter().all(|(_, _, d)| d[..] == [0x09, 0x02]);
-        let mut e = bench("");
+        let mut e = bench(&[""]);
         let why = clear_target(&mut e, "7E0", &ps).unwrap_err();
         assert!(
             why.contains("could be the airbag module") && why.contains("VIN blank"),
             "{why}"
         );
         assert!(only_vin(&mut e));
-        assert!(
-            benchmake::bind(&mut e, &ps, "toy").is_err(),
-            "never a guess"
-        );
-        benchmake::bind(&mut e, &ps, "toyota").unwrap();
-        let (tx, _, make, _) = clear_target(&mut e, "7E0", &ps).unwrap();
+        e.keep_bench_make(Some("toyota".into()));
+        let (tx, rx, make, _) = clear_target(&mut e, "7E0", &ps).unwrap();
         assert_eq!(tx, 0x7E0);
         assert_eq!(make.words(), "make chosen by me: toyota, VIN blank");
+        assert_eq!(clear_recheck(&mut e, &ps, tx, rx, &make).unwrap(), make);
         let why = clear_target(&mut e, "780", &ps).unwrap_err();
         assert!(why.contains("airbag"), "{why}");
         // the same bench ECU on a new connection: no make until it is named again
-        assert!(clear_target(&mut bench(""), "7E0", &ps).is_err());
-        let mut t = bench(sim::VIN);
-        let why = benchmake::bind(&mut t, &ps, "gm").unwrap_err();
-        assert!(why.contains("the VIN names toyota"), "{why}");
-        assert!(only_vin(&mut t));
-        let mut f = bench("ZZFICARUSFRND0001");
-        let why = benchmake::bind(&mut f, &ps, "toyota").unwrap_err();
+        assert!(clear_target(&mut bench(&[""]), "7E0", &ps).is_err());
+        // a friend's car (a well-formed VIN, no profile) with a make on its link: refused, the caution stays
+        let mut f = bench(&["ZZFICARUSFRND0001"]);
+        f.keep_bench_make(Some("toyota".into()));
+        let why = clear_target(&mut f, "7E0", &ps).unwrap_err();
         assert!(why.contains("names no profile"), "{why}");
-        assert!(
-            clear_target(&mut f, "7E0", &ps).is_err(),
-            "the caution holds"
-        );
         assert!(only_vin(&mut f));
+        // blank at the prompt, a well-formed VIN with no profile right before the clear: refused, nothing but VIN reads
+        let mut flap = bench(&["", "ZZFICARUSFRND0001"]);
+        flap.keep_bench_make(Some("toyota".into()));
+        let (tx, rx, make, _) = clear_target(&mut flap, "7E0", &ps).unwrap();
+        flap.take_sent();
+        let why = clear_recheck(&mut flap, &ps, tx, rx, &make).unwrap_err();
+        assert!(why.contains("names no profile"), "{why}");
+        assert!(only_vin(&mut flap));
+        // blank at the prompt, Toyota's VIN right before: the make is no longer the one confirmed (chosen by me)
+        let mut other = bench(&["", sim::VIN]);
+        other.keep_bench_make(Some("toyota".into()));
+        let (tx, rx, make, _) = clear_target(&mut other, "7E0", &ps).unwrap();
+        let why = clear_recheck(&mut other, &ps, tx, rx, &make).unwrap_err();
+        assert!(
+            why.contains("the make changed since the confirmation"),
+            "{why}"
+        );
     }
 
     /// ICA-192: --read-only is taken out wherever it stands (before the command, after it, twice), and nothing else is: the

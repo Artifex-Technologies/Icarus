@@ -1408,8 +1408,8 @@ impl App {
                 .small()
                 .weak(),
         );
-        // ICA-222: a bench ECU with a blank or foreign VIN gives no make, so every module write to it would be refused;
-        // its make is named here, once, before connecting (never guessed: a profile's own name)
+        // ICA-222: a bench ECU whose VIN reads blank gives no make, so every module write to it would be refused; its
+        // make is named here before Connect, for that connection only (never guessed: a profile's own name)
         ui.horizontal(|ui| {
             ui.label("Bench make");
             ui.add_enabled_ui(self.link == Link::Off, |ui| {
@@ -1430,7 +1430,7 @@ impl App {
             .on_disabled_hover_text("Disconnect to change it: a session names its make once");
             ui.label(
                 RichText::new(
-                    "only for an ECU on the bench whose VIN is blank, unreadable or names no profile; a VIN that names a make must agree",
+                    "only for an ECU on the bench whose VIN reads blank; a VIN that names a make must agree",
                 )
                 .small()
                 .weak(),

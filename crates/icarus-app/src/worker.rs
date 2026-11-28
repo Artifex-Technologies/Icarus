@@ -486,8 +486,12 @@ pub(crate) fn run_with(
                 send(Event::Status(format!("Connecting to {spec}...")));
                 match connect(open, &spec, &profiles, bench.as_deref()) {
                     Ok((mut e, mut info)) => {
-                        if let Err(why) = &info.make {
-                            send(Event::Status(format!("Bench make not used: {why}")));
+                        match &info.make {
+                            Err(why) => send(Event::Status(format!("Bench make not used: {why}"))),
+                            Ok(m) if bench.is_some() && !m.chosen => {
+                                send(Event::Status(format!("Bench make not used: {}", m.words())))
+                            }
+                            Ok(_) => {}
                         }
                         offered = info.live.clone();
                         // a recording goes on through a new connection to the same vehicle, never into another's
@@ -604,15 +608,12 @@ pub(crate) fn run_with(
                     send(Event::ClearFailed(format!("not cleared: {why}")));
                     continue;
                 }
-                // one module: on the make the confirmed connection's VIN picks, or the bench make kept on this
-                // connection where its VIN read blank (ICA-222); where its profile names no airbag module a module of
-                // unknown kind could be it (ICA-200); the airbag modules by ID or by the profile
-                let kept = elm.as_ref().and_then(Elm::bench_make);
-                let make = match icarus_obd::benchmake::for_vin(
-                    &profiles,
-                    Ok(on.vin.clone()),
-                    kept.as_deref(),
-                ) {
+                // one module: on the make the VIN read now picks (it must be the one confirmed), or the bench make kept
+                // on this connection where its VIN reads blank (ICA-222); where its profile names no airbag module a
+                // module of unknown kind could be it (ICA-200); the airbag modules by ID or by the profile. Only the
+                // VIN is read before a refusal.
+                let Some(e) = elm.as_mut() else { continue };
+                let make = match clear_make(e, &profiles, &on) {
                     Ok(m) => m,
                     Err(why) => {
                         send(Event::ClearFailed(format!("not cleared: {why}")));
@@ -629,7 +630,6 @@ pub(crate) fn run_with(
                     icarus_obd::audit::log(&format!("clear codes: {}", make.words()));
                 }
                 let make = make.make;
-                let Some(e) = elm.as_mut() else { continue };
                 live.clear();
                 send(Event::Status("Saving a report before clearing...".into()));
                 let saved = report::collect(e, &profiles, target.is_some())
@@ -1148,7 +1148,34 @@ fn connect(
     if let Some(why) = refused {
         info.make = Err(why);
     }
+    // the link keeps the make only when what the window says (gather's own VIN read) uses it: a VIN that read blank for
+    // the binding and then something else must not leave a make on the link the window says it is not using
+    if !matches!(&info.make, Ok(m) if m.chosen) {
+        elm.keep_bench_make(None);
+    }
     Ok((elm, info))
+}
+
+/// The make a clear confirmed on the connection `on` follows (ICA-222 review), read on the live link now: the VIN read
+/// again must be the one the clear was confirmed for, and the make is the one that VIN picks, or the bench make kept on
+/// this connection where it reads blank (`benchmake::for_vin`, as every other write asks it). Only the VIN is read.
+fn clear_make(
+    e: &mut Elm,
+    profiles: &[Profile],
+    on: &Connection,
+) -> Result<icarus_obd::benchmake::WriteMake, String> {
+    let now = j1979::vin(e).map_err(|x| x.to_string());
+    if now.as_ref().is_ok_and(|v| *v != on.vin) {
+        icarus_obd::audit::log(
+            "clear refused: the VIN read differently than when it was confirmed",
+        );
+        return Err(
+            "the vehicle's VIN reads differently now than when the clear was confirmed; nothing was sent: ask again"
+                .into(),
+        );
+    }
+    let m = icarus_obd::benchmake::for_vin(profiles, now, e.bench_make().as_deref())?;
+    Ok(m)
 }
 
 /// The profile a vehicle with `vin` is written (and its tests, settings and routines listed) as: its VIN's, or the bench
@@ -1873,6 +1900,88 @@ pub(crate) mod tests {
         worker.join().unwrap();
     }
 
+    /// ICA-222, second review. (1) The window's clear reads the VIN again on the live link: a bench ECM kept toyota on a
+    /// blank VIN, then reads a well-formed VIN of a make with no profile; its engine's clear is refused, the VIN read
+    /// again the only thing sent. (2) The link keeps a bench make only when the window uses it: blank for the binding,
+    /// Toyota's VIN for the Vehicle page, blank again at a test's start; the window said the make was not used, and the
+    /// test is refused by the caution (the make is not known), not let through on a make the link kept.
+    #[test]
+    fn a_bench_make_follows_the_vin_on_the_live_link() {
+        const FRIEND: &str = "ZZFICARUSFRND0001";
+        let _home = crate::TestHome::new("worker-ica222-live");
+        let (ctx, crx) = mpsc::channel();
+        let (etx, erx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            run_with(
+                crx,
+                etx,
+                icarus_obd::fence::Fence::default,
+                || {},
+                &|spec: &str| {
+                    // each VIN read in turn: the binding's, the Vehicle page's, then the write's
+                    let vins: &[&str] = match spec {
+                        "later-friend" => &["", "", FRIEND],
+                        "flapping" => &["", icarus_obd::sim::VIN, ""],
+                        s => return Err(format!("no adapter {s} in this test")),
+                    };
+                    Elm::connect(Box::new(
+                        icarus_obd::sim::SimCar::engine_off().with_vins(vins),
+                    ))
+                    .map_err(|e| e.to_string())
+                },
+                &icarus_obd::lock::session_allows_changes,
+            )
+        });
+        ctx.send(Cmd::BenchMake(Some("toyota".into()))).unwrap();
+        ctx.send(Cmd::Connect("later-friend".into())).unwrap();
+        let seen = until(&erx, "the connection", &|e| {
+            matches!(e, Event::Connected(_))
+        });
+        let Some(Event::Connected(info)) = seen.last() else {
+            unreachable!()
+        };
+        assert!(info.make.as_ref().unwrap().chosen);
+        until(&erx, "the connection's requests", &|e| {
+            matches!(e, Event::Sent(_))
+        });
+        ctx.send(Cmd::Clear {
+            target: Some((0x7E0, 0x7E8, Dialect::Uds)),
+            on: info.connection.clone(),
+        })
+        .unwrap();
+        let seen = until(&erx, "the refusal", &|e| matches!(e, Event::ClearFailed(_)));
+        let Some(Event::ClearFailed(why)) = seen.last() else {
+            unreachable!()
+        };
+        assert!(why.contains("reads differently now"), "{why}");
+        // (2) a VIN that flaps between the binding and the Vehicle page's read
+        ctx.send(Cmd::BenchMake(Some("toyota".into()))).unwrap();
+        ctx.send(Cmd::Connect("flapping".into())).unwrap();
+        let seen = until(&erx, "the second connection", &|e| {
+            matches!(e, Event::Connected(_))
+        });
+        assert!(
+            seen.iter()
+                .any(|e| matches!(e, Event::Status(s) if s.starts_with("Bench make not used"))),
+            "the window says it is not used"
+        );
+        let Some(Event::Connected(info)) = seen.last() else {
+            unreachable!()
+        };
+        assert!(!info.make.as_ref().unwrap().chosen);
+        let def = icarus_obd::sim::tests().remove(0);
+        ctx.send(Cmd::TestStart { def, value: 0.0 }).unwrap();
+        let seen = until(&erx, "the test's end", &|e| {
+            matches!(e, Event::TestStopped { .. } | Event::TestStarted(_))
+        });
+        let Some(Event::TestStopped { why, .. }) = seen.last() else {
+            panic!("the test started on a make the window said it was not using")
+        };
+        assert!(why.contains("could be the airbag module"), "{why}");
+        ctx.send(Cmd::Quit).unwrap();
+        worker.join().unwrap();
+    }
+
     #[test]
     fn a_clear_of_a_module_of_unknown_kind_is_refused_where_the_profile_names_no_airbag_module() {
         const KART: &str = "ZZKICARUSKART0001";
@@ -1942,11 +2051,11 @@ pub(crate) mod tests {
         );
         assert!(refusals[1].contains("is an airbag"), "{}", refusals[1]);
         for e in &after {
+            // only the VIN read again (ICA-222 review: the make is the one the VIN on the link picks now)
+            let only_vin = |sent: &[(f64, u32, Vec<u8>)]| sent.iter().all(|s| s.2 == [0x09, 0x02]);
             assert!(
-                !matches!(
-                    e,
-                    Event::Sent(_) | Event::Cleared(..) | Event::ReportSaved(_)
-                ),
+                !matches!(e, Event::Cleared(..) | Event::ReportSaved(_))
+                    && !matches!(e, Event::Sent(s) if !only_vin(s)),
                 "something went onto the bus for a refused clear"
             );
         }
