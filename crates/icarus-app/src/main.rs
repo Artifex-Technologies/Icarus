@@ -438,6 +438,8 @@ struct App {
     learn_mark: String,
     learn_tests: Vec<(icarus_obd::actuator::TestDef, bool)>,
     learn_settings: Vec<LearnSetting>,
+    /// Learned service routines (ICA-220), being named; true once added to the vehicle's file.
+    learn_services: Vec<(icarus_obd::service::ServiceDef, bool)>,
     learn_notes: Vec<String>,
     learn_saved: Option<Result<String, String>>,
     learn_sessions: Vec<std::path::PathBuf>,
@@ -626,6 +628,7 @@ impl App {
             learn_mark: String::new(),
             learn_tests: Vec::new(),
             learn_settings: Vec::new(),
+            learn_services: Vec::new(),
             learn_notes: Vec::new(),
             learn_saved: None,
             learn_sessions: Vec::new(),
@@ -1132,6 +1135,8 @@ impl App {
                         // what was learned is named on the Learning page
                         self.learn_tests = v.learned.iter().map(|t| (t.clone(), false)).collect();
                         self.learn_settings = v.settings.iter().map(LearnSetting::new).collect();
+                        self.learn_services =
+                            v.services.iter().map(|s| (s.clone(), false)).collect();
                         self.learn_notes = v.notes.clone();
                         if v.learning {
                             self.learn_saved = v.saved.clone();
@@ -1495,7 +1500,7 @@ impl App {
                         // in the chosen units, as live values are
                         for (p, v) in &f.values {
                             if let Some(x) = j1979::pid(*p) {
-                                row(ui, x.name, &logs::value_text(x.unit, *v, 1));
+                                row(ui, x.name, &logs::pid_value_text(*p, x.unit, *v, 1));
                             }
                         }
                     });
@@ -2252,9 +2257,11 @@ impl App {
                                     .size(24.0)
                                     .strong(),
                                 );
-                                ui.label(logs::shown(d.unit, 0.0).1);
+                                // "psi absolute" for manifold and barometric pressure (ICA-224)
+                                ui.label(logs::pid_unit(*p, d.unit));
                                 // both units chosen: the other beside it
-                                if let Some((x, u)) = last.and_then(|v| logs::also(d.unit, v)) {
+                                if let Some((x, u)) = last.and_then(|v| logs::pid_also(*p, d.unit, v))
+                                {
                                     ui.add_space(8.0);
                                     ui.label(RichText::new(format!("{x:.1} {u}")).size(16.0).weak());
                                 }
@@ -2360,7 +2367,7 @@ impl App {
         };
         // volts and pressure move in small steps: one decimal
         let dec = if matches!(pid, 0x42 | 0x33) { 1 } else { 0 };
-        let unit = logs::shown(d.unit, 0.0).1;
+        let unit = logs::pid_unit(pid, d.unit);
         egui::Frame::new()
             .fill(pal.field)
             .stroke(Stroke::new(width, edge))
@@ -2734,12 +2741,13 @@ impl App {
                     });
                 });
         });
-        if !b.learned.is_empty() || !b.settings.is_empty() {
+        if !b.learned.is_empty() || !b.settings.is_empty() || !b.services.is_empty() {
             ui.add_space(6.0);
             ui.label(format!(
-                "Learned while watching: {} test(s), {} setting(s). The Learning page names them and adds them to the vehicle's file.",
+                "Learned while watching: {} test(s), {} setting(s), {} routine(s). The Learning page names them and adds them to the vehicle's file.",
                 b.learned.len(),
-                b.settings.len()
+                b.settings.len(),
+                b.services.len()
             ));
         }
         if running {
@@ -3215,19 +3223,44 @@ impl App {
         }
     }
 
+    /// Adds learned routine `i` (as named on the Learning page) to the user's file for make `profile_id` (ICA-220), as a
+    /// setting or a test is added: unchecked, with the learner's cautious conditions; refused (nothing written) on an
+    /// airbag module, a key module, or a module of unknown kind where the make's profile names no airbag module. Once
+    /// added, the Tests page offers it.
+    fn add_learned_service(&mut self, profile_id: &str, i: usize) {
+        let Some((s, _)) = self.learn_services.get(i) else {
+            return;
+        };
+        let s = s.as_learned();
+        match icarus_obd::vehicles::add_service_to_user_file(profile_id, &s) {
+            Ok(p) => {
+                self.status = format!(
+                    "Added to {}: the Tests page offers it under Service routines.",
+                    p.display()
+                );
+                self.error = None;
+                self.learn_services[i].1 = true;
+                if let Some(info) = self.info.as_mut() {
+                    info.services.push(s);
+                }
+            }
+            Err(e) => self.error = Some(e),
+        }
+    }
+
     fn page_learn(&mut self, ui: &mut egui::Ui, pal: &theme::Palette) {
         // Sarina is optional: nothing about her shows unless she is installed
         let sarina = icarus_obd::learning::sarina().is_some();
         let running = self.bus.as_ref().is_some_and(|b| b.running && b.learning);
         let other_watch = self.bus.as_ref().is_some_and(|b| b.running && !b.learning);
         card(ui, pal, "Learning from another tool", |ui| {
-            ui.label("Icarus learns a vehicle's settings and output tests by watching another tool use them on it: a dealer tool, a shop scan tool, a phone app that does customizations. It only listens; the other tool does the work.");
+            ui.label("Icarus learns a vehicle's settings, output tests and service routines by watching another tool use them on it: a dealer tool, a shop scan tool, a phone app that does customizations. It only listens; the other tool does the work.");
             ui.label("1. A Y-splitter on the OBD port: the other tool on one side, Icarus's adapter on the other (or a CAN interface tapped into the bus). Ignition on, engine off.");
             ui.label("2. Start learning. Before each change in the other tool, type what you are about to do (\"seat belt chime off\") and press Mark: what the module accepts next is named by it. One change per mark works best.");
             ui.label(if sarina {
-                "3. Stop. Name the values, add each to the vehicle's file; the Settings and Tests pages then offer them. The session is saved in the vehicle's Logs folder, and Sarina can read it and say what she makes of anything Icarus could not work out."
+                "3. Stop. Name the values, add each to the vehicle's file; the Settings and Tests pages then offer them (a routine, the Tests page's service routines). The session is saved in the vehicle's Logs folder, and Sarina can read it and say what she makes of anything Icarus could not work out."
             } else {
-                "3. Stop. Name the values, add each to the vehicle's file; the Settings and Tests pages then offer them. The session is saved in the vehicle's Logs folder."
+                "3. Stop. Name the values, add each to the vehicle's file; the Settings and Tests pages then offer them (a routine, the Tests page's service routines). The session is saved in the vehicle's Logs folder."
             });
         });
         ui.horizontal(|ui| {
@@ -3286,10 +3319,11 @@ impl App {
             if b.learning {
                 ui.label(
                     RichText::new(format!(
-                        "{} frames; learned so far: {} setting(s), {} test(s); {} thing(s) seen but not learned",
+                        "{} frames; learned so far: {} setting(s), {} test(s), {} routine(s); {} thing(s) seen but not learned",
                         b.frames,
                         b.settings.len(),
                         b.learned.len(),
+                        b.services.len(),
                         b.notes.len()
                     ))
                     .weak(),
@@ -3412,6 +3446,38 @@ impl App {
                 },
             );
         }
+        let mut add_service: Option<usize> = None;
+        for (i, (s, added)) in self.learn_services.iter_mut().enumerate() {
+            card(
+                ui,
+                pal,
+                &format!(
+                    "Service routine {:04X} on module {:03X}",
+                    s.routine, s.module
+                ),
+                |ui| {
+                    ui.label(RichText::new("The other tool started this routine and the module took it. Name it after what it does (a relearn, a reset...); it is added unchecked, run only parked with the engine off, over a cable, for 30 s at most, in the extended session.").weak());
+                    ui.label(RichText::new(service_detail(s)).monospace().small());
+                    ui.add_enabled_ui(!*added, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Name");
+                            ui.add(egui::TextEdit::singleline(&mut s.name).desired_width(360.0));
+                        });
+                    });
+                    if *added {
+                        ui.colored_label(
+                            pal.green,
+                            "In the vehicle's file: the Tests page offers it under Service routines.",
+                        );
+                    } else if ui
+                        .add_enabled(profile.is_some(), egui::Button::new(add_label.as_str()))
+                        .clicked()
+                    {
+                        add_service = Some(i);
+                    }
+                },
+            );
+        }
         if !self.learn_notes.is_empty() {
             card(ui, pal, "Seen but not learned", |ui| {
                 ui.label(RichText::new(if sarina {
@@ -3460,6 +3526,10 @@ impl App {
                 }
                 Err(e) => self.error = Some(e),
             }
+        }
+        if let Some(i) = add_service {
+            let id = profile.as_ref().map(|p| p.0.clone()).unwrap_or_default();
+            self.add_learned_service(&id, i);
         }
         // the saved sessions (Ask Sarina only when Sarina is installed)
         if !self.learn_sessions.is_empty() {
@@ -5565,6 +5635,28 @@ impl eframe::App for App {
     }
 }
 
+/// A learned routine on the Learning page, in a line: "module 7E0 (answers 7E8), routine 0203, parameters 01".
+fn service_detail(s: &icarus_obd::service::ServiceDef) -> String {
+    let params = if s.params.is_empty() {
+        "no parameters".to_string()
+    } else {
+        format!(
+            "parameters {}",
+            s.params
+                .iter()
+                .map(|b| format!("{b:02X}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+    };
+    format!(
+        "module {:03X} (answers {:03X}), routine {:04X}, {params}",
+        s.module,
+        s.rx(),
+        s.routine
+    )
+}
+
 /// A learned setting being named on the Learning page: its values' names as learned and as typed, and whether it is in
 /// the vehicle's file now.
 struct LearnSetting {
@@ -6230,6 +6322,101 @@ mod window_writes {
         let _ = app.tx.send(Cmd::Disconnect);
         until(&mut app, "the disconnect", |a| a.link == Link::Off);
         assert!(app.sent_log.is_empty(), "nothing went onto the bus");
+        drop(app);
+        worker.join().unwrap();
+        drop(home);
+    }
+
+    /// ICA-220 in the window: a routine the learner took from the bus, named on the Learning page, is added to the
+    /// vehicle's file in the test's own home (never the real one) as an unchecked `[[service]]` entry with the learner's
+    /// cautious conditions, and the Tests page offers it; one on an airbag module, or on a module of unknown kind where the
+    /// make's profile names no airbag module (GM), is refused with nothing written.
+    #[test]
+    fn a_learned_routine_is_named_and_added_from_the_learning_page() {
+        use icarus_obd::actuator::Condition;
+        let home = TestHome::new("app-ica220");
+        let (mut app, worker) = window(icarus_obd::lock::session_allows_changes);
+        let mut an = icarus_obd::bus::Analyzer::watching(icarus_obd::fence::Fence::default());
+        let frame = |id: u32, data: &[u8], at: f64| icarus_obd::bus::Frame {
+            id,
+            ext: false,
+            data: data.to_vec(),
+            at,
+        };
+        an.add(&frame(0x7E0, &[0x05, 0x31, 0x01, 0x02, 0x03, 0x01], 1.0));
+        an.add(&frame(0x7E8, &[0x04, 0x71, 0x01, 0x02, 0x03], 1.1));
+        an.finish();
+        assert_eq!(an.services.len(), 1, "{:?}", an.notes);
+        let learned = an.services[0].clone();
+        assert_eq!(
+            service_detail(&learned),
+            "module 7E0 (answers 7E8), routine 0203, parameters 01"
+        );
+        app.learn_services = vec![
+            (learned.clone(), false),
+            (
+                icarus_obd::service::ServiceDef {
+                    module: 0x780,
+                    ..learned.clone()
+                },
+                false,
+            ),
+            (
+                icarus_obd::service::ServiceDef {
+                    module: 0x7A4,
+                    ..learned.clone()
+                },
+                false,
+            ),
+        ];
+        // named on the page, then added
+        app.learn_services[0].0.name = " Oil life reset ".into();
+        app.add_learned_service("toyota", 0);
+        assert_eq!(app.error, None);
+        assert!(app.learn_services[0].1, "marked as added");
+        assert!(app.status.contains("Tests page"), "{}", app.status);
+        let vehicles = home.dir.join("config/icarus/vehicles");
+        let file = vehicles.join("toyota.toml");
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(
+            text.contains("[[service]]\nname = \"Oil life reset\""),
+            "{text}"
+        );
+        let (all, problems) = icarus_obd::vehicles::load(Some(&vehicles));
+        assert!(problems.is_empty(), "{problems:?}");
+        let s = icarus_obd::vehicles::find(&all, "toyota")
+            .unwrap()
+            .services
+            .iter()
+            .find(|s| s.name == "Oil life reset")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            (s.module, s.routine, s.params.clone(), s.checked),
+            (0x7E0, 0x0203, vec![0x01], false)
+        );
+        assert_eq!(
+            (s.conditions.clone(), s.max_seconds, s.extended, s.wired),
+            (
+                vec![Condition::EngineOff, Condition::Stationary],
+                30,
+                true,
+                true
+            )
+        );
+        // refused: nothing written, not marked as added
+        for (make, i, want) in [
+            ("toyota", 1, "airbag"),
+            ("gm", 2, "could be the airbag module"),
+        ] {
+            app.error = None;
+            app.add_learned_service(make, i);
+            let e = app.error.clone().unwrap_or_default();
+            assert!(e.contains(want), "{want}: {e}");
+            assert!(!app.learn_services[i].1);
+        }
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), text);
+        assert!(!vehicles.join("gm.toml").exists());
         drop(app);
         worker.join().unwrap();
         drop(home);

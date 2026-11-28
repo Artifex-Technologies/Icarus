@@ -84,19 +84,58 @@ pub fn value_text(unit: &str, v: f64, dec: usize) -> String {
 }
 
 pub fn value_text_in(u: crate::levels::Units, unit: &str, v: f64, dec: usize) -> String {
+    text_in(u, false, unit, v, dec)
+}
+
+/// `value_text` for standard value `pid` (ICA-224): an absolute pressure (manifold, barometric: `units::ABSOLUTE_PIDS`)
+/// says "psi absolute", as the report does, since plain psi reads as above the outside air and so as boost.
+pub fn pid_value_text(pid: u8, unit: &str, v: f64, dec: usize) -> String {
+    pid_value_text_in(units(), pid, unit, v, dec)
+}
+
+pub fn pid_value_text_in(
+    u: crate::levels::Units,
+    pid: u8,
+    unit: &str,
+    v: f64,
+    dec: usize,
+) -> String {
+    text_in(u, icarus_obd::units::absolute(pid), unit, v, dec)
+}
+
+fn text_in(u: crate::levels::Units, absolute: bool, unit: &str, v: f64, dec: usize) -> String {
+    let label = |x: &str| icarus_obd::units::unit_label(x, absolute);
     let (x, xu) = shown_in(u, unit, v);
-    let first = format!("{x:.dec$} {xu}").trim_end().to_string();
+    let first = format!("{x:.dec$} {}", label(xu)).trim_end().to_string();
     match also_in(u, unit, v) {
-        Some((y, yu)) => format!("{first} ({y:.dec$} {yu})"),
+        Some((y, yu)) => format!("{first} ({y:.dec$} {})", label(yu)),
         None => first,
     }
 }
 
-/// With both units chosen: the value in the other unit, shown beside the first (None otherwise, or for a unit with no other).
-pub fn also(unit: &str, v: f64) -> Option<(f64, &str)> {
-    also_in(units(), unit, v)
+/// Standard value `pid`'s unit as shown first: "psi absolute" for an absolute pressure in psi, else as `shown` gives it.
+pub fn pid_unit(pid: u8, unit: &str) -> String {
+    pid_unit_in(units(), pid, unit)
 }
 
+pub fn pid_unit_in(u: crate::levels::Units, pid: u8, unit: &str) -> String {
+    icarus_obd::units::unit_label(shown_in(u, unit, 0.0).1, icarus_obd::units::absolute(pid))
+}
+
+/// `also` for standard value `pid`, its unit as `pid_unit` names it.
+pub fn pid_also(pid: u8, unit: &str, v: f64) -> Option<(f64, String)> {
+    pid_also_in(units(), pid, unit, v)
+}
+
+pub fn pid_also_in(u: crate::levels::Units, pid: u8, unit: &str, v: f64) -> Option<(f64, String)> {
+    let (y, yu) = also_in(u, unit, v)?;
+    Some((
+        y,
+        icarus_obd::units::unit_label(yu, icarus_obd::units::absolute(pid)),
+    ))
+}
+
+/// With both units chosen: the value in the other unit, shown beside the first (None otherwise, or for a unit with no other).
 pub fn also_in(u: crate::levels::Units, unit: &str, v: f64) -> Option<(f64, &str)> {
     if u != crate::levels::Units::Both {
         return None;
@@ -729,6 +768,11 @@ const CHARTS: &[(&str, &[&[&str]], bool)] = &[
         ],
         false,
     ),
+    (
+        "Manifold and outside air pressure",
+        &[&["intake manifold pressure"], &["barometric pressure"]],
+        false,
+    ),
     ("Fuel rail pressure", &[&["fuel rail"]], false),
     (
         "Engine torque",
@@ -739,6 +783,18 @@ const CHARTS: &[(&str, &[&[&str]], bool)] = &[
     ("Battery and charging", &[&["module voltage"]], false),
     ("Fuel level", &[&["fuel level"]], false),
 ];
+
+/// A chart's unit in its title, from its first column's: "psi absolute" when every column in it is an absolute pressure
+/// (manifold, barometric: ICA-224), so the manifold's 5 psi does not read as boost. Recordings keep kPa in their
+/// headers, old ones and new alike; the column is known by its name.
+fn chart_unit(u: crate::levels::Units, s: &Series, idx: &[usize]) -> String {
+    let unit = idx.first().map_or("", |i| unit_of(&s.names[*i]));
+    let absolute = !idx.is_empty()
+        && idx
+            .iter()
+            .all(|i| icarus_obd::units::absolute_column(&s.names[*i]));
+    icarus_obd::units::unit_label(shown_in(u, unit, 0.0).1, absolute)
+}
 
 fn charts(ui: &mut egui::Ui, pal: &theme::Palette, s: &Series, hover: &mut Option<f64>) {
     let (t0, t1) = (s.t[0], *s.t.last().unwrap_or(&s.t[0]));
@@ -752,7 +808,7 @@ fn charts(ui: &mut egui::Ui, pal: &theme::Palette, s: &Series, hover: &mut Optio
         let unit = unit_of(&s.names[idx[0]]);
         let conv = |v: f64| shown(unit, v).0;
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new(format!("{title} ({})", shown(unit, 0.0).1)).strong());
+            ui.label(RichText::new(format!("{title} ({})", chart_unit(units(), s, &idx))).strong());
             for (k, &i) in idx.iter().enumerate() {
                 let short = s.names[i]
                     .split(" [")
@@ -890,6 +946,71 @@ mod tests {
     }
 
     use super::*;
+
+    /// ICA-224: manifold and barometric pressure say "psi absolute" in the window, as the report does; fuel pressure
+    /// (gauge) stays psi, and kPa needs no word.
+    #[test]
+    fn absolute_pressures_say_so_in_the_window() {
+        use crate::levels::Units;
+        let t = |u, pid, v| pid_value_text_in(u, pid, "kPa", v, 1);
+        assert_eq!(t(Units::Imperial, 0x0B, 48.0), "7.0 psi absolute");
+        assert_eq!(t(Units::Imperial, 0x33, 101.0), "14.6 psi absolute");
+        assert_eq!(t(Units::Imperial, 0x0A, 300.0), "43.5 psi", "gauge");
+        assert_eq!(t(Units::Imperial, 0x23, 300.0), "43.5 psi", "gauge rail");
+        assert_eq!(t(Units::Metric, 0x0B, 48.0), "48.0 kPa");
+        let both = t(Units::Both, 0x0B, 48.0);
+        assert!(
+            both == "7.0 psi absolute (48.0 kPa)" || both == "48.0 kPa (7.0 psi absolute)",
+            "{both}"
+        );
+        // not a pressure: as before
+        assert_eq!(
+            pid_value_text_in(Units::Imperial, 0x0D, "km/h", 72.0, 1),
+            "44.7 mph"
+        );
+        // the live card's and gauge's unit, and the other one beside it
+        assert_eq!(pid_unit_in(Units::Imperial, 0x0B, "kPa"), "psi absolute");
+        assert_eq!(pid_unit_in(Units::Imperial, 0x0A, "kPa"), "psi");
+        assert_eq!(pid_unit_in(Units::Metric, 0x33, "kPa"), "kPa");
+        let other = pid_also_in(Units::Both, 0x33, "kPa", 101.0).unwrap().1;
+        assert!(other == "psi absolute" || other == "kPa", "{other}");
+        assert_eq!(pid_also_in(Units::Imperial, 0x33, "kPa", 101.0), None);
+    }
+
+    /// The Logs page's chart titles: by the column's name, so a recording made before ICA-224 (headers in kPa, as now)
+    /// reads the same.
+    #[test]
+    fn a_manifold_chart_says_absolute() {
+        use crate::levels::Units;
+        let text = "time_s,Intake manifold pressure (MAP) [kPa],Barometric pressure [kPa],\
+                    Fuel pressure (gauge) [kPa],Fuel rail pressure (absolute) [kPa],Fuel rail pressure [kPa]\n\
+                    0.0,48,101,300,5000,5000\n1.0,50,101,300,5000,5000\n";
+        let s = drivelog::series(text).unwrap();
+        let find = |w: &[&str]| s.find(w).unwrap();
+        let map = find(&["intake manifold pressure"]);
+        let baro = find(&["barometric"]);
+        let fuel = find(&["fuel pressure (gauge)"]);
+        let rail_abs = find(&["fuel rail pressure (absolute)"]);
+        let rail = s
+            .names
+            .iter()
+            .position(|n| n == "Fuel rail pressure [kPa]")
+            .unwrap();
+        assert_eq!(
+            chart_unit(Units::Imperial, &s, &[map, baro]),
+            "psi absolute"
+        );
+        assert_eq!(chart_unit(Units::Metric, &s, &[map, baro]), "kPa");
+        assert_eq!(chart_unit(Units::Imperial, &s, &[fuel]), "psi");
+        assert_eq!(chart_unit(Units::Imperial, &s, &[rail_abs]), "psi absolute");
+        // a chart mixing an absolute rail pressure and a gauge one says psi; the line's name says absolute
+        assert_eq!(chart_unit(Units::Imperial, &s, &[rail_abs, rail]), "psi");
+        assert_eq!(chart_unit(Units::Imperial, &s, &[]), "");
+        // the new chart finds both columns by its words
+        let (_, wanted, _) = CHARTS.iter().find(|c| c.0.starts_with("Manifold")).unwrap();
+        let idx: Vec<usize> = wanted.iter().filter_map(|w| s.find(w)).collect();
+        assert_eq!(idx, vec![map, baro]);
+    }
 
     #[test]
     fn the_units_chosen_in_the_settings() {

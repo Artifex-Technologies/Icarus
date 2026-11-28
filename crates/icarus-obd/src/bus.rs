@@ -888,7 +888,8 @@ impl Analyzer {
                     results: true,
                     conditions: vec![Condition::EngineOff, Condition::Stationary],
                     max_seconds: 30,
-                    wired: false,
+                    // what an unknown routine writes is not known (it could be coding): a cable (ICA-220)
+                    wired: true,
                     warning: format!(
                         "Learned by watching another tool ({}): find out what it does before relying on it.",
                         crate::report::now()

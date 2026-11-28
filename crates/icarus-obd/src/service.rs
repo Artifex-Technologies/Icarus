@@ -86,6 +86,33 @@ impl ServiceDef {
         None
     }
 
+    /// This routine as a learned one is added to a vehicle's file (ICA-220): its name trimmed, unchecked, with the learner's
+    /// cautious conditions whatever was changed on the way (engine off and parked, never engine running; 30 s at most; the
+    /// extended session; a cable, since what an unknown routine writes is not known), its module, answer ID, routine,
+    /// parameters, results and warning as learned.
+    pub fn as_learned(&self) -> ServiceDef {
+        let mut conditions: Vec<Condition> = self
+            .conditions
+            .iter()
+            .filter(|c| **c != Condition::EngineRunning)
+            .cloned()
+            .collect();
+        for c in [Condition::EngineOff, Condition::Stationary] {
+            if !conditions.contains(&c) {
+                conditions.push(c);
+            }
+        }
+        ServiceDef {
+            name: self.name.trim().to_string(),
+            conditions,
+            max_seconds: self.max_seconds.clamp(1, 30),
+            extended: true,
+            wired: true,
+            checked: false,
+            ..self.clone()
+        }
+    }
+
     fn routine_request(&self, sub: u8) -> Vec<u8> {
         let mut r = vec![0x31, sub, (self.routine >> 8) as u8, self.routine as u8];
         if sub == 0x01 {

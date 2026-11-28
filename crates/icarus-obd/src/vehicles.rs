@@ -541,9 +541,43 @@ pub fn add_setting_to_user_file(profile_id: &str, entry: &str) -> Result<PathBuf
     add_test_to_user_file(profile_id, entry)
 }
 
+/// Adds a learned service routine (ICA-220) to the user's file for this make as a `[[service]]` entry, as
+/// `add_test_to_user_file` does a test: unchecked, with the learner's cautious conditions kept
+/// (`service::ServiceDef::as_learned`: engine off, parked, 30 s at most, the extended session, a cable). Refused before
+/// the home folder is touched, like a test or a setting: a routine aimed at an airbag module, at a key module (`fence`),
+/// or at a module of unknown kind on a make whose profile names no airbag module (ICA-200).
+pub fn add_service_to_user_file(
+    profile_id: &str,
+    s: &crate::service::ServiceDef,
+) -> Result<PathBuf, String> {
+    add_service_in(profile_id, s, user_dir)
+}
+
+/// `add_service_to_user_file` with the folder given by `dir` (asked for only once every check has passed).
+fn add_service_in(
+    profile_id: &str,
+    s: &crate::service::ServiceDef,
+    dir: impl FnOnce() -> Option<PathBuf>,
+) -> Result<PathBuf, String> {
+    let s = s.as_learned();
+    if s.name.is_empty() {
+        return Err("the routine needs a name".into());
+    }
+    add_entry_in(profile_id, &crate::service::to_toml(&s), dir)
+}
+
 /// Adds a test (a `[[test]]` entry; any entry, checked the same way) to the user's file for this make, creating the file if
 /// needed: it then adds to the built-in profile of the same name. The entry is checked before anything is written.
 pub fn add_test_to_user_file(profile_id: &str, entry: &str) -> Result<PathBuf, String> {
+    add_entry_in(profile_id, entry, user_dir)
+}
+
+/// `add_test_to_user_file` with the folder given by `dir`: every check on the entry comes before it is asked for.
+fn add_entry_in(
+    profile_id: &str,
+    entry: &str,
+    dir: impl FnOnce() -> Option<PathBuf>,
+) -> Result<PathBuf, String> {
     if profile_id.is_empty()
         || !profile_id
             .chars()
@@ -566,7 +600,7 @@ pub fn add_test_to_user_file(profile_id: &str, entry: &str) -> Result<PathBuf, S
     if let Some((what, name, why)) = cautioned_entries(&new, &current()).into_iter().next() {
         return Err(format!("the new entry: {what} \"{name}\": {why}"));
     }
-    let dir = user_dir().ok_or("no config folder")?;
+    let dir = dir().ok_or("no config folder")?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let p = dir.join(format!("{profile_id}.toml"));
     let mut text = std::fs::read_to_string(&p).unwrap_or_else(|_| {
@@ -809,6 +843,159 @@ fn with_profile(mut v: Vec<ModuleAddr>, p: &Profile) -> Vec<ModuleAddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ICA-220: a learned routine goes into the user's file (a scratch folder here) as an unchecked `[[service]]` entry
+    /// with the learner's cautious conditions, even when they were loosened on the way; one aimed at an airbag module, a
+    /// key module, or a module of unknown kind on a make whose profile names no airbag module is refused before the
+    /// folder is even asked for, and nothing is written.
+    #[test]
+    fn a_learned_routine_is_added_to_the_users_file_or_refused() {
+        use crate::actuator::Condition;
+        use crate::service::ServiceDef;
+        let dir =
+            std::env::temp_dir().join(format!("icarus-vehicles-ica220-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        profiles_for_test(None);
+        crate::fence::fence_for_test(Some(crate::fence::Fence::default()));
+        let learned = ServiceDef {
+            name: "  Throttle relearn ".into(),
+            module: 0x7E0,
+            rx: None,
+            routine: 0xFF00,
+            params: vec![0x01, 0x02],
+            extended: true,
+            results: true,
+            conditions: vec![Condition::EngineOff, Condition::Stationary],
+            max_seconds: 30,
+            wired: true,
+            warning: "Learned by watching another tool.".into(),
+            checked: false,
+        };
+        // loosened on the way (by hand, or a later change): the entry is as cautious as the learner made it
+        let loose = ServiceDef {
+            conditions: vec![Condition::EngineRunning],
+            max_seconds: 120,
+            extended: false,
+            wired: false,
+            checked: true,
+            ..learned.clone()
+        };
+        let asked = std::cell::Cell::new(0);
+        let folder = || {
+            asked.set(asked.get() + 1);
+            Some(dir.clone())
+        };
+        let p = add_service_in("toyota", &loose, folder).unwrap();
+        assert_eq!((p.clone(), asked.get()), (dir.join("toyota.toml"), 1));
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(
+            text.contains("[[service]]\nname = \"Throttle relearn\""),
+            "{text}"
+        );
+        let (all, problems) = load(Some(&dir));
+        assert!(problems.is_empty(), "{problems:?}");
+        let s = find(&all, "toyota")
+            .unwrap()
+            .services
+            .iter()
+            .find(|s| s.name == "Throttle relearn")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            (
+                s.module,
+                s.routine,
+                s.params.clone(),
+                s.results,
+                s.warning.clone()
+            ),
+            (
+                0x7E0,
+                0xFF00,
+                vec![0x01, 0x02],
+                true,
+                learned.warning.clone()
+            )
+        );
+        assert_eq!(
+            (
+                s.conditions.clone(),
+                s.max_seconds,
+                s.extended,
+                s.wired,
+                s.checked
+            ),
+            (
+                vec![Condition::EngineOff, Condition::Stationary],
+                30,
+                true,
+                true,
+                false
+            )
+        );
+        assert_eq!(s, learned.as_learned());
+        // a second routine adds to the same file
+        let reset = ServiceDef {
+            name: "Learned: routine 0203 on 7E0".into(),
+            routine: 0x0203,
+            ..learned.clone()
+        };
+        add_service_in("toyota", &reset, folder).unwrap();
+        let (all, _) = load(Some(&dir));
+        assert_eq!(find(&all, "toyota").unwrap().services.len(), 2);
+        let before = std::fs::read_to_string(&p).unwrap();
+
+        // refused, and the folder never asked for: nothing written
+        asked.set(0);
+        let fenced = crate::fence::one_for_test(0x7A0, crate::fence::Kind::Immobilizer);
+        for (make, s, fence, want) in [
+            (
+                "toyota",
+                ServiceDef {
+                    module: 0x780,
+                    ..learned.clone()
+                },
+                crate::fence::Fence::default(),
+                "airbag",
+            ),
+            (
+                "toyota",
+                ServiceDef {
+                    module: 0x7A0,
+                    ..learned.clone()
+                },
+                fenced,
+                "immobilizer",
+            ),
+            (
+                "gm",
+                ServiceDef {
+                    module: 0x7A4,
+                    ..learned.clone()
+                },
+                crate::fence::Fence::default(),
+                "could be the airbag module",
+            ),
+            (
+                "toyota",
+                ServiceDef {
+                    name: "  ".into(),
+                    ..learned.clone()
+                },
+                crate::fence::Fence::default(),
+                "needs a name",
+            ),
+        ] {
+            crate::fence::fence_for_test(Some(fence));
+            let why = add_service_in(make, &s, folder).unwrap_err();
+            assert!(why.contains(want), "{want}: {why}");
+            assert_eq!(asked.get(), 0, "{want}: the folder was asked for");
+        }
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), before);
+        assert!(!dir.join("gm.toml").exists());
+        crate::fence::fence_for_test(None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn every_built_in_profile_parses_and_prefixes_do_not_clash() {

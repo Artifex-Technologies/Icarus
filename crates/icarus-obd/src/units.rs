@@ -27,11 +27,37 @@ pub fn both(unit: &str, v: f64, dec: usize) -> String {
 /// and the gauge rail pressure (23) are above the outside air.
 pub const ABSOLUTE_PIDS: &[u8] = &[0x0B, 0x33, 0x53, 0x59];
 
+/// Whether standard value `pid` is an absolute pressure (`ABSOLUTE_PIDS`).
+pub fn absolute(pid: u8) -> bool {
+    ABSOLUTE_PIDS.contains(&pid)
+}
+
+/// Whether a recording's column (`"Intake manifold pressure (MAP) [kPa]"`, as `icarus obd live --csv` and the drive
+/// recorder name a standard value) holds one of the absolute pressures: its name before the unit is one of theirs.
+/// Recordings keep the metric unit in their headers, so old and new files read the same way.
+pub fn absolute_column(name: &str) -> bool {
+    let base = name.rsplit_once(" [").map_or(name, |(b, _)| b).trim();
+    ABSOLUTE_PIDS
+        .iter()
+        .filter_map(|p| crate::j1979::pid(*p))
+        .any(|d| d.name.eq_ignore_ascii_case(base))
+}
+
+/// A unit as shown for a pressure that is absolute or not: "psi absolute" for an absolute one in psi, every other unit as
+/// it is (kPa is read as absolute already, as the standard gives it).
+pub fn unit_label(unit: &str, absolute: bool) -> String {
+    if absolute && unit == "psi" {
+        "psi absolute".to_string()
+    } else {
+        unit.to_string()
+    }
+}
+
 /// `both` for standard value `pid`: an absolute pressure says so beside psi ("7.0 psi absolute (48.0 kPa)"), since psi in
 /// the US is read as above the outside air (a tire gauge, boost) and 7 psi of manifold pressure would read as boost.
 pub fn both_pid(pid: u8, unit: &str, v: f64, dec: usize) -> String {
     let s = both(unit, v, dec);
-    if unit == "kPa" && ABSOLUTE_PIDS.contains(&pid) {
+    if unit == "kPa" && absolute(pid) {
         s.replacen(" psi (", " psi absolute (", 1)
     } else {
         s
@@ -64,6 +90,16 @@ mod tests {
         // fuel pressure is gauge: plain psi
         assert_eq!(both_pid(0x0A, "kPa", 300.0, 1), "43.5 psi (300.0 kPa)");
         assert_eq!(both_pid(0x0D, "km/h", 72.0, 1), "44.7 mph (72.0 km/h)");
+        assert_eq!(unit_label("psi", true), "psi absolute");
+        assert_eq!(unit_label("psi", false), "psi");
+        assert_eq!(unit_label("kPa", true), "kPa");
+        // a recording's columns, by the names the recorder gives them
+        assert!(absolute_column("Intake manifold pressure (MAP) [kPa]"));
+        assert!(absolute_column("Barometric pressure [kPa]"));
+        assert!(absolute_column("Fuel rail pressure (absolute) [kPa]"));
+        assert!(!absolute_column("Fuel rail pressure [kPa]"));
+        assert!(!absolute_column("Fuel pressure (gauge) [kPa]"));
+        assert!(!absolute_column("Vehicle speed [km/h]"));
         // every absolute PID is a kPa value in the table, and says absolute in its name or explanation
         for p in ABSOLUTE_PIDS {
             let d = crate::j1979::pid(*p).unwrap();

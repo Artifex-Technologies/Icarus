@@ -189,6 +189,8 @@ pub struct BusView {
     pub log: Vec<String>,
     pub learned: Vec<actuator::TestDef>,
     pub settings: Vec<icarus_obd::settings::SettingDef>,
+    /// Service routines the other tool started and the module took (ICA-220: named and added on the Learning page).
+    pub services: Vec<icarus_obd::service::ServiceDef>,
     pub notes: Vec<String>,
     /// Where a finished learning session was saved (or why it was not).
     pub saved: Option<Result<String, String>>,
@@ -219,6 +221,7 @@ fn view(a: &icarus_obd::bus::Analyzer, now: f64, running: bool, ended: Option<St
         log: a.log.iter().rev().take(200).rev().cloned().collect(),
         learned: a.learned.clone(),
         settings: a.settings.clone(),
+        services: a.services.clone(),
         notes: a.notes.clone(),
         saved: None,
         learning: false,

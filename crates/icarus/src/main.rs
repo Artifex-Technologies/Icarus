@@ -2593,26 +2593,7 @@ fn learn_session(
     let text = icarus_obd::learning::session_text(&an, &source, &vehicle, &modules);
     let dir = logs(vin.as_deref())?;
     let saved = icarus_obd::learning::save(&dir, &text)?;
-    println!(
-        "\n{} frames. Learned: {} setting(s), {} test(s); {} thing(s) seen but not learned. Saved: {}",
-        an.frames,
-        an.settings.len(),
-        an.learned.len(),
-        an.notes.len(),
-        saved.display()
-    );
-    for s in &an.settings {
-        println!("\n{}", settings::to_toml(s));
-    }
-    for t in &an.learned {
-        println!("\n{}", bus::to_toml(t));
-    }
-    for n in &an.notes {
-        println!("not learned: {n}");
-    }
-    if !an.settings.is_empty() || !an.learned.is_empty() {
-        println!("\nRename them (and the values \"was\" and \"set\") as you like, then add them to ~/.config/icarus/vehicles/MAKE.toml, or use the Learning page, which does both.");
-    }
+    print!("{}", learn_summary(&an, &saved));
     watched?;
     if ask {
         eprintln!("\nAsking Sarina about the session (she only reads)...");
@@ -2622,6 +2603,63 @@ fn learn_session(
         }
     }
     Ok(())
+}
+
+/// What `icarus learn` prints when the watch ends: the counts and where the session was saved, each setting, output test
+/// and service routine learned (a routine by its module, ID, parameters and name, then its `[[service]]` entry: ICA-220),
+/// and what was seen but not learned.
+fn learn_summary(an: &bus::Analyzer, saved: &std::path::Path) -> String {
+    use std::fmt::Write;
+    let mut t = String::new();
+    let _ = writeln!(
+        t,
+        "\n{} frames. Learned: {} setting(s), {} test(s), {} routine(s); {} thing(s) seen but not learned. Saved: {}",
+        an.frames,
+        an.settings.len(),
+        an.learned.len(),
+        an.services.len(),
+        an.notes.len(),
+        saved.display()
+    );
+    for s in &an.settings {
+        let _ = writeln!(t, "\n{}", settings::to_toml(s));
+    }
+    for x in &an.learned {
+        let _ = writeln!(t, "\n{}", bus::to_toml(x));
+    }
+    for s in &an.services {
+        let params = if s.params.is_empty() {
+            "no parameters".to_string()
+        } else {
+            format!(
+                "parameters {}",
+                s.params
+                    .iter()
+                    .map(|b| format!("{b:02X}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+        };
+        let _ = writeln!(
+            t,
+            "\nroutine {:04X} on module {:03X} (answers {:03X}), {params}: \"{}\"\n{}",
+            s.routine,
+            s.module,
+            s.rx(),
+            s.name,
+            icarus_obd::service::to_toml(s)
+        );
+    }
+    for n in &an.notes {
+        let _ = writeln!(t, "not learned: {n}");
+    }
+    if !an.settings.is_empty() || !an.learned.is_empty() {
+        let _ = writeln!(t, "\nRename them (and the values \"was\" and \"set\") as you like, then add them to ~/.config/icarus/vehicles/MAKE.toml, or use the Learning page, which does both.");
+    }
+    if !an.services.is_empty() {
+        let _ = writeln!(t, "\nA learned routine runs only once it is in the vehicle's file: the Learning page names it and adds it (unchecked, engine off, parked, 30 s at most, over a cable), or add its entry to ~/.config/icarus/vehicles/MAKE.toml by hand once you know what it does.");
+    }
+    t
 }
 
 fn cmd_recalls(a: &[String]) -> Result<(), String> {
@@ -3466,6 +3504,51 @@ mod tests {
             }
             Ok(n)
         }
+    }
+
+    /// ICA-220: `icarus learn`'s summary lists each routine learned, by its module, ID, parameters and name, with its
+    /// `[[service]]` entry (unchecked, the learner's cautious conditions) and how it gets into the vehicle's file.
+    #[test]
+    fn the_learning_summary_lists_the_routine() {
+        let mut an = bus::Analyzer::watching(icarus_obd::fence::Fence::default());
+        let frame = |id: u32, data: &[u8], at: f64| bus::Frame {
+            id,
+            ext: false,
+            data: data.to_vec(),
+            at,
+        };
+        an.mark("Oil life reset", 0.5);
+        an.add(&frame(0x7E0, &[0x02, 0x10, 0x03], 1.0));
+        an.add(&frame(0x7E8, &[0x02, 0x50, 0x03], 1.1));
+        an.add(&frame(0x7E0, &[0x05, 0x31, 0x01, 0x02, 0x03, 0x01], 2.0));
+        an.add(&frame(0x7E8, &[0x04, 0x71, 0x01, 0x02, 0x03], 2.1));
+        an.finish();
+        assert_eq!(an.services.len(), 1, "{:?}", an.notes);
+        let t = learn_summary(&an, std::path::Path::new("/scratch/learning-test.md"));
+        for want in [
+            "Learned: 0 setting(s), 0 test(s), 1 routine(s)",
+            "Saved: /scratch/learning-test.md",
+            "routine 0203 on module 7E0 (answers 7E8), parameters 01: \"Oil life reset\"",
+            "[[service]]\nname = \"Oil life reset\"\nmodule = 0x7E0\nroutine = 0x0203\n",
+            "params = [0x01]",
+            "extended = true",
+            "max_seconds = 30",
+            "conditions = [\"engine-off\", \"stationary\"]",
+            "wired = true",
+            "checked = false",
+            "the Learning page names it and adds it",
+        ] {
+            assert!(t.contains(want), "{want} in\n{t}");
+        }
+        // nothing learned: no routine lines, no advice
+        let none = learn_summary(
+            &bus::Analyzer::watching(icarus_obd::fence::Fence::default()),
+            std::path::Path::new("/scratch/x.md"),
+        );
+        assert!(
+            none.contains("0 routine(s)") && !none.contains("[[service]]"),
+            "{none}"
+        );
     }
 
     /// Review of ICA-221: `icarus learn` on an adapter that dies partway saves the session all the same (the mark, the

@@ -236,7 +236,7 @@ Or the **Learning** page: Start learning, type what you are about to do and pres
   for the answer after it. An answer is paired with its request by the module's answer ID as the profiles give it (VW's
   cluster asks on 714 and answers on 77E; the entry gets `rx = 0x77E`), else the request ID + 8; a request to every
   module (7DF) answered on 7E8-7EF is learned for that module (7E0-7E7). A mark names the next one learned; one change per mark works best. All are unchecked, with
-  the most cautious conditions (a learned routine: engine off, parked, 30 s at most); the airbag modules and immobilizer,
+  the most cautious conditions (a learned routine: engine off, parked, 30 s at most, over a cable); the airbag modules and immobilizer,
   key and odometer settings are never learned, nor is a write of the VIN or a module's serial number.
 - **What is never learned from: the key modules, and anything after security access.** Nothing to or from an
   immobilizer, smart-key or certification module (a profile's `[[module]]` with `kind = "immobilizer"`, `"smart-key"` or
@@ -259,9 +259,13 @@ Or the **Learning** page: Start learning, type what you are about to do and pres
   page's log.
 - **Naming and adding.** On the Learning page each learned setting gets a name and names for its values ("was"/"set"
   become "on"/"off"), and one button adds it to the vehicle's file (`~/.config/icarus/vehicles/MAKE.toml`); the Module settings
-  and Tests pages then offer it, and a learned output test is named and added the same way. A learned routine is in the
-  session file (under "Service routines learned", as a `[[service]]` entry) and in what `icarus bus watch` prints; the
-  Learning page does not offer it yet, so it goes into the vehicle's file by hand, once I know what it does.
+  and Tests pages then offer it, and a learned output test is named and added the same way. A learned routine is shown
+  by its module, routine ID and parameters, named after what it does (a relearn, a reset) and added the same way, as an
+  unchecked `[[service]]` entry that keeps the learner's conditions (engine off, parked, 30 s at most, the extended
+  session, over a cable); the Tests page then offers it under Service routines. `icarus learn` lists each routine it
+  learned (module, ID, parameters, name, and its entry), as the session file does under "Service routines learned".
+  A routine is not added on an airbag module, a key module, or, where the make's profile names no airbag module, a
+  module of unknown kind (it could be the airbag module): refused before anything is written.
 - **Sarina**, only when Sarina is installed (Sarina's own `sarina` program, not just Labyrinth's `labyrinth-ask-sarina`,
   which every Labyrinth system has; without Sarina the page says nothing about Sarina): Ask Sarina on a session (or
   `--ask-sarina`) has Sarina read the file
@@ -302,7 +306,7 @@ battery resets, TPMS sensor IDs, injector coding. Each is a `[[service]]` entry 
 ID, its parameters, whether it needs the extended session, whether to wait for its result, its conditions, `wired` for
 coding). None are built in for a real make: a routine ID is each maker's own, and an unverified one could start anything,
 so they come from the maker's service information or from watching another tool run one on my own vehicle (`icarus learn`
-and the Learning page turn a routine the tool starts into an unchecked entry in the session file, to add by hand).
+and the Learning page turn a routine the tool starts into an unchecked entry; the Learning page adds it to the vehicle's file).
 
 ```sh
 icarus obd services --adapter A                                   # the vehicle's routines, and what each needs
