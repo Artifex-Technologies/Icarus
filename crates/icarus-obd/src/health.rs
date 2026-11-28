@@ -357,20 +357,12 @@ pub fn check(
     }
     if let Some(v) = module_values {
         for m in &v.modules {
-            for (name, value, _) in &m.values {
-                let v = value.trim();
-                let n: String = v
-                    .chars()
-                    .take_while(|ch| ch.is_ascii_digit() || *ch == '.' || *ch == '-')
-                    .collect();
-                // what follows the number is its unit
-                if !is_misfire_count(name, &v[n.len()..]) {
-                    continue;
-                }
-                if let Ok(count) = n.parse::<f64>() {
+            // the number in the definition's own unit, so a count is told by its unit, not by its text
+            for (name, count, unit) in &m.numbers {
+                if is_misfire_count(name, unit) {
                     c.entry.misfires.push(Misfire {
                         name: format!("{} {name}", m.label),
-                        count,
+                        count: *count,
                     });
                 }
             }
@@ -1070,10 +1062,11 @@ mod tests {
             modules: vec![crate::vehicledata::ModuleValues {
                 label: "7E0".into(),
                 name: "engine".into(),
-                values: vec![
-                    ("Misfire RPM".into(), "850 rpm".into(), false),
-                    ("Misfire Load".into(), "31 %".into(), false),
-                    ("Cylinder 2 misfire count".into(), "4".into(), false),
+                values: vec![],
+                numbers: vec![
+                    ("Misfire RPM".into(), 850.0, "rpm".into()),
+                    ("Misfire Load".into(), 31.0, "%".into()),
+                    ("Cylinder 2 misfire count".into(), 4.0, String::new()),
                 ],
                 notes: vec![],
             }],
