@@ -28,6 +28,11 @@ pub trait Frames {
     fn voltage(&mut self) -> Option<f64> {
         None
     }
+    /// Whether the interface or port these frames come through, as it was opened, is a cable all the way (`Link::wired`).
+    /// Not unless it can tell.
+    fn wired(&self) -> bool {
+        false
+    }
 }
 
 /// ISO-TP's waits.
@@ -589,6 +594,11 @@ impl<F: Frames> Link for CanLink<F> {
     /// paths refuse it.
     fn voltage(&mut self) -> Option<f64> {
         self.bus.voltage()
+    }
+
+    /// Whatever the frames underneath say of the interface or port they opened (`Frames::wired`).
+    fn wired(&self) -> bool {
+        self.bus.wired()
     }
 
     fn set_ext(&mut self, ext: Option<u8>) -> Result<(), ObdError> {

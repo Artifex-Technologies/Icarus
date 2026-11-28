@@ -158,6 +158,36 @@ impl crate::canlink::Frames for CanSocket {
             }
         }
     }
+
+    /// The interface this socket is bound to (by its index, which a rename does not change, so a name given to another
+    /// interface since opening does not change the answer), judged as `Target::wired` judges a CAN interface: a CAN
+    /// adapter sysfs puts on USB.
+    fn wired(&self) -> bool {
+        let mut sa = SockaddrCan {
+            family: 0,
+            ifindex: 0,
+            addr: [0; 2],
+        };
+        let mut len = std::mem::size_of::<SockaddrCan>() as libc::socklen_t;
+        let r = unsafe {
+            libc::getsockname(
+                self.0.as_raw_fd(),
+                (&mut sa as *mut SockaddrCan).cast(),
+                &mut len,
+            )
+        };
+        if r != 0 || sa.family != AF_CAN as libc::sa_family_t || sa.ifindex <= 0 {
+            return false;
+        }
+        let mut name = [0 as libc::c_char; libc::IF_NAMESIZE];
+        if unsafe { libc::if_indextoname(sa.ifindex as libc::c_uint, name.as_mut_ptr()) }.is_null()
+        {
+            return false;
+        }
+        let name = unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) };
+        name.to_str()
+            .is_ok_and(|n| crate::port::Target::Can(n.to_string()).wired())
+    }
 }
 
 // rtnetlink (linux/rtnetlink.h, if_link.h, can/netlink.h): the link's CAN bit timing

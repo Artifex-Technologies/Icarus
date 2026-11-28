@@ -420,6 +420,11 @@ impl<P: Port> Frames for Mongoose<P> {
             self.fill(left)?;
         }
     }
+
+    /// The serial port the cable was opened on, judged by its own device (`Port::wired`).
+    fn wired(&self) -> bool {
+        self.port.wired()
+    }
 }
 
 impl<P: Port> Drop for Mongoose<P> {

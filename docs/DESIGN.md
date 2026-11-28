@@ -16,7 +16,7 @@ bidirectional shop scanner, a tuning suite and a bus analyser: on Linux, for man
 | Configuration | tires/gears calculator, speedometer check, battery and charging check |
 | Tuning | map viewer, tune diff (XDF) |
 | Vehicle info | VIN decoder, make profiles, named vehicles, vehicle folders, NHTSA model/engine (asks first) and recalls |
-| Bus | monitor (OBDLink monitor mode, Linux SocketCAN): ID table with changing bytes, diagnostics in words, tests learned from another tool |
+| Bus | monitor (OBDLink monitor mode, Linux SocketCAN): ID table with changing bytes, diagnostics in words, tests learned from another tool; a USB adapter's serial link sped up for the watch and put back after (STBR/ATBRD, ICA-213; tested on the simulated adapter only) |
 | Hardware | ELM327/STN over USB, Bluetooth, Wi-Fi |
 | Vehicles | 12 makes + generic, addresses from public sources |
 
@@ -90,8 +90,9 @@ A module is bricked when a write stops halfway or puts the wrong thing in. Icaru
    vcan interface (cannelloni or `cangw` can carry its frames anywhere) do not count. A connected `rfcomm` port is moved
    by the kernel under the Bluetooth controller, which on most computers is on USB itself, so nothing under a Bluetooth
    controller counts (and an `rfcomm` name is refused as well); nor does a cable attached over USB/IP (`vhci_hcd`), whose
-   bytes go over the network. A connection kept open, as in the window, is judged by the port it opened (its device
-   number), so a udev symlink moved to another adapter after connecting does not change the answer.
+   bytes go over the network. A connection, in the window or on the command line (`obd service`, `obd setting`), is
+   judged by the port it opened (`Link::wired`: a serial port by its device number, a CAN interface by its index), so a
+   udev symlink moved to another adapter after connecting does not change the answer (ICA-206).
 6. **Calibration only, when the family allows it.** Write the calibration area and leave the boot loader alone, so the
    module can always be reached and written again.
 7. **Read back and compare** after writing; on any doubt, write the backup back.

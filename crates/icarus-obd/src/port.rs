@@ -17,6 +17,20 @@ pub trait Port {
     fn wired(&self) -> bool {
         false
     }
+    /// The speed this computer's side of a serial line runs at (baud), when this port is a serial line whose speed can be
+    /// changed (`open_serial`); None for anything else (a Bluetooth socket, TCP, a stand-in), whose adapter is then never
+    /// asked to change its own (`Elm::monitor_ids`).
+    fn speed(&self) -> Option<u32> {
+        None
+    }
+    /// Changes this computer's side of the serial line to `baud`, once what was sent has gone out. Only a port with a
+    /// `speed` can.
+    fn set_speed(&mut self, _baud: u32) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "this link to the adapter has no serial speed to change",
+        ))
+    }
 }
 
 /// Where to reach the adapter, as written on the command line:
@@ -378,7 +392,7 @@ impl Target {
             Target::Serial { path, baud } => Box::new(open_serial(path, *baud)?),
             Target::Bluetooth { addr, channel } => Box::new(open_rfcomm(*addr, *channel)?),
             Target::Tcp(hostport) => {
-                let s = TcpStream::connect(hostport)?;
+                let s = connect_tcp(hostport, TCP_LIMIT)?;
                 s.set_nodelay(true)?;
                 Box::new(TcpPort(s))
             }
@@ -386,9 +400,47 @@ impl Target {
     }
 }
 
+/// How long a Wi-Fi adapter has to take the connection (ICA-110): a plain connect to an address nothing answers on held the
+/// worker for about two minutes (the kernel's SYN retries).
+pub const TCP_LIMIT: Duration = Duration::from_secs(5);
+
+/// Connects to `hostport` (`192.168.0.10:35000`), trying each address it names in turn for up to `limit` each. A failure
+/// says what usually causes it: this computer on another network than the adapter's, or another program (a phone app)
+/// holding the adapter's one connection.
+pub fn connect_tcp(hostport: &str, limit: Duration) -> io::Result<TcpStream> {
+    use std::net::ToSocketAddrs;
+    let addrs: Vec<std::net::SocketAddr> = hostport
+        .to_socket_addrs()
+        .map_err(|e| io::Error::new(e.kind(), format!("{hostport}: {e}")))?
+        .collect();
+    let mut last = None;
+    for a in &addrs {
+        match TcpStream::connect_timeout(a, limit) {
+            Ok(s) => return Ok(s),
+            Err(e) => last = Some(e),
+        }
+    }
+    let (kind, why) = match last {
+        Some(e) if e.kind() == io::ErrorKind::TimedOut => {
+            (e.kind(), format!("no answer in {} s", limit.as_secs_f64()))
+        }
+        Some(e) => (e.kind(), e.to_string()),
+        None => (io::ErrorKind::NotFound, "it names no address".to_string()),
+    };
+    Err(io::Error::new(
+        kind,
+        format!(
+            "could not reach the adapter at {hostport} ({why}): is this computer on the adapter's own Wi-Fi network, not \
+             another one? A Wi-Fi adapter takes one connection at a time, so close any phone app connected to it"
+        ),
+    ))
+}
+
 /// A file descriptor (serial line or Bluetooth socket), read with poll so a silent adapter never hangs Icarus.
 pub struct FdPort {
     fd: OwnedFd,
+    /// The serial line's speed (`open_serial`), which `set_speed` changes; None for a Bluetooth socket or anything else.
+    speed: Option<u32>,
     /// A serial port this program marked exclusive itself (`open_serial`: TIOCEXCL, `mark_exclusive`), its mark taken
     /// off when it closes. A mark that was there before (another program's) is not this program's to take off.
     exclusive: bool,
@@ -492,6 +544,35 @@ impl Port for FdPort {
 
     fn wired(&self) -> bool {
         self.wired_on(&ThisComputer)
+    }
+
+    fn speed(&self) -> Option<u32> {
+        self.speed
+    }
+
+    fn set_speed(&mut self, baud: u32) -> io::Result<()> {
+        if self.speed.is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "not a serial line: no speed to change",
+            ));
+        }
+        let speed = baud_const(baud)?;
+        let fd = self.fd.as_raw_fd();
+        unsafe {
+            let mut t: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(fd, &mut t) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            libc::cfsetispeed(&mut t, speed);
+            libc::cfsetospeed(&mut t, speed);
+            // TCSADRAIN: what was sent goes out at the old speed first
+            if libc::tcsetattr(fd, libc::TCSADRAIN, &t) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        self.speed = Some(baud);
+        Ok(())
     }
 }
 
@@ -633,6 +714,7 @@ fn open_serial_with(path: &str, baud: u32, procs: &Procs, me: u32) -> io::Result
     let mine = mark_exclusive(&fd, path)?;
     let port = FdPort {
         fd,
+        speed: Some(baud),
         exclusive: mine,
     };
     let before: Vec<(u32, String)> = procs
@@ -708,6 +790,7 @@ pub fn open_rfcomm(addr: [u8; 6], channel: u8) -> io::Result<FdPort> {
     }
     Ok(FdPort {
         fd,
+        speed: None,
         exclusive: false,
     })
 }
@@ -753,6 +836,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
         let mut port = super::FdPort {
             fd: unsafe { <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fds[0]) },
+            speed: None,
             exclusive: false,
         };
         unsafe {
@@ -982,6 +1066,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
         let port = FdPort {
             fd: unsafe { OwnedFd::from_raw_fd(fds[0]) },
+            speed: None,
             exclusive: false,
         };
         assert!(!port.wired_on(&pc));
@@ -1200,6 +1285,7 @@ pub(crate) mod tests {
         );
         drop(FdPort {
             fd: second,
+            speed: None,
             exclusive: false,
         });
         assert!(marked(&theirs), "their mark stays");
@@ -1219,6 +1305,7 @@ pub(crate) mod tests {
         assert!(marked(&fd));
         let mine = FdPort {
             fd: fd.try_clone().unwrap(),
+            speed: None,
             exclusive: true,
         };
         drop(mine);
@@ -1380,5 +1467,181 @@ pub(crate) mod tests {
             10,
             "the kernel's struct sockaddr_rc"
         );
+    }
+
+    /// ICA-110: a Wi-Fi adapter (`tcp:`) reached through `Target::Tcp`, here a listener on loopback speaking ELM327 as the
+    /// simulated adapter, and a value read through it. No network: the loopback interface only.
+    #[test]
+    fn a_wifi_adapter_is_reached_over_tcp_and_read() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let adapter = std::thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            s.set_read_timeout(Some(Duration::from_millis(5))).unwrap();
+            let mut car = crate::sim::SimCar::new();
+            let mut buf = [0u8; 1024];
+            loop {
+                match s.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => car.send(&buf[..n]).unwrap(),
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                        ) => {}
+                    Err(_) => break,
+                }
+                let n = car.recv(&mut buf, Duration::ZERO).unwrap();
+                if n > 0 && s.write_all(&buf[..n]).is_err() {
+                    break;
+                }
+            }
+        });
+        let target = Target::parse(&format!("tcp:{addr}")).unwrap();
+        assert_eq!(target, Target::Tcp(addr.to_string()));
+        let (mut elm, note) = crate::elm::connect_target(&target).unwrap();
+        assert!(note.is_none());
+        let rpm = elm.request(&[0x01, 0x0C]).unwrap();
+        assert!(
+            rpm.iter().any(|a| a.data.starts_with(&[0x41, 0x0C])),
+            "{rpm:?}"
+        );
+        assert!(!crate::link::Link::wired(&elm), "Wi-Fi is never a cable");
+        drop(elm);
+        adapter.join().unwrap();
+    }
+
+    /// A listening socket on loopback that never takes a connection, its queue of connections not yet taken full
+    /// (`listen` with a backlog of 0, one connection in it): Linux drops a new connection's first packet, so connecting
+    /// to it waits as connecting to an address nothing answers on does. The socket and the connection filling its queue.
+    fn unanswering() -> (OwnedFd, std::net::SocketAddr, Vec<TcpStream>) {
+        let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+        assert!(fd >= 0, "{}", io::Error::last_os_error());
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        let mut sa: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+        sa.sin_family = libc::AF_INET as libc::sa_family_t;
+        sa.sin_addr.s_addr = u32::from(std::net::Ipv4Addr::LOCALHOST).to_be();
+        let len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+        assert_eq!(
+            unsafe {
+                libc::bind(
+                    fd.as_raw_fd(),
+                    (&sa as *const libc::sockaddr_in).cast(),
+                    len,
+                )
+            },
+            0
+        );
+        assert_eq!(unsafe { libc::listen(fd.as_raw_fd(), 0) }, 0);
+        let mut got = len;
+        assert_eq!(
+            unsafe {
+                libc::getsockname(
+                    fd.as_raw_fd(),
+                    (&mut sa as *mut libc::sockaddr_in).cast(),
+                    &mut got,
+                )
+            },
+            0
+        );
+        let addr =
+            std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, u16::from_be(sa.sin_port)));
+        // fill the queue: connections go in until one is not answered
+        let mut held = Vec::new();
+        for _ in 0..8 {
+            match TcpStream::connect_timeout(&addr, Duration::from_millis(300)) {
+                Ok(s) => held.push(s),
+                Err(_) => break,
+            }
+        }
+        (fd, addr, held)
+    }
+
+    /// ICA-110: a connection nobody answers ends at the limit, not after the kernel's two minutes, and says what usually
+    /// causes it.
+    #[test]
+    fn a_tcp_adapter_that_does_not_answer_is_given_up_in_time() {
+        let (_listening, addr, _held) = unanswering();
+        let t = std::time::Instant::now();
+        let e = connect_tcp(&addr.to_string(), Duration::from_millis(300)).unwrap_err();
+        assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
+        assert_eq!(e.kind(), io::ErrorKind::TimedOut, "{e}");
+        let e = e.to_string();
+        assert!(
+            e.contains("no answer in 0.3 s")
+                && e.contains("another one")
+                && e.contains("one connection at a time"),
+            "{e}"
+        );
+        // a port nothing listens on is refused at once, in the same words
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let gone = free.local_addr().unwrap();
+        drop(free);
+        let e = connect_tcp(&gone.to_string(), Duration::from_millis(300)).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::ConnectionRefused, "{e}");
+        assert!(e.to_string().contains("phone app"), "{e}");
+    }
+
+    /// ICA-206: a connection is judged by the port it opened. A pseudo-terminal stands in for each adapter's port, its
+    /// device number leading in a made-up sysfs to the EX's cable (ttyUSB0) or to the MX+ over Bluetooth (rfcomm0); a udev
+    /// symlink (`/dev/obd`) moved to the other one after connecting changes what the path is, not what the link is.
+    #[test]
+    fn a_link_is_judged_by_the_port_it_opened_not_where_its_path_leads_now() {
+        use crate::link::Link;
+        /// The simulated adapter's talk, over the open port standing in for it, judged on the made-up computer.
+        struct Opened {
+            car: crate::sim::SimCar,
+            port: FdPort,
+            pc: std::sync::Arc<Made>,
+        }
+        impl Port for Opened {
+            fn send(&mut self, d: &[u8]) -> io::Result<()> {
+                self.car.send(d)
+            }
+            fn recv(&mut self, b: &mut [u8], t: Duration) -> io::Result<usize> {
+                self.car.recv(b, t)
+            }
+            fn wired(&self) -> bool {
+                self.port.wired_on(&*self.pc)
+            }
+        }
+        let pc = std::sync::Arc::new(laptop());
+        let number = |fd: &OwnedFd| {
+            let mut st: libc::stat = unsafe { std::mem::zeroed() };
+            assert_eq!(unsafe { libc::fstat(fd.as_raw_fd(), &mut st) }, 0);
+            (libc::major(st.st_rdev), libc::minor(st.st_rdev))
+        };
+        let procs = Procs(pc.root.join("proc"));
+        let ftdi = format!("{HUB}/1-1/1-1:1.0/ttyUSB0/tty/ttyUSB0");
+        let hci = format!("{HUB}/1-4/1-4:1.0/bluetooth/hci0/hci0:256/rfcomm0");
+        let obd = Target::parse("/dev/obd").unwrap();
+        for (opened, then) in [("ttyUSB0", "rfcomm0"), ("rfcomm0", "ttyUSB0")] {
+            let (_other_end, path) = pty();
+            let port = open_serial_with(&path, 115_200, &procs, 2).unwrap();
+            let (major, minor) = number(&port.fd);
+            pc.char_dev(major, minor, if opened == "ttyUSB0" { &ftdi } else { &hci });
+            let _ = std::fs::remove_file(pc.root.join("dev/obd"));
+            pc.link("dev/obd", opened);
+            assert_eq!(obd.wired_on(&*pc), opened == "ttyUSB0");
+            let link: Box<dyn Link> = Box::new(
+                crate::elm::Elm::connect(Box::new(Opened {
+                    car: crate::sim::SimCar::new(),
+                    port,
+                    pc: pc.clone(),
+                }))
+                .unwrap(),
+            );
+            // udev gives /dev/obd to the other adapter
+            std::fs::remove_file(pc.root.join("dev/obd")).unwrap();
+            pc.link("dev/obd", then);
+            assert_eq!(obd.wired_on(&*pc), then == "ttyUSB0", "the path, now");
+            assert_eq!(
+                link.wired(),
+                opened == "ttyUSB0",
+                "the link opened on {opened}, whatever /dev/obd leads to now"
+            );
+            drop(link);
+            std::fs::remove_file(pc.root.join(format!("sys/dev/char/{major}:{minor}"))).unwrap();
+        }
     }
 }

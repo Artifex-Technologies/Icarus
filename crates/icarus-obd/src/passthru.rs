@@ -92,6 +92,10 @@ pub trait PassThru {
     fn read(&mut self, channel: u32, timeout: Duration) -> Result<Option<PassThruMsg>, ObdError>;
     /// The voltage at the OBD port (PassThruIoctl READ_VBATT), when the device measures it.
     fn battery_voltage(&mut self) -> Result<Option<f64>, ObdError>;
+    /// Whether the device, as it was opened, is on a cable all the way (`Link::wired`). Not unless it can tell.
+    fn wired(&self) -> bool {
+        false
+    }
 }
 
 /// How long a module has to start answering (ISO 15765-3's P2) and, after it said "response pending" (7F xx 78), how much
@@ -257,6 +261,11 @@ impl<D: PassThru> Link for PassThruLink<D> {
     fn voltage(&mut self) -> Option<f64> {
         self.dev.battery_voltage().ok().flatten()
     }
+
+    /// The device as it was opened (`PassThru::wired`): the OpenPort by the serial port it holds.
+    fn wired(&self) -> bool {
+        self.dev.wired()
+    }
 }
 
 /// The simulated car behind a simulated J2534 device: the same modules and answers as `SimCar` behind its simulated ELM327,
@@ -360,6 +369,11 @@ impl PassThru for SimPassThru {
 
     fn battery_voltage(&mut self) -> Result<Option<f64>, ObdError> {
         Ok(Some(12.6))
+    }
+
+    /// The simulation reaches no vehicle, so it counts as wired, as `Target::wired` says of `sim:j2534`.
+    fn wired(&self) -> bool {
+        true
     }
 }
 

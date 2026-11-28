@@ -289,6 +289,66 @@ pub struct SimCar {
     outputs_refused: Option<u8>,
     /// Modules that support no status bits (`with_no_status_bits`): they answer `19 02` with availability 00 and every code.
     no_status_bits: Vec<u32>,
+    /// The serial line between the adapter and the computer (`on_serial`), when modelled: its speed on each side, the
+    /// adapter's transmit buffer while it watches, and a speed change under way. None: a link with no speed, which carries
+    /// whatever the adapter says at once.
+    serial: Option<SerialLine>,
+    /// The bus is busy (`busy_bus`): eight more frames every tick, about 2000 frames a second in all.
+    busy: bool,
+    /// A plain ELM327 that knows `ATBRD` (`knowing_brd`); the default clone answers it `?`. An STN chip always knows it.
+    brd: bool,
+    /// The adapter answers a speed change OK and then stays where it was, saying nothing more (`lying_about_speed`).
+    brd_lies: bool,
+}
+
+/// What the simulated adapter answers ATI (and ATZ).
+const ELM_ID: &str = "ELM327 v1.5";
+/// What the simulated STN chip answers STI.
+const STI: &str = "STN2255 v5.10.3";
+
+/// How many bytes the simulated adapter's transmit buffer holds while it watches. Made up: the ELM327 datasheet gives the
+/// ELM327's as 512 bytes, and I have no published size for the STN's; with this one the simulated EX on a busy bus stops
+/// after about 180 frames at 115200, as the truck's did after about 200.
+pub const SIM_BUFFER: usize = 4096;
+
+/// How long the simulated adapter waits for the carriage return that confirms a new speed before it goes back to the old
+/// one. A real adapter waits 75 ms (ATBRT/STBRT); the simulation waits longer so a busy test machine does not fail a
+/// handshake made in the right order, which is what it checks.
+const SIM_BRT: Duration = Duration::from_secs(1);
+
+/// Speeds the simulated adapter can make: the usual ones up to 2 Mbaud.
+const SIM_SPEEDS: [u32; 11] = [
+    9_600, 19_200, 38_400, 57_600, 115_200, 230_400, 460_800, 500_000, 921_600, 1_000_000,
+    2_000_000,
+];
+
+/// Two ends of a serial line understand each other when their speeds are within 3% (an ELM327's `ATBRD 23` makes
+/// 114.3 kbps against the computer's 115200).
+fn close(a: u32, b: u32) -> bool {
+    a.abs_diff(b) as u64 * 100 <= a.max(b) as u64 * 3
+}
+
+/// The serial line between the simulated adapter and the computer (`SimCar::on_serial`).
+struct SerialLine {
+    /// The adapter's speed after power-on and after ATZ.
+    power_on: u32,
+    /// The adapter's speed now.
+    adapter: u32,
+    /// The computer's side (`Port::set_speed`).
+    host: u32,
+    /// What the adapter has to send while it watches, waiting for the line: it goes out at the adapter's speed, one
+    /// tick's worth (5 ms) a tick, and when the bus brings more than the buffer holds the adapter stops with BUFFER FULL.
+    buffer: VecDeque<u8>,
+    /// A speed change under way (ATBRD/STBR): (the old speed, the new one, how far it has got).
+    switch: Option<(u32, u32, Switching)>,
+}
+
+#[derive(Clone, Copy)]
+enum Switching {
+    /// OK said at the old speed, going out.
+    Saying,
+    /// The ID string sent at the new speed at this moment; waiting for the carriage return.
+    Waiting(std::time::Instant),
 }
 
 /// The simulated engine's codes at 700 (UDS, `19 02 FF`): codes it can set, none failed (made up; ICA-207).
@@ -379,6 +439,102 @@ impl SimCar {
             codes_for: Vec::new(),
             outputs_refused: None,
             no_status_bits: Vec::new(),
+            serial: None,
+            busy: false,
+            brd: false,
+            brd_lies: false,
+        }
+    }
+
+    /// The same adapter on a serial line to the computer at `baud` (ICA-213), modelled: what it says while it watches goes
+    /// out at the line's speed through its transmit buffer (`SIM_BUFFER`), BUFFER FULL ending the watch when the bus
+    /// brings more; the port has a speed (`Port::speed`), which the adapter's speed change (`STBR` on an STN, `ATBRD` on an
+    /// ELM327 that knows it) moves by the handshake the ELM327 datasheet gives; bytes sent or read while the two sides'
+    /// speeds differ are garbage.
+    pub fn on_serial(self, baud: u32) -> SimCar {
+        SimCar {
+            serial: Some(SerialLine {
+                power_on: baud,
+                adapter: baud,
+                host: baud,
+                buffer: VecDeque::new(),
+                switch: None,
+            }),
+            ..self
+        }
+    }
+
+    /// The same vehicle with a busy bus: eight more frames every tick (5 ms), about 2000 frames a second in all, some
+    /// 56 kB/s as the adapter prints them: more than a 115200-baud line carries, less than 1 Mbaud.
+    pub fn busy_bus(self) -> SimCar {
+        SimCar { busy: true, ..self }
+    }
+
+    /// An OBDLink EX as on the truck (ICA-213): an STN chip on a serial line at 115200, watching a busy bus.
+    pub fn obdlink_ex() -> SimCar {
+        SimCar {
+            stn: true,
+            ..SimCar::new()
+        }
+        .on_serial(115_200)
+        .busy_bus()
+    }
+
+    /// The same adapter as a plain ELM327 that knows `ATBRD` (v1.2 and later), not a clone that answers it `?`.
+    pub fn knowing_brd(self) -> SimCar {
+        SimCar { brd: true, ..self }
+    }
+
+    /// The same adapter answering a speed change OK and then staying at its speed, saying nothing more: the handshake is
+    /// never finished.
+    pub fn lying_about_speed(self) -> SimCar {
+        SimCar {
+            brd_lies: true,
+            brd: true,
+            ..self
+        }
+    }
+
+    /// A speed change asked for (`STBR`, `ATBRD`): to `baud`, if the adapter is on a modelled serial line and can make it.
+    fn change_speed(&mut self, baud: Option<u32>) {
+        let lies = self.brd_lies;
+        let Some(line) = self.serial.as_mut() else {
+            self.say(&["?".to_string()]);
+            return;
+        };
+        match baud.filter(|b| SIM_SPEEDS.iter().any(|s| close(*s, *b))) {
+            None => self.say(&["?".to_string()]),
+            Some(to) => {
+                // OK, with no prompt after it
+                if !lies {
+                    line.switch = Some((line.adapter, to, Switching::Saying));
+                }
+                self.output.extend(b"OK\r");
+            }
+        }
+    }
+
+    /// Moves a speed change on, after what was read: once the OK has gone out the adapter is at its new speed and sends
+    /// its ID there; with no carriage return in its wait it goes back to the old speed and gives a prompt.
+    fn speed_change_on(&mut self) {
+        let id = if self.stn { STI } else { ELM_ID };
+        let empty = self.output.is_empty();
+        let Some(line) = self.serial.as_mut() else {
+            return;
+        };
+        match line.switch {
+            Some((from, to, Switching::Saying)) if empty => {
+                line.adapter = to;
+                line.switch = Some((from, to, Switching::Waiting(std::time::Instant::now())));
+                self.output.extend(id.as_bytes());
+                self.output.push_back(b'\r');
+            }
+            Some((from, _, Switching::Waiting(at))) if at.elapsed() > SIM_BRT => {
+                line.adapter = from;
+                line.switch = None;
+                self.output.push_back(b'>');
+            }
+            _ => {}
         }
     }
 
@@ -766,6 +922,17 @@ impl SimCar {
             (rpm >> 8) as u8,
             rpm as u8
         ));
+        if self.busy {
+            // a busy bus's other nodes, every tick
+            for k in 0..8u32 {
+                out.push(format!(
+                    "{:03X} {k:02X} 00 {:02X} 00 00 00 00 {:02X}",
+                    0x120 + 0x20 * k,
+                    (t >> 3) as u8,
+                    t as u8
+                ));
+            }
+        }
         if t.is_multiple_of(10) {
             out.push("3B7 01 00 50 00 00".into());
         }
@@ -1474,9 +1641,22 @@ impl SimCar {
                 (self.caf, self.csm, self.cmm) = (true, !self.loud, u8::from(self.loud));
                 (self.header, self.filter, self.priority) = (self.functional(), None, 0x18);
                 self.ms = false;
-                vec!["".into(), "ELM327 v1.5".into()]
+                // a reset puts the serial speed back too (the ELM327 datasheet: a speed set by AT BRD lasts until AT Z)
+                if let Some(line) = self.serial.as_mut() {
+                    (line.adapter, line.switch) = (line.power_on, None);
+                }
+                vec!["".into(), ELM_ID.into()]
             }
-            "ATI" => vec!["ELM327 v1.5".into()],
+            "ATI" => vec![ELM_ID.into()],
+            _ if c.starts_with("STBR") && !c.starts_with("STBRT") && self.stn => {
+                self.change_speed(c[4..].parse().ok());
+                return;
+            }
+            _ if c.starts_with("ATBRD") && (self.stn || self.brd) => {
+                let div = u32::from_str_radix(&c[5..], 16).ok().filter(|d| *d > 0);
+                self.change_speed(div.map(|d| 4_000_000 / d));
+                return;
+            }
             "ATE0" | "ATE1" => {
                 self.echo = c.ends_with('1');
                 ok
@@ -1503,7 +1683,7 @@ impl SimCar {
                 self.acked |= !self.csm || (self.stn && self.cmm != 0);
                 return;
             }
-            "STI" if self.stn => vec!["STN2255 v5.10.3".into()],
+            "STI" if self.stn => vec![STI.into()],
             // ATCRA's answer ID stays until ATCRA alone clears it, whatever is said of the pass filters or the filter and
             // mask after it: whether a real ELM327 or STN lets those replace it is not known here, so the simulated
             // adapter takes the case that needs Icarus to clear it (`Elm::probe`)
@@ -1681,6 +1861,37 @@ impl Port for SimCar {
         if let Some(n) = self.dies_in.as_mut() {
             *n -= 1;
         }
+        let watching = self.monitoring.is_some();
+        if let Some(line) = self.serial.as_mut() {
+            if !data.is_empty() && watching {
+                // what the adapter had waiting goes out before it stops
+                self.output.extend(line.buffer.drain(..));
+            }
+            if let Some((from, to, phase)) = line.switch {
+                if !data.is_empty() {
+                    // only a carriage return at the new speed, in the adapter's wait, keeps it
+                    let confirmed = matches!(phase, Switching::Waiting(_))
+                        && close(line.host, to)
+                        && data[0] == b'\r';
+                    line.switch = None;
+                    if confirmed {
+                        self.say(&["OK".to_string()]);
+                    } else {
+                        line.adapter = from;
+                        self.output.push_back(b'>');
+                    }
+                }
+                return Ok(());
+            }
+            if !close(line.host, line.adapter) {
+                // garbage at the adapter's speed: it ends a watch, and is no command
+                if watching {
+                    self.monitoring = None;
+                    self.output.extend(b"STOPPED\r\r>");
+                }
+                return Ok(());
+            }
+        }
         if self.monitoring.is_some() && !data.is_empty() {
             // any character ends monitor mode
             self.monitoring = None;
@@ -1706,7 +1917,7 @@ impl Port for SimCar {
             ));
         }
         if let Some(t) = self.monitoring {
-            if self.output.len() < 4096 {
+            if self.output.len() < 4096 || self.serial.is_some() {
                 std::thread::sleep(Duration::from_millis(5));
                 // the vehicle's own traffic, then what other simulated adapters asked and were answered since the last tick
                 let (next, shared) = if self.listener {
@@ -1729,17 +1940,59 @@ impl Port for SimCar {
                         continue;
                     }
                     let line = self.monitored(&line);
-                    self.output.extend(line.as_bytes());
-                    self.output.push_back(b'\r');
+                    match self.serial.as_mut() {
+                        // into the transmit buffer, unless it is full: then the watch ends there
+                        Some(s) if s.buffer.len() + line.len() + 1 > SIM_BUFFER => {
+                            s.buffer.extend(b"BUFFER FULL\r\r>");
+                            self.monitoring = None;
+                            break;
+                        }
+                        Some(s) => {
+                            s.buffer.extend(line.as_bytes());
+                            s.buffer.push_back(b'\r');
+                        }
+                        None => {
+                            self.output.extend(line.as_bytes());
+                            self.output.push_back(b'\r');
+                        }
+                    }
                 }
-                self.monitoring = Some(t + 1);
+                if self.monitoring.is_some() {
+                    self.monitoring = Some(t + 1);
+                }
             }
+        }
+        let mut clean = true;
+        if let Some(s) = self.serial.as_mut() {
+            // one tick's worth of the line: a byte is ten bits (8N1)
+            let n = ((s.adapter / 2000) as usize).max(1).min(s.buffer.len());
+            self.output.extend(s.buffer.drain(..n));
+            clean = close(s.host, s.adapter);
         }
         let n = buf.len().min(self.output.len());
         for (i, b) in self.output.drain(..n).enumerate() {
-            buf[i] = b;
+            // read at another speed than it was sent at, a byte is garbage
+            buf[i] = if clean { b } else { 0xFE };
         }
+        self.speed_change_on();
         Ok(n)
+    }
+
+    fn speed(&self) -> Option<u32> {
+        self.serial.as_ref().map(|s| s.host)
+    }
+
+    fn set_speed(&mut self, baud: u32) -> io::Result<()> {
+        match self.serial.as_mut() {
+            Some(s) => {
+                s.host = baud;
+                Ok(())
+            }
+            None => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "the simulated adapter's link has no serial speed",
+            )),
+        }
     }
 
     /// The simulation reaches no vehicle, so it counts as wired, as `Target::wired` says of `sim`.
@@ -2119,21 +2372,45 @@ pub(crate) mod recording {
                 self.pending.extend(b"?\r\r>");
                 return Ok(());
             }
+            let adapter = self.car.serial.as_ref().map(|s| s.adapter);
             let r = self.car.send(data);
             if std::mem::take(&mut self.car.acked) {
                 self.sent.lock().unwrap().push("ACKED".into());
+            }
+            let now = self.car.serial.as_ref().map(|s| s.adapter);
+            if let Some(n) = now.filter(|n| Some(*n) != adapter) {
+                self.sent.lock().unwrap().push(format!("ADAPTER {n}"));
             }
             r
         }
 
         fn recv(&mut self, buf: &mut [u8], timeout: Duration) -> io::Result<usize> {
             if self.pending.is_empty() {
-                return self.car.recv(buf, timeout);
+                let adapter = self.car.serial.as_ref().map(|s| s.adapter);
+                let r = self.car.recv(buf, timeout);
+                let now = self.car.serial.as_ref().map(|s| s.adapter);
+                if let Some(n) = now.filter(|n| Some(*n) != adapter) {
+                    // the adapter's own side of its serial line moved
+                    self.sent.lock().unwrap().push(format!("ADAPTER {n}"));
+                }
+                return r;
             }
             let n = buf.len().min(self.pending.len());
             buf[..n].copy_from_slice(&self.pending[..n]);
             self.pending.drain(..n);
             Ok(n)
+        }
+
+        fn speed(&self) -> Option<u32> {
+            self.car.speed()
+        }
+
+        /// Written down as "SPEED n": this computer's side of the serial line moved.
+        fn set_speed(&mut self, baud: u32) -> io::Result<()> {
+            if self.car.speed() != Some(baud) {
+                self.sent.lock().unwrap().push(format!("SPEED {baud}"));
+            }
+            self.car.set_speed(baud)
         }
     }
 }
@@ -2478,5 +2755,172 @@ mod monitor_tests {
             ["closed".to_string(), "open".to_string()].into(),
             "the door switch, both ways"
         );
+    }
+
+    /// The simulated adapter spoken to by hand: `cmd`, and what came back up to its prompt (at most `limit` reads).
+    fn by_hand(car: &mut SimCar, cmd: &str, limit: usize) -> String {
+        car.send(format!("{cmd}\r").as_bytes()).unwrap();
+        let mut text = Vec::new();
+        let mut buf = [0u8; 4096];
+        for _ in 0..limit {
+            let n = car.recv(&mut buf, Duration::ZERO).unwrap();
+            text.extend_from_slice(&buf[..n]);
+            if text.contains(&b'>') {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&text).into_owned()
+    }
+
+    /// ICA-213: the simulated OBDLink EX on a busy bus, watched whole at 115200 (the truck's case), stops with BUFFER FULL
+    /// after a couple of hundred frames; the same adapter at 2 Mbaud keeps every frame.
+    #[test]
+    fn the_simulated_ex_fills_its_buffer_at_115200_and_not_at_2_mbaud() {
+        let mut ex = SimCar::obdlink_ex();
+        for c in ["ATE0", "ATCAF0"] {
+            assert!(by_hand(&mut ex, c, 10).contains("OK"));
+        }
+        let seen = by_hand(&mut ex, "STMA", 2000);
+        let frames = seen.split('\r').filter(|l| l.len() > 20).count();
+        assert!(seen.contains("BUFFER FULL\r\r>"), "{seen}");
+        assert!((50..400).contains(&frames), "{frames} frames");
+        let mut fast = SimCar::obdlink_ex().on_serial(2_000_000);
+        for c in ["ATE0", "ATCAF0"] {
+            assert!(by_hand(&mut fast, c, 10).contains("OK"));
+        }
+        let seen = by_hand(&mut fast, "STMA", 300);
+        assert!(!seen.contains("BUFFER FULL") && !seen.contains('>'));
+        assert!(seen.split('\r').filter(|l| l.len() > 20).count() > 2500);
+        fast.send(b"\r").unwrap();
+    }
+
+    /// Frames watched through `elm` until `want`, or until the adapter stops by itself; (frames, a BUFFER FULL seen, how
+    /// it ended).
+    fn watch_until(elm: &mut Elm, want: usize) -> (usize, bool, String) {
+        let (mut frames, mut full) = (0, false);
+        let how = elm
+            .monitor(|line| {
+                full |= line.contains("BUFFER FULL");
+                if parse_line(line, elm_bus(), 0.0).is_some() {
+                    frames += 1;
+                }
+                frames < want
+            })
+            .unwrap();
+        (frames, full, how)
+    }
+
+    /// ICA-213: a whole-bus watch on the EX asks it for 2 Mbaud first (STBR, by its handshake) and the computer's side
+    /// follows; every frame is kept; the speed goes back to 115200 on both sides when the watch ends, and the adapter
+    /// answers there.
+    #[test]
+    fn a_whole_bus_watch_raises_the_ex_serial_speed_and_keeps_every_frame() {
+        use crate::sim::recording::Recorder;
+        let (port, log) = Recorder::new(SimCar::obdlink_ex());
+        let mut elm = Elm::listen(Box::new(port), 6).unwrap();
+        let (frames, full, how) = watch_until(&mut elm, 3000);
+        assert_eq!((frames, full), (3000, false), "{how}");
+        assert!(
+            how.contains("watched at 2000000 baud") && how.contains("back at 115200 afterwards"),
+            "{how}"
+        );
+        assert!(elm.measure_voltage().is_some(), "answers at 115200 again");
+        let log = log.lock().unwrap().clone();
+        let at = |e: &str| {
+            log.iter()
+                .position(|l| l == e)
+                .unwrap_or_else(|| panic!("{e:?} in {log:?}"))
+        };
+        // the adapter moves once its OK has gone out, this computer once it has read it; then the carriage return that
+        // confirms, at the new speed
+        let confirmed = |from: usize| from + log[from..].iter().position(|l| l == "\r").unwrap();
+        let up = at("STBR 2000000\r");
+        assert!(
+            up < at("ADAPTER 2000000") && up < at("SPEED 2000000"),
+            "{log:?}"
+        );
+        assert!(at("SPEED 2000000") < confirmed(up) && confirmed(up) < at("STMA\r"));
+        let down = at("STBR 115200\r");
+        assert!(at("STMA\r") < down, "{log:?}");
+        assert!(down < at("ADAPTER 115200") && at("SPEED 115200") < confirmed(down));
+        assert!(
+            !log.iter().any(|l| l == "STBR 1000000\r"),
+            "the first speed took"
+        );
+    }
+
+    /// ICA-213: a clone that does not know the speed command (it answers ATBRD `?`) watches as before, at its own speed;
+    /// on a busy bus that ends with BUFFER FULL, as it did.
+    #[test]
+    fn a_clone_that_does_not_know_the_speed_command_watches_at_its_own() {
+        use crate::sim::recording::Recorder;
+        let (port, log) = Recorder::new(SimCar::new().on_serial(115_200));
+        let mut elm = Elm::listen(Box::new(port), 6).unwrap();
+        let (frames, full, how) = watch_until(&mut elm, 200);
+        assert_eq!((frames, full, how.as_str()), (200, false, "stopped"));
+        let log = log.lock().unwrap().clone();
+        assert!(position(&log, "ATBRD 08").is_some(), "{log:?}");
+        assert!(!log
+            .iter()
+            .any(|l| l.starts_with("SPEED") || l.starts_with("ADAPTER") || l.starts_with("STBR")));
+        assert!(elm.measure_voltage().is_some());
+        let mut busy =
+            Elm::listen(Box::new(SimCar::new().on_serial(115_200).busy_bus()), 6).unwrap();
+        let (frames, full, how) = watch_until(&mut busy, 3000);
+        assert!(full && frames < 400, "{frames} {how}");
+        assert!(how.contains("stopped by itself (BUFFER FULL)"), "{how}");
+    }
+
+    /// ICA-213: an ELM327 that knows ATBRD is asked for 500 kbps (divisor 08) and put back with divisor 23 (114.3 kbps,
+    /// close enough to the computer's 115200).
+    #[test]
+    fn an_elm327_that_knows_atbrd_watches_at_500k() {
+        use crate::sim::recording::Recorder;
+        let (port, log) = Recorder::new(SimCar::new().on_serial(115_200).busy_bus().knowing_brd());
+        let mut elm = Elm::listen(Box::new(port), 6).unwrap();
+        let (frames, full, how) = watch_until(&mut elm, 1000);
+        assert_eq!((frames, full), (1000, false), "{how}");
+        assert!(
+            how.contains("watched at 500000 baud") && how.contains("back at 115200"),
+            "{how}"
+        );
+        let log = log.lock().unwrap().clone();
+        assert!(
+            position(&log, "ATBRD 08") < position(&log, "ATMA"),
+            "{log:?}"
+        );
+        assert!(
+            position(&log, "ATMA") < position(&log, "ATBRD 23"),
+            "{log:?}"
+        );
+        assert!(elm.measure_voltage().is_some());
+    }
+
+    /// ICA-213: an adapter that answers the speed change OK and never finishes the handshake is found again at its old
+    /// speed after each try, and the watch goes on there.
+    #[test]
+    fn an_adapter_that_does_not_finish_the_handshake_is_watched_at_its_old_speed() {
+        use crate::sim::recording::Recorder;
+        let stn = SimCar {
+            stn: true,
+            ..SimCar::new()
+        };
+        let (port, log) = Recorder::new(stn.on_serial(115_200).lying_about_speed());
+        let mut elm = Elm::listen(Box::new(port), 6).unwrap();
+        let (frames, full, how) = watch_until(&mut elm, 100);
+        assert_eq!((frames, full, how.as_str()), (100, false, "stopped"));
+        let log = log.lock().unwrap().clone();
+        for s in ["2000000", "1000000", "500000"] {
+            assert!(position(&log, &format!("STBR {s}")).is_some(), "{log:?}");
+        }
+        assert!(!log.iter().any(|l| l.starts_with("ADAPTER")), "{log:?}");
+        assert_eq!(
+            log.iter()
+                .rev()
+                .find(|l| l.starts_with("SPEED"))
+                .map(String::as_str),
+            Some("SPEED 115200")
+        );
+        assert!(elm.measure_voltage().is_some());
     }
 }

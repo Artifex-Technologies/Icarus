@@ -66,6 +66,12 @@ pub trait Link {
     fn adapter(&self) -> String;
     /// The voltage at the OBD port (the vehicle's battery) measured now, when the adapter can.
     fn voltage(&mut self) -> Option<f64>;
+    /// Whether this link, as it was opened, is a cable all the way (docs/DESIGN.md, rule 5): asked of the port or
+    /// interface it opened, never of what the adapter's path leads to now, so a udev symlink moved after connecting
+    /// does not change the answer (ICA-206). Not unless the link can tell.
+    fn wired(&self) -> bool {
+        false
+    }
     /// Sets the extended address byte for the `request_to` calls that follow (a module behind a gateway), or None for
     /// normal addressing. A link that cannot address modules that way refuses Some.
     fn set_ext(&mut self, ext: Option<u8>) -> Result<(), ObdError> {
@@ -124,6 +130,9 @@ impl<L: Link + ?Sized> Link for Box<L> {
     fn voltage(&mut self) -> Option<f64> {
         (**self).voltage()
     }
+    fn wired(&self) -> bool {
+        (**self).wired()
+    }
     fn set_ext(&mut self, ext: Option<u8>) -> Result<(), ObdError> {
         (**self).set_ext(ext)
     }
@@ -173,6 +182,9 @@ impl Link for Elm {
     }
     fn voltage(&mut self) -> Option<f64> {
         Elm::measure_voltage(self)
+    }
+    fn wired(&self) -> bool {
+        Elm::wired(self)
     }
     fn reach(&self) -> Reach {
         Elm::reach(self)

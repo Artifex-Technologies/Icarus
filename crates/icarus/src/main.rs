@@ -1656,9 +1656,9 @@ fn obd_service(args: &Args) -> Result<(), String> {
                 .into(),
         );
     };
-    // judged once the port is open, as for a setting
+    // asked of the port connect() opened (ICA-206), as the window asks it: a symlink moved since cannot change it
     let mut elm = connect(args)?;
-    let wired = adapter_target(args).is_ok_and(|(_, t)| t.wired());
+    let wired = elm.wired();
     let list = vehicle_services(&mut elm)?;
     let s = list
         .iter()
@@ -1881,10 +1881,11 @@ fn obd_setting(args: &Args, undo: bool) -> Result<(), String> {
             .into())
         }
     };
-    // the port opened first, so one that is not there (unplugged, or ttyUSB1 this time) says so; then it must be a cable
+    // the port opened first, so one that is not there (unplugged, or ttyUSB1 this time) says so; then the port it opened
+    // must be a cable (ICA-206: asked of the open port, not of where the path leads now)
     let mut elm = connect(args)?;
-    let (spec, target) = adapter_target(args)?;
-    if !target.wired() {
+    let (spec, _) = adapter_target(args)?;
+    if !elm.wired() {
         return Err(format!("changing a setting writes the module's memory: use a wired adapter (a USB cable); {spec} is not one Linux puts on USB (Bluetooth, Wi-Fi and built-in serial ports are not)"));
     }
     let (vin, list) = vehicle_settings(&mut elm)?;

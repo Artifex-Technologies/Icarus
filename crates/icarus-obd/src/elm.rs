@@ -938,6 +938,11 @@ impl Elm {
     ///   F8 00 1C 00 00 00") lost their last bytes. Off, each frame shows whole. It goes back on (`ATCAF1`) when the watch
     ///   ends, and, if that fails, before the next request, since requests need it.
     ///
+    /// - On a serial line whose speed can change (`Port::speed`: a USB cable, not Bluetooth or Wi-Fi), the line is sped up
+    ///   for the watch (`raise_speed`: `STBR` on an STN, `ATBRD` on an ELM327, by the adapter's own handshake) and put
+    ///   back as soon as it ends, so a busy bus does not fill the adapter's buffer (ICA-213); an adapter that refuses or
+    ///   does not confirm is watched at the speed it was at. The result says the speed watched at when it changed.
+    ///
     /// An OK to `ATCSM1` or `STCMM0` proves only that the adapter accepted the command, not that it obeys it: a clone that
     /// answers OK to everything can still acknowledge frames while it watches.
     ///
@@ -980,10 +985,31 @@ impl Elm {
             Some((f, m)) => vec![format!("ATCF{f:03X}"), format!("ATCM{m:03X}")],
         };
         let filter: Vec<&str> = filter.iter().map(String::as_str).collect();
+        // the serial link sped up for the watch (ICA-213), and put back as soon as it ends
+        let mut raised = None;
         let watched = self
             .ok_commands(&["ATCAF0"])
             .and_then(|()| self.ok_commands(&filter))
-            .and_then(|()| self.watch(only.is_some(), each));
+            .and_then(|()| {
+                raised = self.raise_speed()?;
+                self.watch(only.is_some(), each)
+            });
+        let watched = match raised {
+            None => watched,
+            Some((from, to)) => {
+                let back = self.switch_speed(from);
+                watched.map(|how| match back {
+                    Ok(true) => format!(
+                        "{how}; watched at {to} baud, the adapter's serial link back at {from} afterwards"
+                    ),
+                    Ok(false) => format!(
+                        "{how}; watched at {to} baud, and the adapter's serial link did not go back to {from} (it stays \
+                         at {to} until the adapter is unplugged or reset)"
+                    ),
+                    Err(e) => format!("{how}; watched at {to} baud, and then {e}"),
+                })
+            }
+        };
         if only.is_some() {
             // back to no filter (STN) or automatic receive filtering; the next request sets its own (ATCRA with its address)
             let _ = self.ok_commands(if stn { &["STFCP"] } else { &["ATCRA"] });
@@ -995,6 +1021,140 @@ impl Elm {
             (Ok(how), Err(e)) => Ok(format!(
                 "{how}; CAN auto-formatting could not be turned back on yet ({e}), so it goes back on before the next request"
             )),
+        }
+    }
+
+    /// Speeds the adapter's serial link up for a watch (ICA-213: an OBDLink EX watching the truck's whole bus at 115200
+    /// stopped with BUFFER FULL after about 200 frames), when the port is a serial line whose speed can change and the
+    /// speed it runs at now can be asked back afterwards. The speeds `WATCH_SPEEDS` names are tried fastest first, each
+    /// with the adapter's own handshake (`switch_speed`); Some((the speed before, the one now)) when one took, None when
+    /// none did (a clone that does not know the command answers `?`, and the watch goes on at the speed it was at).
+    fn raise_speed(&mut self) -> Result<Option<(u32, u32)>, ObdError> {
+        let Some(from) = self.port.speed() else {
+            return Ok(None);
+        };
+        if self.speed_command(from).is_none() {
+            return Ok(None);
+        }
+        let speeds: &[u32] = if self.stn.is_some() {
+            &WATCH_SPEEDS.stn
+        } else {
+            &WATCH_SPEEDS.elm
+        };
+        for &to in speeds.iter().filter(|&&s| s > from) {
+            if self.switch_speed(to)? {
+                return Ok(Some((from, to)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The command that asks this adapter to change its serial speed to `baud` by its handshake, or None when it cannot be
+    /// said: an STN's `STBR` takes the speed itself in decimal; an ELM327's `ATBRD hh` a divisor, the speed being
+    /// 4000 kbps / hh (hh 01-FF), so only a speed that comes within 3% of one is said (38400 is hh 68, 115200 hh 23:
+    /// 114.3 kbps, 500000 hh 08).
+    fn speed_command(&self, baud: u32) -> Option<String> {
+        if baud == 0 {
+            return None;
+        }
+        if self.stn.is_some() {
+            return Some(format!("STBR {baud}"));
+        }
+        let div = (4_000_000 + baud / 2) / baud;
+        if !(1..=0xFF).contains(&div) {
+            return None;
+        }
+        let made = 4_000_000 / div;
+        (made.abs_diff(baud) * 100 <= baud * 3).then(|| format!("ATBRD {div:02X}"))
+    }
+
+    /// Changes the adapter's serial speed, and this computer's side of the line with it, to `to`, by the handshake the
+    /// ELM327 datasheet gives for `AT BRD` ("Using Higher RS232 Baud Rates") and the STN reference gives `STBR` the same:
+    /// the adapter answers OK at the old speed (no prompt after it), switches, and after its wait (75 ms unless
+    /// `ATBRT`/`STBRT` says otherwise) sends its ID (`ATI`'s string; an STN's `STI` string) at the new speed; when a
+    /// carriage return comes back at the new speed in that wait it answers OK and stays there, and otherwise goes back to
+    /// the old speed by itself. Ok(true) when both sides now run at `to`; Ok(false) when the adapter refused (`?`: a clone
+    /// that does not know the command, or a speed it cannot make) or did not confirm, both sides at the old speed again;
+    /// an error only when the adapter answers at neither speed.
+    fn switch_speed(&mut self, to: u32) -> Result<bool, ObdError> {
+        let (Some(from), Some(cmd)) = (self.port.speed(), self.speed_command(to)) else {
+            return Ok(false);
+        };
+        let id = self.stn.clone().unwrap_or_else(|| self.id.clone());
+        if id.is_empty() {
+            // nothing to know the adapter's answer at the new speed by
+            return Ok(false);
+        }
+        self.drain_left_over()?;
+        self.port.send(format!("{cmd}\r").as_bytes())?;
+        let (said, _) = self.read_until(Duration::from_secs(2), |t| {
+            has(t, b"OK\r") || t.contains(&b'>')
+        })?;
+        if !has(&said, b"OK\r") && said.contains(&b'>') {
+            return Ok(false);
+        }
+        if has(&said, b"OK\r") {
+            self.port.set_speed(to)?;
+            let (seen, _) = self.read_until(Duration::from_millis(500), |t| {
+                find(t, id.as_bytes()).is_some_and(|i| t[i..].contains(&b'\r'))
+            })?;
+            if has(&seen, id.as_bytes()) {
+                self.port.send(b"\r")?;
+                let (ok, _) = self.read_until(Duration::from_millis(500), |t| t.contains(&b'>'))?;
+                if has(&ok, b"OK") {
+                    return Ok(true);
+                }
+            }
+        }
+        self.find_speed(from, to)
+    }
+
+    /// Where the adapter is after a speed change it did not confirm: at `from` again (it goes back by itself once its
+    /// wait has passed), or at `to` after all (it took the change but its OK was lost). Asked with `ATI`, which only the
+    /// adapter answers; Ok(true) when it is at `to`. This computer's side is left at the speed that answered.
+    fn find_speed(&mut self, from: u32, to: u32) -> Result<bool, ObdError> {
+        self.port.set_speed(from)?;
+        // past the adapter's own wait (75 ms, twice, by default), so it has gone back
+        std::thread::sleep(Duration::from_millis(250));
+        for speed in [from, to] {
+            self.port.set_speed(speed)?;
+            // twice: the first may only end a handshake still waiting, its characters taken for a wrong carriage return
+            for _ in 0..2 {
+                match self.command("ATI", Duration::from_secs(1)) {
+                    Ok(lines) if lines.iter().any(|l| l.contains("ELM")) => return Ok(speed == to),
+                    Ok(_) | Err(ObdError::Timeout(_)) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        self.port.set_speed(from)?;
+        Err(ObdError::Adapter(format!(
+            "the adapter stopped answering while its serial speed was changed from {from} to {to} baud: unplug it and plug \
+             it back in"
+        )))
+    }
+
+    /// The adapter's bytes until `done` says what came is complete (true), or `limit` passed (false).
+    fn read_until(
+        &mut self,
+        limit: Duration,
+        done: impl Fn(&[u8]) -> bool,
+    ) -> Result<(Vec<u8>, bool), ObdError> {
+        let deadline = Instant::now() + limit;
+        let mut text = Vec::new();
+        let mut buf = [0u8; 256];
+        loop {
+            if done(&text) {
+                return Ok((text, true));
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Ok((text, false));
+            }
+            let n = self
+                .port
+                .recv(&mut buf, left.min(Duration::from_millis(50)))?;
+            text.extend_from_slice(&buf[..n]);
         }
     }
 
@@ -1097,6 +1257,39 @@ impl Elm {
         Ok(lines)
     }
 }
+
+/// Where `part` starts in `text`.
+fn find(text: &[u8], part: &[u8]) -> Option<usize> {
+    if part.is_empty() {
+        return Some(0);
+    }
+    text.windows(part.len()).position(|w| w == part)
+}
+
+fn has(text: &[u8], part: &[u8]) -> bool {
+    find(text, part).is_some()
+}
+
+/// The serial speeds a watch asks the adapter for (`Elm::raise_speed`), fastest first.
+pub struct WatchSpeeds {
+    /// An STN chip (an OBDLink): `STBR` takes these. The STN21xx/STN22xx datasheet gives its UART up to 8 Mbps
+    /// (theoretical); the OBDLink EX and SX reach the computer through an FTDI FT231X, which makes 3,000,000 / (n + k/8)
+    /// baud (n from 2, k 0-7) and 2 Mbaud as a special case (FTDI's FT231X datasheet and application note AN232B-05), so
+    /// these three come out exact on both sides.
+    pub stn: [u32; 3],
+    /// A plain ELM327: `ATBRD 08`. The ELM327 datasheet's revision history says v1.2, which brought `AT BRD`, made the
+    /// serial speed adjustable to 500 kbps, and no more is asked of an ELM327 or a clone; one that does not know the
+    /// command answers `?`.
+    pub elm: [u32; 1],
+}
+
+/// UNVERIFIED ON HARDWARE: the speed change follows the OBDLink Family Reference and Programming Manual (`STBR`, which
+/// "operates identically to ATBRD" with the speed in decimal, `?` for one it cannot make within 3%, and the STI string as
+/// its ID) and the ELM327 datasheet (`AT BRD`'s handshake), tested only against the simulated adapter.
+pub const WATCH_SPEEDS: WatchSpeeds = WatchSpeeds {
+    stn: [2_000_000, 1_000_000, 500_000],
+    elm: [500_000],
+};
 
 /// The adapter's header and filters are not known (after a switch of bus): any request says them again.
 const UNKNOWN_TARGET: (u32, u32) = (u32::MAX, u32::MAX);

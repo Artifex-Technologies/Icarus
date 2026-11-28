@@ -508,6 +508,11 @@ impl<P: Port> PassThru for OpenPort<P> {
             _ => Err(ObdError::Garbled(format!("{cmd}: {a}"))),
         }
     }
+
+    /// The serial port the cable was opened on, judged by its own device (`Port::wired`).
+    fn wired(&self) -> bool {
+        self.port.wired()
+    }
 }
 
 #[cfg(test)]
