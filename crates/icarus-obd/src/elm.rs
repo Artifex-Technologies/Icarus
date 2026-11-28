@@ -650,6 +650,8 @@ impl Elm {
     fn point_at_everyone(&mut self) -> Result<(), ObdError> {
         if self.target.is_some() {
             let cmds = header_commands(None, self.reach().can29);
+            // not known until every command is taken: one refused halfway leaves the adapter between two targets
+            self.target = Some(UNKNOWN_TARGET);
             self.ok_commands(&cmds.iter().map(String::as_str).collect::<Vec<_>>())?;
             self.target = None;
         }
@@ -951,6 +953,9 @@ impl Elm {
         self.ext_to(self.want_ext)?;
         if self.target != Some((tx, rx)) {
             let cmds = header_commands(Some((tx, rx)), wide);
+            // unknown until all are taken: a header switch refused halfway (ATSH701 taken, ATCRA709 not) must not leave the
+            // old target named, or the next request to it would skip its header and go to the new module
+            self.target = Some(UNKNOWN_TARGET);
             self.ok_commands(&cmds.iter().map(String::as_str).collect::<Vec<_>>())?;
             self.target = Some((tx, rx));
         }
@@ -982,6 +987,8 @@ impl Elm {
                 Some(a) => format!("ATCEA{a:02X}"),
                 None => "ATCEA".to_string(),
             };
+            // unknown until it is taken (as the header)
+            self.ext = None;
             self.ok_commands(&[&cmd])?;
             self.ext = Some(want);
         }
@@ -2257,5 +2264,78 @@ mod tests {
         let a = elm.request(&[0x01, 0x0C]).unwrap();
         assert_eq!(a[0].data[..2], [0x41, 0x0C]);
         assert!(matches!(elm.request(&[0x01, 0x99]), Err(ObdError::NoData)));
+    }
+
+    /// The simulated adapter, refusing (`?`) each command put in `balk` once; every command is logged.
+    struct Balk {
+        car: SimCar,
+        balk: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        log: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        reply: Vec<u8>,
+    }
+
+    impl Port for Balk {
+        fn send(&mut self, data: &[u8]) -> io::Result<()> {
+            let cmd = String::from_utf8_lossy(data).trim().to_string();
+            if !cmd.is_empty() {
+                self.log.lock().unwrap().push(cmd.clone());
+                let mut balk = self.balk.lock().unwrap();
+                if let Some(i) = balk.iter().position(|b| *b == cmd) {
+                    balk.remove(i);
+                    self.reply = b"?\r\r>".to_vec();
+                    return Ok(());
+                }
+            }
+            self.car.send(data)
+        }
+        fn recv(&mut self, buf: &mut [u8], timeout: Duration) -> io::Result<usize> {
+            if !self.reply.is_empty() {
+                let n = self.reply.len().min(buf.len());
+                buf[..n].copy_from_slice(&self.reply[..n]);
+                self.reply.drain(..n);
+                return Ok(n);
+            }
+            self.car.recv(buf, timeout)
+        }
+    }
+
+    /// Review of ICA-218: a header switch refused halfway (ATSH701 taken, ATCRA709 not; or the way back to the broadcast)
+    /// leaves the target unknown, so the next request to the module asked before says its header again and is answered by
+    /// that module, not by the one the adapter was left pointing at.
+    #[test]
+    fn a_header_switch_refused_halfway_is_said_again() {
+        let balk = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut elm = Elm::connect(Box::new(Balk {
+            car: SimCar::new(),
+            balk: balk.clone(),
+            log: log.clone(),
+            reply: Vec::new(),
+        }))
+        .unwrap();
+        let engine = |e: &mut Elm| e.request_to(0x700, 0x708, &[0x22, 0x1F, 0x01]);
+        assert_eq!(engine(&mut elm).unwrap()[0].from, "708");
+        balk.lock().unwrap().push("ATCRA709".into());
+        assert!(elm.request_to(0x701, 0x709, &[0x22, 0x1F, 0x11]).is_err());
+        log.lock().unwrap().clear();
+        let a = engine(&mut elm).unwrap();
+        assert!(
+            log.lock().unwrap().iter().any(|c| c == "ATSH700"),
+            "the header said again: {:?}",
+            log.lock().unwrap()
+        );
+        assert_eq!(a[0].from, "708");
+        assert_eq!(a[0].data[..3], [0x62, 0x1F, 0x01]);
+        // the way back to every module refused halfway: the module's header is said again too
+        balk.lock().unwrap().push("ATCRA".into());
+        assert!(elm.request(&[0x01, 0x0C]).is_err());
+        log.lock().unwrap().clear();
+        assert_eq!(engine(&mut elm).unwrap()[0].from, "708");
+        assert!(
+            log.lock().unwrap().iter().any(|c| c == "ATSH700"),
+            "{:?}",
+            log.lock().unwrap()
+        );
+        assert!(balk.lock().unwrap().is_empty(), "both refusals were met");
     }
 }
