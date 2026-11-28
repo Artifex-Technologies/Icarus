@@ -704,11 +704,12 @@ fn name_taken(new: &Profile, have: &Profile, source: &str) -> Result<(), String>
     Ok(())
 }
 
-/// Writes `text` to `p` whole or not at all: into a new file in the same folder, flushed to the disk, then renamed over
-/// `p`, so a crash or a full disk midway leaves the old file as it was.
-fn write_replacing(p: &Path, text: &str) -> Result<(), String> {
+/// Writes `text` to `p` whole or not at all: into a new file of this process in the same folder, flushed to the disk,
+/// then renamed over `p` and the folder synced, so a crash or a full disk midway leaves the old file as it was. Shared by
+/// the files Icarus rewrites (a vehicle profile here, a vehicle's maintenance log in maintenance.rs).
+pub(crate) fn write_replacing(p: &Path, text: &str) -> Result<(), String> {
     use std::io::Write;
-    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("profile");
+    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("file");
     let tmp = p.with_file_name(format!(".{name}.new-{}", std::process::id()));
     let written = (|| {
         let mut f = std::fs::File::create(&tmp)?;

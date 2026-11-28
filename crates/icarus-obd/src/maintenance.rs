@@ -437,29 +437,6 @@ pub fn load(dir: &Path) -> Result<Log, String> {
     log.checked().map_err(|e| format!("{}: {e}", p.display()))
 }
 
-/// Writes `text` to `p` whole or not at all: into a new file of this process in the same folder, flushed to the disk,
-/// then renamed over `p`, so a crash or a full disk midway leaves the old file as it was. (The pattern of vehicles.rs's
-/// `write_replacing` on main; one shared helper once both are on one branch.)
-fn write_replacing(p: &Path, text: &str) -> Result<(), String> {
-    use std::io::Write;
-    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or(FILE);
-    let tmp = p.with_file_name(format!(".{name}.new-{}", std::process::id()));
-    let written = (|| {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(text.as_bytes())?;
-        f.sync_all()?;
-        std::fs::rename(&tmp, p)
-    })();
-    if let Err(e) = written {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(format!("{}: {e}", p.display()));
-    }
-    if let Some(d) = p.parent().and_then(|d| std::fs::File::open(d).ok()) {
-        let _ = d.sync_all();
-    }
-    Ok(())
-}
-
 /// Runs `f` holding the log's lock (an flock on `.maintenance.lock` in the vehicle's folder), so the window and the
 /// command line changing the log at once do not lose one another's change.
 fn locked<T>(dir: &Path, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
@@ -492,7 +469,8 @@ pub fn save(dir: &Path, log: &Log) -> Result<(), String> {
         .retain(|_, i| i.miles.is_some() || i.months.is_some() || !i.extra.is_empty());
     let body = toml::to_string(&log).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    write_replacing(&path(dir), &format!("{HEAD}\n{body}"))
+    // whole or not at all (vehicles.rs's helper: a file of this process's own, synced, renamed over the log)
+    crate::vehicles::write_replacing(&path(dir), &format!("{HEAD}\n{body}"))
 }
 
 /// Adds a service to the log in `dir`: its date checked (and written the one way), "other" with a note. Says what looks
