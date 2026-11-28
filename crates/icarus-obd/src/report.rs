@@ -317,7 +317,12 @@ pub fn markdown(d: &Diagnosis) -> String {
             );
             for (p, v) in &f.values {
                 if let Some(x) = j1979::pid(*p) {
-                    let _ = writeln!(o, "- {}: {}", x.name, crate::units::both(x.unit, *v, 1));
+                    let _ = writeln!(
+                        o,
+                        "- {}: {}",
+                        x.name,
+                        crate::units::both_pid(*p, x.unit, *v, 1)
+                    );
                 }
             }
             let _ = writeln!(o);
@@ -388,7 +393,12 @@ pub fn markdown(d: &Diagnosis) -> String {
         let _ = writeln!(o, "## Live values when the report was made\n");
         for (p, v) in &d.snapshot {
             if let Some(x) = j1979::pid(*p) {
-                let _ = writeln!(o, "- {}: {}", x.name, crate::units::both(x.unit, *v, 2));
+                let _ = writeln!(
+                    o,
+                    "- {}: {}",
+                    x.name,
+                    crate::units::both_pid(*p, x.unit, *v, 2)
+                );
             }
         }
         let _ = writeln!(o);
@@ -503,6 +513,7 @@ mod tests {
             "## Freeze frame",
             "stored by P0171",
             "Vehicle speed: 44.7 mph (72.0 km/h)",
+            "Intake manifold pressure (MAP): 7.0 psi absolute (48.0 kPa)",
             "### 7B0 ABS / VSC / TRC",
             "**C1241** (stored, present now) Low battery voltage",
             "_(from Toyota / Lexus / Scion)_",

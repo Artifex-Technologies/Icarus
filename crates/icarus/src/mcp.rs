@@ -236,7 +236,7 @@ fn values(list: &[(u8, f64)]) -> String {
                 format!(
                     "{} {}",
                     d.name.to_lowercase(),
-                    icarus_obd::units::both(d.unit, *v, 1)
+                    icarus_obd::units::both_pid(*p, d.unit, *v, 1)
                 )
             })
         })
@@ -674,7 +674,7 @@ mod tests {
         for want in [
             "vehicle speed 44.7 mph (72.0 km/h)",
             "coolant temperature 194.0 °F (90.0 °C)",
-            "intake manifold pressure (map) 7.0 psi (48.0 kPa)",
+            "intake manifold pressure (map) 7.0 psi absolute (48.0 kPa)",
             "engine speed 2150.0 rpm",
         ] {
             assert!(freeze.contains(want), "{want}: {freeze}");
@@ -683,7 +683,7 @@ mod tests {
             .lines()
             .find(|l| l.starts_with("Now:"))
             .unwrap_or_else(|| panic!("{t}"));
-        for unit in ["mph (", "°F (", "psi ("] {
+        for unit in ["mph (", "°F (", "psi absolute ("] {
             assert!(now.contains(unit), "{unit}: {now}");
         }
         assert!(!t.contains("km/h (") && !t.contains("°C ("), "{t}");

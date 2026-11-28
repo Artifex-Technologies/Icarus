@@ -233,7 +233,9 @@ Or the **Learning** page: Start learning, type what you are about to do and pres
   answered `70`) becomes a `[[test]]`, and a routine the tool starts and the module says it started (`31 01` answered
   `71 01`; up to 8 bytes of parameters) a `[[service]]` entry with those parameters (once per module and routine), with
   the extended session and waiting for its result. A request the module answers "response pending" (`7F .. 78`) waits
-  for the answer after it. A mark names the next one learned; one change per mark works best. All are unchecked, with
+  for the answer after it. An answer is paired with its request by the module's answer ID as the profiles give it (VW's
+  cluster asks on 714 and answers on 77E; the entry gets `rx = 0x77E`), else the request ID + 8; a request to every
+  module (7DF) answered on 7E8-7EF is learned for that module (7E0-7E7). A mark names the next one learned; one change per mark works best. All are unchecked, with
   the most cautious conditions (a learned routine: engine off, parked, 30 s at most); the airbag modules and immobilizer,
   key and odometer settings are never learned, nor is a write of the VIN or a module's serial number.
 - **What is never learned from: the key modules, and anything after security access.** Nothing to or from an
@@ -247,8 +249,9 @@ Or the **Learning** page: Start learning, type what you are about to do and pres
   routine start on an airbag module, a routine start with more than 8 bytes of parameters (too long to learn), writes of
   the VIN or a serial number, writes too long for a setting, memory writes and programming, output controls of another
   kind than short-term adjustment, writes, output tests and routine starts the module refused (`7F`, with its reason),
-  and output tests and routine starts that got no answer (none within 5 s of the request or of the module's last
-  "response pending", or none by the end of the watch).
+  and output tests and routine starts that got no answer (none within 6 s of the request or of the module's last
+  "response pending": UDS's 5 s and a second for the adapter's buffering; or none by the end of the watch). A watch
+  that ends because the adapter was lost still saves the session, saying so.
 - **The session** is saved in the vehicle's `Logs` folder as `learning-DATE-TIME.md`: the module names from Icarus's
   profile, the marks, what was learned, what was noted, and every diagnostic message in words (but a key module's). No
   VIN and no module serial number: where a message carries one (`09 02`, `22 F190`, `22 F18C`, KWP2000's `1A 90` and

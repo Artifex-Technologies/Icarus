@@ -726,7 +726,8 @@ pub(crate) fn run_with(
             Some(Cmd::BusMark(_)) => {}
             Some(Cmd::BusStart(source, learning)) => {
                 live.clear();
-                let mut a = icarus_obd::bus::Analyzer::watching(fence());
+                // answers paired with requests by the profiles' answer IDs (VW's 714 answers on 77E)
+                let mut a = icarus_obd::bus::Analyzer::watching(fence()).answering(&profiles);
                 let t0 = Instant::now();
                 let mut last_view = Instant::now();
                 let mut pending: Option<Cmd> = None;
@@ -785,7 +786,14 @@ pub(crate) fn run_with(
                 };
                 let ended = match ended {
                     Ok(how) => how,
-                    Err(m) => format!("could not watch: {m}"),
+                    Err(m) => {
+                        // the session saved below says the watch ended early (when it had begun: not for "connect
+                        // first" or an interface that would not open)
+                        if a.frames > 0 {
+                            a.lost(&m);
+                        }
+                        format!("could not watch: {m}")
+                    }
                 };
                 // what still waits for its module's answer is noted as unanswered, not learned (ICA-221)
                 a.finish();

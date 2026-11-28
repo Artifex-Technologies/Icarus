@@ -177,6 +177,19 @@ pub fn describe(msg: &[u8]) -> String {
 /// pending" (`7F .. 78`): UDS's longest wait after a pending answer (P2*, 5 s; ISO 14229-2).
 pub const ANSWER_WAIT: f64 = 5.0;
 
+/// What `ANSWER_WAIT` is given on top: frame times are when Icarus read each frame, not when it was on the bus, and an
+/// ELM327/STN adapter's serial link buffers lines (a request can be read late and its answer early, or the other way
+/// round), so an answer on time on the bus may look a fraction of a second late here.
+pub const ANSWER_SLACK: f64 = 1.0;
+
+/// A request waiting for its module's answer: the entry it becomes, when it was sent (or last said pending), and the mark
+/// that was naming what is learned next when it was sent (by its place in `marks`).
+struct Waiting<T> {
+    def: T,
+    at: f64,
+    mark: Option<usize>,
+}
+
 #[derive(Default)]
 pub struct Analyzer {
     pub ids: BTreeMap<u32, IdStats>,
@@ -196,10 +209,13 @@ pub struct Analyzer {
     /// Routine starts (`31 01`) waiting for the module's answer, by (module, routine), as the entry each would be, with
     /// when it was sent (or last said pending): one is learned when the module says it started (`71 01`), noted when it
     /// refuses (`7F 31`) or gives no answer in time (`ANSWER_WAIT`).
-    pending_routines: HashMap<(u16, u16), (crate::service::ServiceDef, f64)>,
+    pending_routines: HashMap<(u16, u16), Waiting<crate::service::ServiceDef>>,
     /// Output tests (`2F .. 03`, `30 .. 07`) waiting for the module's answer, by (module, output, KWP2000?), the same way:
     /// learned on `6F` / `70`, noted on a refusal or no answer (ICA-221).
-    pending_tests: HashMap<(u16, u16, bool), (TestDef, f64)>,
+    pending_tests: HashMap<(u16, u16, bool), Waiting<TestDef>>,
+    /// Answer IDs the profiles give that are not their request ID + 8 (VW's cluster: 714 answered on 77E), each with the
+    /// request IDs answered there (`answering`).
+    answer_ids: HashMap<u16, Vec<u16>>,
     /// The time of the frame being read.
     now: f64,
     /// Modules another tool has in the extended diagnostic session.
@@ -235,6 +251,80 @@ impl Analyzer {
         }
     }
 
+    /// The analyzer, pairing each module's answers with its requests as `profiles` give them: an answer ID that is not
+    /// its request's + 8 (a `[[module]]` with `rx`). Without it, an answer pairs with the request on its ID - 8 only.
+    pub fn answering(mut self, profiles: &[crate::vehicles::Profile]) -> Analyzer {
+        for m in profiles.iter().flat_map(|p| &p.modules) {
+            let rx = m.rx();
+            if m.ext.is_none() && m.tx <= 0x7FF && rx <= 0x7FF && rx != m.tx + 8 {
+                let list = self.answer_ids.entry(rx as u16).or_default();
+                if !list.contains(&(m.tx as u16)) {
+                    list.push(m.tx as u16);
+                }
+            }
+        }
+        self
+    }
+
+    /// The request IDs an answer on `answer` can be to: the profiles' pairing first, then `answer` - 8, then the
+    /// functional request 7DF for the engine-side answers 7E8-7EF.
+    fn requests_for(&self, answer: u16) -> Vec<u16> {
+        let mut v = self.answer_ids.get(&answer).cloned().unwrap_or_default();
+        let plus8 = answer.wrapping_sub(8);
+        if !v.contains(&plus8) {
+            v.push(plus8);
+        }
+        if (0x7E8..=0x7EF).contains(&answer) {
+            v.push(0x7DF);
+        }
+        v
+    }
+
+    /// The request on `answer` that `waiting` finds: (the ID it was sent on, the module's own request ID). A request sent
+    /// to every module (7DF) and answered on 7E8-7EF belongs to that module's physical request ID, 7E0-7E7.
+    fn waiting_request(&self, answer: u16, waiting: impl Fn(u16) -> bool) -> Option<(u16, u16)> {
+        self.requests_for(answer)
+            .into_iter()
+            .find(|&c| waiting(c))
+            .map(|c| (c, Self::module_of(c, answer)))
+    }
+
+    /// The module a request on `sent` answered on `answer` is: `sent` itself, or for 7DF the answer's physical request ID.
+    fn module_of(sent: u16, answer: u16) -> u16 {
+        if sent == 0x7DF {
+            answer.wrapping_sub(8)
+        } else {
+            sent
+        }
+    }
+
+    /// The `rx` a learned entry for `module` answered on `answer` needs: none when it is the usual + 8.
+    fn rx_of(module: u16, answer: u16) -> Option<u16> {
+        (answer != module.wrapping_add(8)).then_some(answer)
+    }
+
+    /// The mark of `mark` (a place in `marks`), used up, if it is still the one naming what is learned next: an item
+    /// waiting for its answer takes the mark that was current when it was sent, and only if no other mark came since.
+    fn take_mark(&mut self, mark: Option<usize>) -> Option<String> {
+        if mark.is_some() && self.naming.is_some() && mark == Some(self.marks.len()) {
+            self.naming.take()
+        } else {
+            None
+        }
+    }
+
+    /// The mark naming what is learned next, by its place in `marks`, for a request now waiting for its answer.
+    fn current_mark(&self) -> Option<usize> {
+        self.naming.as_ref().map(|_| self.marks.len())
+    }
+
+    /// The adapter was lost and the watch ended early: said in the notes, so the saved session says so.
+    pub fn lost(&mut self, why: &str) {
+        self.note(format!(
+            "the watch ended early: the adapter was lost ({why}); nothing after this point is in the session"
+        ));
+    }
+
     /// The person is about to do `label` in the other tool: it goes into the log, and names the next test or setting
     /// learned (one change per mark; what follows it gets the usual "Learned: ..." name). An empty label names nothing.
     pub fn mark(&mut self, label: &str, at: f64) {
@@ -265,7 +355,7 @@ impl Analyzer {
     pub fn add(&mut self, f: &Frame) {
         self.frames += 1;
         self.now = f.at;
-        self.expire(|at| f.at - at > ANSWER_WAIT);
+        self.expire(|at| f.at - at > ANSWER_WAIT + ANSWER_SLACK);
         let s = self.ids.entry(f.id).or_insert_with(|| IdStats {
             first: f.at,
             ..Default::default()
@@ -342,9 +432,9 @@ impl Analyzer {
     }
 
     /// A data identifier another tool read and then changed (the module said yes) becomes a setting: the value before is
-    /// "was", each value written "set", "set-2", ... (unchecked, parked conditions). Answers come from the module's ID + 8.
+    /// "was", each value written "set", "set-2", ... (unchecked, parked conditions). An answer is paired with its request
+    /// by `requests_for` (the profiles' answer IDs, else ID - 8).
     fn learn_setting(&mut self, id: u16, msg: &[u8]) {
-        let rx_tx = id.wrapping_sub(8);
         match msg {
             [0x10, 0x03] => {
                 self.extended.insert(id);
@@ -353,12 +443,18 @@ impl Analyzer {
                 self.extended.remove(&id);
             }
             [0x62, hi, lo, v @ ..] if !v.is_empty() => {
-                self.read_values
-                    .insert((rx_tx, u16::from_be_bytes([*hi, *lo]), false), v.to_vec());
+                for tx in self.requests_for(id) {
+                    let tx = Self::module_of(tx, id);
+                    self.read_values
+                        .insert((tx, u16::from_be_bytes([*hi, *lo]), false), v.to_vec());
+                }
             }
             [0x61, lid, v @ ..] if !v.is_empty() => {
-                self.read_values
-                    .insert((rx_tx, *lid as u16, true), v.to_vec());
+                for tx in self.requests_for(id) {
+                    let tx = Self::module_of(tx, id);
+                    self.read_values
+                        .insert((tx, *lid as u16, true), v.to_vec());
+                }
             }
             // the VIN (2E F190, KWP2000's 3B 90) and a module's serial number (2E F18C) are identity, not a setting: a
             // setting learned from one would carry it into the session and the vehicle's profile
@@ -382,17 +478,25 @@ impl Analyzer {
                 v.len()
             )),
             [0x6E, hi, lo, ..] => {
-                self.setting_written(rx_tx, u16::from_be_bytes([*hi, *lo]), Protocol::Uds)
+                self.setting_written(id, u16::from_be_bytes([*hi, *lo]), Protocol::Uds)
             }
-            [0x7B, lid, ..] => self.setting_written(rx_tx, *lid as u16, Protocol::Kwp),
+            [0x7B, lid, ..] => self.setting_written(id, *lid as u16, Protocol::Kwp),
             // 78 is "response pending", not a refusal: the answer is still to come
-            [0x7F, sid @ 0x2F..=0x31, 0x78] => self.still_pending(rx_tx, *sid),
-            [0x7F, sid @ 0x2F..=0x31, code] => self.refused_pending(rx_tx, *sid, *code),
+            [0x7F, sid @ 0x2F..=0x31, 0x78] => self.still_pending(id, *sid),
+            [0x7F, sid @ 0x2F..=0x31, code] => self.refused_pending(id, *sid, *code),
             [0x7F, sid @ (0x2E | 0x3B), code] if *code != 0x78 => {
                 let kwp = *sid == 0x3B;
-                self.pending_writes.retain(|k, _| !(k.0 == rx_tx && k.2 == kwp));
+                let sent = self.requests_for(id);
+                let who = sent
+                    .iter()
+                    .copied()
+                    .find(|&c| self.pending_writes.keys().any(|k| k.0 == c && k.2 == kwp))
+                    .map(|c| Self::module_of(c, id))
+                    .unwrap_or(sent[0]);
+                self.pending_writes
+                    .retain(|k, _| !(sent.contains(&k.0) && k.2 == kwp));
                 self.note(format!(
-                    "{rx_tx:03X} refused the tool's {}: {}",
+                    "{who:03X} refused the tool's {}: {}",
                     service(*sid),
                     crate::uds::nrc(*code)
                 ));
@@ -411,11 +515,19 @@ impl Analyzer {
         }
     }
 
-    fn setting_written(&mut self, tx: u16, did: u16, protocol: Protocol) {
-        let key = (tx, did, protocol == Protocol::Kwp);
-        let Some(value) = self.pending_writes.remove(&key) else {
+    /// The module answering on `answer` took a write of `did`: the write waiting for it becomes a setting.
+    fn setting_written(&mut self, answer: u16, did: u16, protocol: Protocol) {
+        let kwp = protocol == Protocol::Kwp;
+        let Some((sent, tx)) =
+            self.waiting_request(answer, |c| self.pending_writes.contains_key(&(c, did, kwp)))
+        else {
             return;
         };
+        let Some(value) = self.pending_writes.remove(&(sent, did, kwp)) else {
+            return;
+        };
+        let key = (tx, did, kwp);
+        let rx = Self::rx_of(tx, answer);
         let before = self
             .read_values
             .get(&key)
@@ -423,7 +535,8 @@ impl Analyzer {
             .cloned();
         // what was written is what the module now holds
         self.read_values.insert(key, value.clone());
-        let extended = protocol == Protocol::Uds && self.extended.contains(&tx);
+        let extended = protocol == Protocol::Uds
+            && (self.extended.contains(&tx) || self.extended.contains(&sent));
         // the bits the tool changed (ICA-102): not known without a read before the write, nor when nothing changed
         let changed: Option<Vec<u8>> = before
             .as_ref()
@@ -442,6 +555,7 @@ impl Analyzer {
         };
         let same_id = |s: &SettingDef| {
             s.module == tx
+                && s.rx == rx
                 && s.id == did
                 && s.protocol == protocol
                 && s.values.values().next().map_or(0, Vec::len) == value.len()
@@ -489,7 +603,7 @@ impl Analyzer {
         let s = SettingDef {
             name: self.name_for(default, false),
             module: tx,
-            rx: None,
+            rx,
             protocol,
             id: did,
             values,
@@ -544,18 +658,22 @@ impl Analyzer {
                 return false;
             }
             [0x50, 0x01 | 0x81, ..] | [0x51, ..] => {
-                let module = tx.wrapping_sub(8);
-                if self.unlocked.remove(&module) {
-                    self.note(format!(
-                        "{module:03X} is back in its default session (locked again): what the tool does on it is learned \
-                         again"
-                    ));
+                for module in self.requests_for(tx) {
+                    if self.unlocked.remove(&module) {
+                        self.note(format!(
+                            "{module:03X} is back in its default session (locked again): what the tool does on it is \
+                             learned again"
+                        ));
+                    }
                 }
                 return false;
             }
             // the module's answer to a write the tool sent it unlocked: nothing to learn from either (the write was noted)
             [0x6E | 0x7B | 0x71 | 0x6F | 0x70, ..]
-                if self.unlocked.contains(&tx.wrapping_sub(8)) =>
+                if self
+                    .requests_for(tx)
+                    .iter()
+                    .any(|c| self.unlocked.contains(c)) =>
             {
                 return true
             }
@@ -590,66 +708,76 @@ impl Analyzer {
         true
     }
 
-    /// The module answering on `rx_tx` + 8 said "response pending" (`7F sid 78`): its waiting requests of that service
+    /// The module answering on `answer` said "response pending" (`7F sid 78`): the requests of that service waiting on it
     /// wait on from now.
-    fn still_pending(&mut self, rx_tx: u16, sid: u8) {
+    fn still_pending(&mut self, answer: u16, sid: u8) {
         let now = self.now;
+        let sent = self.requests_for(answer);
         match sid {
             0x31 => self
                 .pending_routines
                 .iter_mut()
-                .filter(|(k, _)| k.0 == rx_tx)
-                .for_each(|(_, v)| v.1 = now),
+                .filter(|(k, _)| sent.contains(&k.0))
+                .for_each(|(_, w)| w.at = now),
             _ => self
                 .pending_tests
                 .iter_mut()
-                .filter(|(k, _)| k.0 == rx_tx && k.2 == (sid == 0x30))
-                .for_each(|(_, v)| v.1 = now),
+                .filter(|(k, _)| sent.contains(&k.0) && k.2 == (sid == 0x30))
+                .for_each(|(_, w)| w.at = now),
         }
     }
 
-    /// The module refused the tool's routine control (`7F 31 xx`) or output control (`7F 2F xx`, `7F 30 xx`): what of
-    /// that service was waiting on it is noted with the refusal in words, not learned.
-    fn refused_pending(&mut self, rx_tx: u16, sid: u8, code: u8) {
-        let mut what: Vec<String> = match sid {
+    /// The module answering on `answer` refused the tool's routine control (`7F 31 xx`) or output control (`7F 2F xx`,
+    /// `7F 30 xx`): what of that service was waiting on it is noted with the refusal in words, not learned.
+    fn refused_pending(&mut self, answer: u16, sid: u8, code: u8) {
+        let sent = self.requests_for(answer);
+        let (mut what, first): (Vec<String>, Option<u16>) = match sid {
             0x31 => {
-                let w = self
+                let keys: Vec<(u16, u16)> = self
                     .pending_routines
                     .keys()
-                    .filter(|k| k.0 == rx_tx)
-                    .map(|k| format!("start of routine {:04X}", k.1))
+                    .filter(|k| sent.contains(&k.0))
+                    .copied()
                     .collect();
-                self.pending_routines.retain(|k, _| k.0 != rx_tx);
-                w
+                self.pending_routines.retain(|k, _| !sent.contains(&k.0));
+                (
+                    keys.iter()
+                        .map(|k| format!("start of routine {:04X}", k.1))
+                        .collect(),
+                    keys.first().map(|k| k.0),
+                )
             }
             _ => {
                 let kwp = sid == 0x30;
+                let mut first = None;
                 let w = self
                     .pending_tests
                     .iter()
-                    .filter(|(k, _)| k.0 == rx_tx && k.2 == kwp)
-                    .map(|(k, (t, _))| {
+                    .filter(|(k, _)| sent.contains(&k.0) && k.2 == kwp)
+                    .map(|(k, w)| {
+                        first = Some(k.0);
                         format!(
-                            "output control {:0w$X} (to {})",
+                            "output control {:0n$X} (to {})",
                             k.1,
-                            hex(&t.on),
-                            w = if kwp { 2 } else { 4 }
+                            hex(&w.def.on),
+                            n = if kwp { 2 } else { 4 }
                         )
                     })
                     .collect();
                 self.pending_tests
-                    .retain(|k, _| !(k.0 == rx_tx && k.2 == kwp));
-                w
+                    .retain(|k, _| !(sent.contains(&k.0) && k.2 == kwp));
+                (w, first)
             }
         };
         what.sort();
+        let who = first.map(|c| Self::module_of(c, answer)).unwrap_or(sent[0]);
         let what = if what.is_empty() {
             service(sid).to_string()
         } else {
             what.join(", ")
         };
         self.note(format!(
-            "{rx_tx:03X} refused the tool's {what}: {}",
+            "{who:03X} refused the tool's {what}: {}",
             crate::uds::nrc(code)
         ));
     }
@@ -660,20 +788,20 @@ impl Analyzer {
             return;
         }
         let mut what: Vec<String> = Vec::new();
-        self.pending_routines.retain(|(tx, r), (_, at)| {
-            let keep = !gone(*at);
+        self.pending_routines.retain(|(tx, r), w| {
+            let keep = !gone(w.at);
             if !keep {
                 what.push(format!("{tx:03X}: routine {r:04X} started"));
             }
             keep
         });
-        self.pending_tests.retain(|(tx, out, kwp), (t, at)| {
-            let keep = !gone(*at);
+        self.pending_tests.retain(|(tx, out, kwp), w| {
+            let keep = !gone(w.at);
             if !keep {
                 what.push(format!(
-                    "{tx:03X}: output control {out:0w$X} (to {})",
-                    hex(&t.on),
-                    w = if *kwp { 2 } else { 4 }
+                    "{tx:03X}: output control {out:0n$X} (to {})",
+                    hex(&w.def.on),
+                    n = if *kwp { 2 } else { 4 }
                 ));
             }
             keep
@@ -689,19 +817,40 @@ impl Analyzer {
         self.expire(|_| true);
     }
 
-    /// The module `tx` said it started `routine` (`71 01`): the start the tool sent it, if one is waiting, becomes a
-    /// service entry. A start the module refused (`7F 31`) is noted, not learned; one still pending (`7F 31 78`) waits.
-    fn routine_started(&mut self, tx: u16, routine: u16) {
-        let Some((s, _)) = self.pending_routines.remove(&(tx, routine)) else {
+    /// The module answering on `answer` said it started `routine` (`71 01`): the start the tool sent it, if one is waiting,
+    /// becomes a service entry for that module (with its answer ID when it is not the usual + 8), checked again against the
+    /// airbag modules and the fence on both IDs. A start the module refused (`7F 31`) is noted, not learned; one still
+    /// pending (`7F 31 78`) waits.
+    fn routine_started(&mut self, answer: u16, routine: u16) {
+        let Some((sent, tx)) = self.waiting_request(answer, |c| {
+            self.pending_routines.contains_key(&(c, routine))
+        }) else {
             return;
         };
-        if !self
+        let Some(w) = self.pending_routines.remove(&(sent, routine)) else {
+            return;
+        };
+        if self
             .services
             .iter()
             .any(|x| x.module == tx && x.routine == routine)
         {
-            self.name_for(String::new(), true);
-            self.services.push(s);
+            return;
+        }
+        let mut s = w.def;
+        s.module = tx;
+        s.rx = Self::rx_of(tx, answer);
+        if let Some(name) = self.take_mark(w.mark) {
+            s.name = name;
+        } else if sent != tx {
+            s.name = format!("Learned: routine {routine:04X} on {tx:03X}");
+        }
+        match s
+            .refused()
+            .or_else(|| self.fence.refuses(tx.into(), s.rx().into()))
+        {
+            None => self.services.push(s),
+            Some(why) => self.note(format!("{tx:03X} routine {routine:04X}: {why}")),
         }
     }
 
@@ -727,8 +876,10 @@ impl Analyzer {
                 .iter()
                 .any(|s| s.module == tx && s.routine == routine)
             {
-                let s = crate::service::ServiceDef {
-                    name: self.name_for(format!("Learned: routine {routine:04X} on {tx:03X}"), false),
+                let default = format!("Learned: routine {routine:04X} on {tx:03X}");
+                let mut s = crate::service::ServiceDef {
+                    // the name it would get now, for the airbag check; it is named when the module answers
+                    name: self.name_for(default.clone(), false),
                     module: tx,
                     rx: None,
                     routine,
@@ -744,12 +895,22 @@ impl Analyzer {
                     ),
                     checked: false,
                 };
-                match s
-                    .refused()
-                    .or_else(|| self.fence.refuses(tx.into(), s.rx().into()))
-                {
+                // a request to every module (7DF) is checked once its answer says which module took it
+                let why = (tx != 0x7DF)
+                    .then(|| {
+                        s.refused()
+                            .or_else(|| self.fence.refuses(tx.into(), s.rx().into()))
+                    })
+                    .flatten();
+                match why {
                     None => {
-                        self.pending_routines.insert((tx, routine), (s, self.now));
+                        s.name = default;
+                        let w = Waiting {
+                            def: s,
+                            at: self.now,
+                            mark: self.current_mark(),
+                        };
+                        self.pending_routines.insert((tx, routine), w);
                     }
                     Some(why) => self.note(format!("{tx:03X} routine {routine:04X}: {why}")),
                 }
@@ -757,21 +918,15 @@ impl Analyzer {
             return;
         }
         if let [0x71, 0x01, hi, lo, ..] = msg {
-            self.routine_started(tx.wrapping_sub(8), u16::from_be_bytes([*hi, *lo]));
+            self.routine_started(tx, u16::from_be_bytes([*hi, *lo]));
             return;
         }
         // an output test another tool ran: kept until the module answers, learned when it takes it (`test_accepted`)
         match msg {
             [0x6F, hi, lo, 0x03, ..] => {
-                return self.test_accepted(
-                    tx.wrapping_sub(8),
-                    u16::from_be_bytes([*hi, *lo]),
-                    false,
-                )
+                return self.test_accepted(tx, u16::from_be_bytes([*hi, *lo]), false)
             }
-            [0x70, lid, 0x07, ..] => {
-                return self.test_accepted(tx.wrapping_sub(8), *lid as u16, true)
-            }
+            [0x70, lid, 0x07, ..] => return self.test_accepted(tx, *lid as u16, true),
             _ => {}
         }
         let (protocol, out, state) = match msg {
@@ -783,12 +938,10 @@ impl Analyzer {
             }
             _ => return,
         };
-        let default = format!(
-            "Learned: output {out:0w$X} on {tx:03X}",
-            w = if protocol == Protocol::Uds { 4 } else { 2 }
-        );
-        let t = TestDef {
-            name: self.name_for(default, false),
+        let default = Self::test_name(out, tx, protocol);
+        let mut t = TestDef {
+            // the name it would get now, for the airbag check; it is named when the module answers
+            name: self.name_for(default.clone(), false),
             module: tx,
             rx: None,
             protocol,
@@ -802,24 +955,48 @@ impl Analyzer {
             watch: None,
             checked: false,
         };
-        match t
-            .refused()
-            .or_else(|| self.fence.refuses(tx.into(), t.rx().into()))
-        {
+        // a request to every module (7DF) is checked once its answer says which module took it
+        let why = (tx != 0x7DF)
+            .then(|| {
+                t.refused()
+                    .or_else(|| self.fence.refuses(tx.into(), t.rx().into()))
+            })
+            .flatten();
+        match why {
             None => {
+                t.name = default;
+                let w = Waiting {
+                    def: t,
+                    at: self.now,
+                    mark: self.current_mark(),
+                };
                 self.pending_tests
-                    .insert((tx, out, protocol == Protocol::Kwp), (t, self.now));
+                    .insert((tx, out, protocol == Protocol::Kwp), w);
             }
             Some(why) => self.note(format!("{tx:03X} output {out:X}: {why}")),
         }
     }
 
-    /// The module `tx` took the tool's output control of `out` (`6F .. 03`, `70 .. 07`): the request waiting for it
-    /// becomes a test, or, on a test learned before, another setting of it.
-    fn test_accepted(&mut self, tx: u16, out: u16, kwp: bool) {
-        let Some((t, _)) = self.pending_tests.remove(&(tx, out, kwp)) else {
+    fn test_name(out: u16, tx: u16, protocol: Protocol) -> String {
+        format!(
+            "Learned: output {out:0w$X} on {tx:03X}",
+            w = if protocol == Protocol::Uds { 4 } else { 2 }
+        )
+    }
+
+    /// The module answering on `answer` took the tool's output control of `out` (`6F .. 03`, `70 .. 07`): the request
+    /// waiting for it becomes a test for that module (with its answer ID when it is not the usual + 8), checked again
+    /// against the airbag modules and the fence on both IDs, or, on a test learned before, another setting of it.
+    fn test_accepted(&mut self, answer: u16, out: u16, kwp: bool) {
+        let Some((sent, tx)) =
+            self.waiting_request(answer, |c| self.pending_tests.contains_key(&(c, out, kwp)))
+        else {
             return;
         };
+        let Some(w) = self.pending_tests.remove(&(sent, out, kwp)) else {
+            return;
+        };
+        let mut t = w.def;
         if let Some(l) = self
             .learned
             .iter_mut()
@@ -836,8 +1013,20 @@ impl Analyzer {
             }
             return;
         }
-        self.name_for(String::new(), true);
-        self.learned.push(t);
+        t.module = tx;
+        t.rx = Self::rx_of(tx, answer);
+        if let Some(name) = self.take_mark(w.mark) {
+            t.name = name;
+        } else if sent != tx {
+            t.name = Self::test_name(out, tx, t.protocol);
+        }
+        match t
+            .refused()
+            .or_else(|| self.fence.refuses(tx.into(), t.rx().into()))
+        {
+            None => self.learned.push(t),
+            Some(why) => self.note(format!("{tx:03X} output {out:X}: {why}")),
+        }
     }
 }
 
@@ -1608,6 +1797,237 @@ mod tests {
             1.0,
         );
         assert_eq!((b.settings.len(), b.learned.len()), (1, 0), "{:?}", b.notes);
+    }
+
+    /// Review of ICA-219/221: an answer is paired with its request by the profiles' answer IDs, not only ID - 8. VW's
+    /// cluster (714, answering on 77E) has a setting, an output test and a routine learned for 714 with `rx = 0x77E`;
+    /// without the profiles nothing pairs, and each is noted as unanswered. A request to every module (7DF) answered on
+    /// 7E8 is learned for 7E0. A module answering on an airbag module's ID is refused when its answer shows it.
+    #[test]
+    fn answers_pair_with_their_requests_by_the_profiles_answer_ids() {
+        let cluster: Vec<(u32, Vec<u8>)> = vec![
+            (0x714, vec![0x02, 0x10, 0x03]),
+            (0x77E, vec![0x02, 0x50, 0x03]),
+            (0x714, vec![0x03, 0x22, 0x06, 0x01]),
+            (0x77E, vec![0x04, 0x62, 0x06, 0x01, 0x01]),
+            (0x714, vec![0x04, 0x2E, 0x06, 0x01, 0x00]),
+            (0x77E, vec![0x03, 0x6E, 0x06, 0x01]),
+            (0x714, vec![0x05, 0x2F, 0x02, 0x10, 0x03, 0x01]),
+            (0x77E, vec![0x05, 0x6F, 0x02, 0x10, 0x03, 0x01]),
+            (0x714, vec![0x04, 0x31, 0x01, 0x03, 0x01]),
+            (0x77E, vec![0x04, 0x71, 0x01, 0x03, 0x01]),
+        ];
+        let mut a = Analyzer::default().answering(&crate::vehicles::builtin());
+        watch(&mut a, &cluster, 1.0);
+        a.finish();
+        assert_eq!(
+            (
+                a.settings
+                    .iter()
+                    .map(|s| (s.module, s.rx))
+                    .collect::<Vec<_>>(),
+                a.learned
+                    .iter()
+                    .map(|t| (t.module, t.rx))
+                    .collect::<Vec<_>>(),
+                a.services
+                    .iter()
+                    .map(|s| (s.module, s.rx))
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                vec![(0x714, Some(0x77E))],
+                vec![(0x714, Some(0x77E))],
+                vec![(0x714, Some(0x77E))]
+            ),
+            "{:?}",
+            a.notes
+        );
+        assert!(a.notes.is_empty(), "{:?}", a.notes);
+        let s = &a.settings[0];
+        assert_eq!(
+            (s.values["was"].clone(), s.extended),
+            (vec![0x01], true),
+            "the read before it and the extended session, through 77E"
+        );
+        assert!(to_toml(&a.learned[0]).contains("rx = 0x77E"));
+        // the entries read back as profile entries that ask 714 and listen on 77E
+        let back = crate::vehicles::parse(
+            "x",
+            "test",
+            &format!(
+                "name = \"x\"\n{}\n{}\n{}",
+                crate::settings::to_toml(s),
+                to_toml(&a.learned[0]),
+                crate::service::to_toml(&a.services[0])
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                back.settings[0].rx(),
+                back.tests[0].rx(),
+                back.services[0].rx()
+            ),
+            (0x77E, 0x77E, 0x77E)
+        );
+        // without the profiles' pairing nothing answers 714, and that is what the notes say
+        let mut b = Analyzer::default();
+        watch(&mut b, &cluster, 1.0);
+        b.finish();
+        assert!(
+            b.settings.is_empty() && b.learned.is_empty() && b.services.is_empty(),
+            "{:?}",
+            b.notes
+        );
+        for want in [
+            "714: output control 0210 (to 01): no answer seen",
+            "714: routine 0301 started: no answer seen",
+        ] {
+            assert!(
+                b.notes.iter().any(|n| n.contains(want)),
+                "{want}: {:?}",
+                b.notes
+            );
+        }
+        // to every module: 7DF, answered by the engine on 7E8
+        let mut c = Analyzer::default();
+        c.mark("EVAP test", 0.0);
+        watch(
+            &mut c,
+            &[
+                (0x7DF, vec![0x04, 0x31, 0x01, 0x02, 0x05]),
+                (0x7E8, vec![0x03, 0x7F, 0x31, 0x78]),
+                (0x7E8, vec![0x04, 0x71, 0x01, 0x02, 0x05]),
+                (0x7DF, vec![0x05, 0x2F, 0xF0, 0x02, 0x03, 0x01]),
+                (0x7E9, vec![0x05, 0x6F, 0xF0, 0x02, 0x03, 0x01]),
+            ],
+            1.0,
+        );
+        assert_eq!(
+            (
+                c.services
+                    .iter()
+                    .map(|s| (s.module, s.rx, s.name.as_str()))
+                    .collect::<Vec<_>>(),
+                c.learned
+                    .iter()
+                    .map(|t| (t.module, t.rx, t.name.as_str()))
+                    .collect::<Vec<_>>()
+            ),
+            (
+                vec![(0x7E0, None, "EVAP test")],
+                vec![(0x7E1, None, "Learned: output F002 on 7E1")]
+            ),
+            "{:?}",
+            c.notes
+        );
+        // a module answering on an airbag module's ID (788): its request ID passed, its answer shows what it is
+        let p = crate::vehicles::parse(
+            "test",
+            "a test",
+            "name = \"test\"\n[[module]]\ntx = 0x740\nrx = 0x788\nname = \"body\"\n",
+        )
+        .unwrap();
+        let mut d = Analyzer::default().answering(&[p]);
+        watch(
+            &mut d,
+            &[
+                (0x740, vec![0x05, 0x2F, 0x01, 0x10, 0x03, 0x01]),
+                (0x788, vec![0x05, 0x6F, 0x01, 0x10, 0x03, 0x01]),
+                (0x740, vec![0x04, 0x31, 0x01, 0x03, 0x01]),
+                (0x788, vec![0x04, 0x71, 0x01, 0x03, 0x01]),
+            ],
+            1.0,
+        );
+        assert!(
+            d.learned.is_empty() && d.services.is_empty(),
+            "{:?}",
+            d.learned
+        );
+        assert_eq!(
+            d.notes.iter().filter(|n| n.contains("airbag")).count(),
+            2,
+            "{:?}",
+            d.notes
+        );
+    }
+
+    /// Review of ICA-221: the wait is checked as frames come, not only at the end. A 6F 7 s after its request with no
+    /// "response pending" between is too late (5 s and the 1 s of slack): noted before `finish`, not learned. 78s 4 s
+    /// apart keep a request waiting, and its 6F at 12 s is learned.
+    #[test]
+    fn the_answer_wait_runs_as_frames_come_and_response_pending_extends_it() {
+        let mut a = Analyzer::default();
+        a.add(&f(0x7E0, &[0x05, 0x2F, 0xF0, 0x01, 0x03, 0x01], 0.0));
+        a.add(&f(0x7E8, &[0x05, 0x6F, 0xF0, 0x01, 0x03, 0x01], 7.0));
+        assert!(a.learned.is_empty(), "{:?}", a.learned);
+        assert!(
+            a.notes
+                .iter()
+                .any(|n| n.contains("7E0: output control F001 (to 01): no answer seen")),
+            "noted before finish: {:?}",
+            a.notes
+        );
+        // within the wait and its slack: learned
+        let mut b = Analyzer::default();
+        b.add(&f(0x7E0, &[0x05, 0x2F, 0xF0, 0x01, 0x03, 0x01], 0.0));
+        b.add(&f(0x7E8, &[0x05, 0x6F, 0xF0, 0x01, 0x03, 0x01], 5.8));
+        assert_eq!(b.learned.len(), 1, "{:?}", b.notes);
+        // response pending every 4 s, then the answer at 12 s
+        let mut c = Analyzer::default();
+        c.add(&f(0x7E0, &[0x05, 0x2F, 0xF0, 0x01, 0x03, 0x01], 0.0));
+        for at in [4.0, 8.0] {
+            c.add(&f(0x7E8, &[0x03, 0x7F, 0x2F, 0x78], at));
+        }
+        c.add(&f(0x7E8, &[0x05, 0x6F, 0xF0, 0x01, 0x03, 0x01], 12.0));
+        assert_eq!(c.learned.len(), 1, "{:?}", c.notes);
+        assert!(c.notes.is_empty(), "{:?}", c.notes);
+        // the same for a routine
+        let mut d = Analyzer::default();
+        d.add(&f(0x7E0, &[0x04, 0x31, 0x01, 0x02, 0x01], 0.0));
+        for at in [4.0, 8.0] {
+            d.add(&f(0x7E8, &[0x03, 0x7F, 0x31, 0x78], at));
+        }
+        d.add(&f(0x7E8, &[0x04, 0x71, 0x01, 0x02, 0x01], 12.0));
+        assert_eq!(d.services.len(), 1, "{:?}", d.notes);
+    }
+
+    /// Review of ICA-221: a mark names one item, the first waiting one the module takes, and only if no other mark came
+    /// after it was sent: two requests waiting after "Fan" do not both get it, and a mark typed while a routine waits
+    /// names the next thing, not that routine.
+    #[test]
+    fn a_mark_names_one_waiting_item_and_only_its_own() {
+        let mut a = Analyzer::default();
+        a.mark("Fan", 0.0);
+        watch(
+            &mut a,
+            &[
+                (0x7E0, vec![0x05, 0x2F, 0xF0, 0x01, 0x03, 0x01]),
+                (0x7E0, vec![0x05, 0x2F, 0xF0, 0x02, 0x03, 0x01]),
+                (0x7E8, vec![0x05, 0x6F, 0xF0, 0x01, 0x03, 0x01]),
+                (0x7E8, vec![0x05, 0x6F, 0xF0, 0x02, 0x03, 0x01]),
+            ],
+            1.0,
+        );
+        assert_eq!(
+            a.learned
+                .iter()
+                .map(|t| t.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Fan", "Learned: output F002 on 7E0"]
+        );
+        let mut b = Analyzer::default();
+        b.add(&f(0x7E0, &[0x04, 0x31, 0x01, 0x02, 0x01], 1.0));
+        b.add(&f(0x7E8, &[0x03, 0x7F, 0x31, 0x78], 2.0));
+        b.mark("Door chime off", 3.0);
+        b.add(&f(0x7E8, &[0x04, 0x71, 0x01, 0x02, 0x01], 4.0));
+        b.add(&f(0x7C0, &[0x04, 0x2E, 0xA0, 0x01, 0x00], 5.0));
+        b.add(&f(0x7C8, &[0x03, 0x6E, 0xA0, 0x01], 5.1));
+        assert_eq!(
+            (b.services[0].name.as_str(), b.settings[0].name.as_str()),
+            ("Learned: routine 0201 on 7E0", "Door chime off")
+        );
     }
 
     #[test]

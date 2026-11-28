@@ -47,7 +47,7 @@ fn the_freeze_frame_follows_the_units_setting() {
     for want in [
         "44.7 mph (72.0 km/h)",
         "194.0 °F (90.0 °C)",
-        "7.0 psi (48.0 kPa)",
+        "7.0 psi absolute (48.0 kPa)",
     ] {
         assert!(us.contains(want), "{want} in\n{us}");
     }

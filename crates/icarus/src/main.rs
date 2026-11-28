@@ -1612,7 +1612,7 @@ fn obd_codes(elm: &mut dyn Link) -> Result<(), String> {
         for (p, v) in &f.values {
             if let Some(x) = j1979::pid(*p) {
                 let shown = if us {
-                    icarus_obd::units::both(x.unit, *v, 1)
+                    icarus_obd::units::both_pid(*p, x.unit, *v, 1)
                 } else {
                     format!("{v:.1} {}", x.unit).trim_end().to_string()
                 };
@@ -2156,7 +2156,7 @@ fn cmd_dtc(a: &[String]) -> Result<(), String> {
 }
 
 fn cmd_bus(a: &[String]) -> Result<(), String> {
-    bus_watch(a, &serial_port, icarus_obd::fence::current()).map(|_| ())
+    bus_watch(a, &serial_port, icarus_obd::fence::current(), &profiles()).map(|_| ())
 }
 
 /// A serial port, raw (an SLCAN adapter's).
@@ -2209,10 +2209,12 @@ fn watch_slcan(
 
 /// `icarus bus watch`: an SLCAN adapter's serial port is opened with `serial` (the tests give a recorded session), and
 /// nothing to or from a key module of `fence` (`fence::current`; the tests give their own) is learned or written down.
+/// Answers are paired with requests by the answer IDs `profiles` give.
 fn bus_watch(
     a: &[String],
     serial: &OpenSerial<'_>,
     fence: icarus_obd::fence::Fence,
+    profiles: &[vehicles::Profile],
 ) -> Result<bus::Analyzer, String> {
     if a.first().map(String::as_str) != Some("watch") {
         return Err(
@@ -2257,7 +2259,7 @@ fn bus_watch(
     actuator::catch_interrupt();
     actuator::catch_terminate();
     actuator::catch_hangup();
-    let mut an = bus::Analyzer::watching(fence);
+    let mut an = bus::Analyzer::watching(fence).answering(profiles);
     if j1939 {
         an.j1939 = Some(Default::default());
     }
@@ -2387,8 +2389,13 @@ fn bus_watch(
             println!("  (none of the IDs seen is in it)");
         }
     }
-    // what still waits for its module's answer when the watch ends is noted as unanswered, not learned (ICA-221)
+    // what still waits for its module's answer when the watch ends is noted as unanswered, not learned (ICA-221), and
+    // said here as the watch's own notes were
+    let noted = an.notes.len();
     an.finish();
+    for n in &an.notes[noted..] {
+        println!("not learned: {n}");
+    }
     if !an.settings.is_empty() {
         println!("\nSettings another tool changed (add them to the vehicle's profile, then find out what each one is):\n");
         for s in &an.settings {
@@ -2422,6 +2429,30 @@ fn bus_watch(
 
 /// `icarus learn`: nothing to or from a key module of `fence` (`fence::current`) is learned or written down.
 fn cmd_learn(a: &[String], fence: icarus_obd::fence::Fence) -> Result<(), String> {
+    // each line typed while watching is a mark; "stop" ends the session (as do Ctrl+C and --seconds)
+    let (ltx, lrx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        for line in std::io::stdin().lock().lines().map_while(Result::ok) {
+            if ltx.send(line).is_err() {
+                return;
+            }
+        }
+    });
+    learn_session(a, fence, &profiles(), &serial_port, &garage::logs_dir, lrx)
+}
+
+/// What `icarus learn` does, with what it opens handed in: the profiles, an SLCAN adapter's serial port (`serial`), the
+/// folder a session is saved in (`logs`, by the VIN) and the lines typed (`marks`); the tests give their own. A watch
+/// that ends because the adapter was lost still saves the session (saying so), then returns the error.
+fn learn_session(
+    a: &[String],
+    fence: icarus_obd::fence::Fence,
+    all: &[vehicles::Profile],
+    serial: &OpenSerial<'_>,
+    logs: &dyn Fn(Option<&str>) -> Result<std::path::PathBuf, String>,
+    lrx: std::sync::mpsc::Receiver<String>,
+) -> Result<(), String> {
     let args = parse_args(
         &a.iter()
             .filter(|x| *x != "--ask-sarina")
@@ -2437,21 +2468,11 @@ fn cmd_learn(a: &[String], fence: icarus_obd::fence::Fence) -> Result<(), String
         .opt("seconds")
         .map(|v| v.parse().map_err(|_| "--seconds needs a number"))
         .transpose()?;
-    // each line typed while watching is a mark; "stop" ends the session (as do Ctrl+C and --seconds)
-    let (ltx, lrx) = std::sync::mpsc::channel::<String>();
-    std::thread::spawn(move || {
-        use std::io::BufRead;
-        for line in std::io::stdin().lock().lines().map_while(Result::ok) {
-            if ltx.send(line).is_err() {
-                return;
-            }
-        }
-    });
     // as for bus watch: every way of ending it lets a raised serial speed be put back (ICA-213)
     actuator::catch_interrupt();
     actuator::catch_terminate();
     actuator::catch_hangup();
-    let mut an = bus::Analyzer::watching(fence);
+    let mut an = bus::Analyzer::watching(fence).answering(all);
     let start = std::time::Instant::now();
     let mut printed = 0u64;
     let mut step = |an: &mut bus::Analyzer, f: Option<bus::Frame>| {
@@ -2477,7 +2498,8 @@ fn cmd_learn(a: &[String], fence: icarus_obd::fence::Fence) -> Result<(), String
         printed = an.logged;
         go
     };
-    let all = profiles();
+    // how the watch ended: Err when the adapter was lost partway (the session is saved all the same)
+    let mut watched: Result<(), String> = Ok(());
     let can_if = can_interface(&args);
     let slcan_t = slcan_target(&args);
     let (vin, source, vehicle) = if let Some(ifn) = &can_if {
@@ -2500,20 +2522,20 @@ fn cmd_learn(a: &[String], fence: icarus_obd::fence::Fence) -> Result<(), String
             Some(v) if v == sim::VIN => "the simulated vehicle".to_string(),
             Some(v) => garage::get(v)
                 .map(|d| d.name())
-                .or_else(|| vehicles::for_vin(&all, v).map(|p| p.name.clone()))
+                .or_else(|| vehicles::for_vin(all, v).map(|p| p.name.clone()))
                 .unwrap_or_else(|| "a vehicle".into()),
             None => "a vehicle that gave no VIN".into(),
         };
         eprintln!("Learning on {vehicle}. Icarus only listens: nothing is sent onto the bus.");
         eprintln!("Before each change in the other tool, type what you are about to do and press Enter (\"seat belt chime off\"); \"stop\" or Ctrl+C ends.");
         let proto = elm.protocol;
-        let ended = elm
-            .monitor(|line| {
-                let f = bus::parse_line(line, proto, start.elapsed().as_secs_f64());
-                step(&mut an, f)
-            })
-            .map_err(e)?;
-        eprintln!("({ended})");
+        match elm.monitor(|line| {
+            let f = bus::parse_line(line, proto, start.elapsed().as_secs_f64());
+            step(&mut an, f)
+        }) {
+            Ok(ended) => eprintln!("({ended})"),
+            Err(x) => watched = Err(e(x)),
+        }
         (
             vin,
             format!(
@@ -2530,30 +2552,41 @@ fn cmd_learn(a: &[String], fence: icarus_obd::fence::Fence) -> Result<(), String
         eprintln!("Learning on the CAN interface {ifn}. Icarus only listens. Type what you are about to do and press Enter before each change; \"stop\" or Ctrl+C ends.");
         let sock = socketcan::open(ifn).map_err(|x| x.to_string())?;
         loop {
-            let f = sock
-                .read(
-                    std::time::Duration::from_millis(100),
-                    start.elapsed().as_secs_f64(),
-                )
-                .map_err(|x| x.to_string())?;
-            if !step(&mut an, f) {
-                break;
+            match sock.read(
+                std::time::Duration::from_millis(100),
+                start.elapsed().as_secs_f64(),
+            ) {
+                Err(x) => {
+                    watched = Err(x.to_string());
+                    break;
+                }
+                Ok(f) => {
+                    if !step(&mut an, f) {
+                        break;
+                    }
+                }
             }
         }
     }
     if let Some((path, baud, bitrate)) = &slcan_t {
         eprintln!("Learning on the SLCAN adapter {path}, opened listen-only. Type what you are about to do and press Enter before each change; \"stop\" or Ctrl+C ends.");
-        let port = serial_port(path, *baud).map_err(|x| format!("{path}: {x}"))?;
-        watch_slcan(port, *bitrate, start, |f| step(&mut an, f))?;
+        let port = serial(path, *baud).map_err(|x| format!("{path}: {x}"))?;
+        if let Err(x) = watch_slcan(port, *bitrate, start, |f| step(&mut an, f)) {
+            watched = Err(x);
+        }
+    }
+    if let Err(why) = &watched {
+        eprintln!("The adapter was lost ({why}); saving what was seen until then.");
+        an.lost(why);
     }
     an.finish();
     let modules = vin
         .as_deref()
-        .and_then(|v| vehicles::for_vin(&all, v))
+        .and_then(|v| vehicles::for_vin(all, v))
         .map(vehicles::candidates)
         .unwrap_or_default();
     let text = icarus_obd::learning::session_text(&an, &source, &vehicle, &modules);
-    let dir = garage::logs_dir(vin.as_deref())?;
+    let dir = logs(vin.as_deref())?;
     let saved = icarus_obd::learning::save(&dir, &text)?;
     println!(
         "\n{} frames. Learned: {} setting(s), {} test(s); {} thing(s) seen but not learned. Saved: {}",
@@ -2575,6 +2608,7 @@ fn cmd_learn(a: &[String], fence: icarus_obd::fence::Fence) -> Result<(), String
     if !an.settings.is_empty() || !an.learned.is_empty() {
         println!("\nRename them (and the values \"was\" and \"set\") as you like, then add them to ~/.config/icarus/vehicles/MAKE.toml, or use the Learning page, which does both.");
     }
+    watched?;
     if ask {
         eprintln!("\nAsking Sarina about the session (she only reads)...");
         match icarus_obd::learning::ask_sarina(&saved) {
@@ -3376,6 +3410,7 @@ mod tests {
                 Ok(Box::new(session.borrow_mut().take().unwrap()))
             },
             icarus_obd::fence::Fence::default(),
+            &[],
         )
         .unwrap();
         assert_eq!(an.frames, 5, "every data frame, the remote one passed over");
@@ -3390,6 +3425,98 @@ mod tests {
         let args = parse_args(&a[1..3], &["adapter"]).unwrap();
         let why = connect(&args).err().unwrap();
         assert!(why.contains("listen-only"), "{why}");
+    }
+
+    /// A stand-in SLCAN adapter that streams its lines once listening, then fails as an unplugged one does.
+    struct Dying {
+        out: std::collections::VecDeque<u8>,
+        stream: std::collections::VecDeque<u8>,
+        listening: bool,
+    }
+
+    impl icarus_obd::port::Port for Dying {
+        fn send(&mut self, data: &[u8]) -> std::io::Result<()> {
+            match String::from_utf8_lossy(data).trim_end_matches('\r') {
+                "L" => self.listening = true,
+                "C" => self.listening = false,
+                _ => {}
+            }
+            self.out.push_back(b'\r');
+            Ok(())
+        }
+
+        fn recv(&mut self, buf: &mut [u8], _timeout: Duration) -> std::io::Result<usize> {
+            if self.out.is_empty() && self.listening {
+                if self.stream.is_empty() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "the adapter was unplugged",
+                    ));
+                }
+                self.out.extend(self.stream.drain(..));
+            }
+            let n = buf.len().min(self.out.len());
+            for (i, b) in self.out.drain(..n).enumerate() {
+                buf[i] = b;
+            }
+            Ok(n)
+        }
+    }
+
+    /// Review of ICA-221: `icarus learn` on an adapter that dies partway saves the session all the same (the mark, the
+    /// setting learned, the routine still waiting noted, and a line saying the adapter was lost), then returns the error.
+    #[test]
+    fn a_learning_session_is_saved_when_the_adapter_is_lost() {
+        let lines = [
+            "t7C03021003",
+            "t7C83025003",
+            "t7C05042EA00100",
+            "t7C84036EA001",
+            "t7E050431010201",
+        ];
+        let port = Dying {
+            out: Default::default(),
+            stream: lines
+                .iter()
+                .flat_map(|l| format!("{l}\r").into_bytes())
+                .collect(),
+            listening: false,
+        };
+        let port = std::cell::RefCell::new(Some(port));
+        let dir = std::env::temp_dir().join(format!("icarus-learn-lost-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (mtx, mrx) = std::sync::mpsc::channel();
+        mtx.send("Seat belt chime off".to_string()).unwrap();
+        let a: Vec<String> = ["--adapter", "slcan:/dev/ttyACM0", "--seconds", "20"]
+            .map(String::from)
+            .to_vec();
+        let r = learn_session(
+            &a,
+            icarus_obd::fence::Fence::default(),
+            &[],
+            &|_, _| Ok(Box::new(port.borrow_mut().take().unwrap())),
+            &|vin| {
+                assert_eq!(vin, None);
+                Ok(dir.clone())
+            },
+            mrx,
+        );
+        let why = r.unwrap_err();
+        assert!(why.contains("unplugged"), "{why}");
+        let saved = icarus_obd::learning::sessions(&dir);
+        assert_eq!(saved.len(), 1, "{saved:?}");
+        let text = std::fs::read_to_string(&saved[0]).unwrap();
+        for want in [
+            "Seat belt chime off",
+            "the adapter was lost (",
+            "unplugged",
+            "7E0: routine 0201 started: no answer seen, not learned",
+            "A001",
+        ] {
+            assert!(text.contains(want), "{want} in\n{text}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The same through `--adapter vcan0` on a real virtual CAN interface, when one exists (made once with root:
