@@ -213,7 +213,7 @@ They watch only: the `obd` commands refuse them.
 
 ## Learning from another tool
 
-Icarus learns a vehicle's settings and output tests by watching another tool use them on it: a dealer tool, a shop scan
+Icarus learns a vehicle's settings, output tests and service routines by watching another tool use them on it: a dealer tool, a shop scan
 tool, a phone app that does customizations. A Y-splitter on the OBD port carries both: the other tool on one side, Icarus's
 adapter (monitor mode) on the other, or a CAN interface tapped into the bus. Icarus only listens.
 
@@ -229,10 +229,13 @@ Or the **Learning** page: Start learning, type what you are about to do and pres
   the write changed as its `mask` (so a setting packed into an identifier with others is changed alone; a later write of
   other bits of the same identifier is learned as a setting of its own; a first write that changed nothing takes the bits
   of the next write that does, and one with no read before it stays a whole-value setting), and whether the tool opened
-  the extended session first. An output-control request (UDS `2F ... 03`, KWP2000 `30 .. 07`) becomes a `[[test]]`, and a routine the tool
-  starts (`31 01`) a `[[service]]`. A mark names the next one learned; one change per mark works best. All are unchecked,
-  with the most cautious conditions; the airbag modules and immobilizer, key and odometer settings are never learned, nor is a write of the VIN or a
-  module's serial number.
+  the extended session first. An output-control request (UDS `2F ... 03`, KWP2000 `30 .. 07`) becomes a `[[test]]`, and a
+  routine the tool starts (`31 01`, with up to 8 bytes of parameters; a longer start is only in the session's messages)
+  a `[[service]]` entry with those parameters, learned
+  from the start request itself (once per module and routine, whatever the module answers), with the extended session
+  and waiting for its result. A mark names the next one learned; one change per mark works best. All are unchecked, with
+  the most cautious conditions (a learned routine: engine off, parked, 30 s at most); the airbag modules and immobilizer,
+  key and odometer settings are never learned, nor is a write of the VIN or a module's serial number.
 - **What is never learned from: the key modules, and anything after security access.** Nothing to or from an
   immobilizer, smart-key or certification module (a profile's `[[module]]` with `kind = "immobilizer"`, `"smart-key"` or
   `"certification"`: fenced by address, whatever the tool or a mark calls it) is learned, and its messages are not written
@@ -240,8 +243,10 @@ Or the **Learning** page: Start learning, type what you are about to do and pres
   security access (`27`) is noted and never learned, since it may need access Icarus never uses, until the module says it
   is back in its default session; so is the module's answer to it, and a write sent before the unlock whose answer had not
   come yet is dropped at the unlock.
-- **What is not learned, but noted.** Security access (the tool unlocking a module), a routine's stop and results, writes
-  too long for a setting, memory writes and programming, and writes the module refused, each in words.
+- **What is not learned, but noted.** A routine's start is learned (above); only these are noted, each in words: security
+  access (the tool unlocking a module), a routine's stop (`31 02`) and its results (`31 03`), a routine start on an airbag
+  module, writes of the VIN or a serial number, writes too long for a setting, memory writes and programming, output
+  controls of another kind than short-term adjustment, and writes and output tests the module refused.
 - **The session** is saved in the vehicle's `Logs` folder as `learning-DATE-TIME.md`: the module names from Icarus's
   profile, the marks, what was learned, what was noted, and every diagnostic message in words (but a key module's). No
   VIN and no module serial number: where a message carries one (`09 02`, `22 F190`, `22 F18C`, KWP2000's `1A 90` and
@@ -249,7 +254,9 @@ Or the **Learning** page: Start learning, type what you are about to do and pres
   page's log.
 - **Naming and adding.** On the Learning page each learned setting gets a name and names for its values ("was"/"set"
   become "on"/"off"), and one button adds it to the vehicle's file (`~/.config/icarus/vehicles/MAKE.toml`); the Module settings
-  and Tests pages then offer it.
+  and Tests pages then offer it, and a learned output test is named and added the same way. A learned routine is in the
+  session file (under "Service routines learned", as a `[[service]]` entry) and in what `icarus bus watch` prints; the
+  Learning page does not offer it yet, so it goes into the vehicle's file by hand, once I know what it does.
 - **Sarina**, only when Sarina is installed (Sarina's own `sarina` program, not just Labyrinth's `labyrinth-ask-sarina`,
   which every Labyrinth system has; without Sarina the page says nothing about Sarina): Ask Sarina on a session (or
   `--ask-sarina`) has Sarina read the file
@@ -288,7 +295,7 @@ battery resets, TPMS sensor IDs, injector coding. Each is a `[[service]]` entry 
 ID, its parameters, whether it needs the extended session, whether to wait for its result, its conditions, `wired` for
 coding). None are built in for a real make: a routine ID is each maker's own, and an unverified one could start anything,
 so they come from the maker's service information or from watching another tool run one on my own vehicle (`icarus learn`
-/ the Learning page turns a routine the tool starts into an unchecked entry).
+and the Learning page turn a routine the tool starts into an unchecked entry in the session file, to add by hand).
 
 ```sh
 icarus obd services --adapter A                                   # the vehicle's routines, and what each needs
@@ -327,8 +334,11 @@ changes them itself, on the Module settings page (asks first, with the value now
 ```sh
 icarus obd settings --adapter A                                # the settings known for this vehicle, and each one's value now
 icarus obd setting "seat belt chime" off --adapter A           # asks "yes", keeps the value before, writes, reads it back
-icarus obd setting-undo "seat belt chime" --adapter A          # back to what it was before the last change
+icarus obd setting-undo "seat belt chime" --adapter A          # back to what it was before its last change
 ```
+
+An undo takes the setting's own last change from the log: the line with its name, module, identifier and mask, never a
+change of another setting on the same identifier. A setting never changed (or renamed since) has none: "no change of NAME".
 
 The fence is in code (`crates/icarus-obd/src/settings.rs`): only reading and writing one data identifier goes out (UDS
 `22`/`2E`, KWP2000 `21`/`3B`, the session they need and tester present); never security access, routines or programming;

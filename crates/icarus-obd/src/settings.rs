@@ -12,7 +12,8 @@
 //! - Conditions are checked first (by default: engine off, vehicle not moving) and the battery must be measured at 12 V or
 //!   more: an adapter that cannot measure it is refused.
 //! - The value there before is read and written to the vehicle's change log *before* anything is written; after the write the
-//!   value is read back, and if it is not what was written, the old one is written back. `undo` restores the last change.
+//!   value is read back, and if it is not what was written, the old one is written back. `undo` restores the setting's
+//!   own last change (`last_change`: the log line with its name, module, identifier and mask).
 //! - Every change goes to `~/.local/state/icarus/actions.log` (see `audit`).
 //!
 //! **Settings that share an identifier** (ICA-102). A module may pack several settings into one data identifier, each in its
@@ -290,7 +291,7 @@ impl Change {
     fn line(&self, when: &str) -> String {
         let mut l = format!(
             "{when}\t{}\t{:03X}\t{:04X}\t{}\t{}",
-            self.setting,
+            log_name(&self.setting),
             self.module,
             self.id,
             hexs(&self.before),
@@ -301,6 +302,11 @@ impl Change {
         }
         l
     }
+}
+
+/// A setting's name as a field of the change log: a tab or a line break in it would split the line.
+fn log_name(name: &str) -> String {
+    name.replace(['\t', '\n', '\r'], " ")
 }
 
 fn hexs(b: &[u8]) -> String {
@@ -341,8 +347,10 @@ fn append(log: &Path, c: &Change) -> Result<(), String> {
     writeln!(f, "{}", c.line(&crate::report::now())).map_err(|e| e.to_string())
 }
 
-/// The last change of this setting in the log: the same module and identifier, and the same mask (a line without one is a
-/// setting without one), so the last change of another setting packed into the same identifier is not taken for it.
+/// The last change of this setting in the log: a line with its name, module, identifier and mask (a line without a mask is
+/// a setting without one), so the change of another setting on the same identifier (packed into other bits, given the
+/// same bits under another name, or a whole-value setting beside it) is never taken for it, and an undo puts back only the
+/// setting it names (ICA-201). A setting renamed since its change has no change under its new name.
 pub fn last_change(log: &Path, s: &SettingDef) -> Option<Change> {
     let text = std::fs::read_to_string(log).ok()?;
     text.lines().rev().find_map(|l| {
@@ -358,7 +366,7 @@ pub fn last_change(log: &Path, s: &SettingDef) -> Option<Change> {
             u16::from_str_radix(module, 16).ok()?,
             u16::from_str_radix(id, 16).ok()?,
         );
-        if module != s.module || id != s.id || mask != s.mask {
+        if *name != log_name(&s.name) || module != s.module || id != s.id || mask != s.mask {
             return None;
         }
         Some(Change {
@@ -651,6 +659,99 @@ mod tests {
         assert_eq!(
             fade.show(&[0x0D]),
             "0C in the bits 0C (not one of its values)"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ICA-201: an undo undoes the setting it names, and only it. On the simulated A002 (05 to start): A, the auto door
+    /// lock, is changed, then B, the interior light's fade; undoing A takes A's own line and leaves B as it was set. The
+    /// same with two whole-value settings on that identifier (no mask tells them apart, only their names), and a setting
+    /// never changed has no change even when another one on its identifier (with its very mask) was changed.
+    #[test]
+    fn an_undo_undoes_the_named_setting_only() {
+        crate::lock::switch_for_test(&[]);
+        let all = crate::sim::settings();
+        let find = |n: &str| all.iter().find(|s| s.name.contains(n)).unwrap().clone();
+        let (lock, fade) = (find("auto door lock"), find("interior light"));
+        let mut elm = Elm::connect(Box::new(SimCar::engine_off())).unwrap();
+        let dir = scratch("named");
+        let log = log_path(&dir);
+        let raw = |elm: &mut Elm| read(elm, &lock).unwrap().0;
+        let never = |elm: &mut Elm, s: &SettingDef| {
+            let now = raw(elm);
+            let why = undo(elm, s, &log).unwrap_err();
+            assert!(
+                why.starts_with(&format!("no change of {} in ", s.name)),
+                "{why}"
+            );
+            assert_eq!(raw(elm), now, "nothing written");
+        };
+        // A, then B
+        change(&mut elm, &lock, &lock.values["off"], &log)
+            .unwrap()
+            .unwrap();
+        change(&mut elm, &fade, &fade.values["long"], &log)
+            .unwrap()
+            .unwrap();
+        assert_eq!(raw(&mut elm), vec![0x08]);
+        // the line undone is A's, and A reads its value from before; B stays long
+        let a = last_change(&log, &lock).unwrap();
+        assert_eq!(
+            (a.setting.as_str(), a.before.clone(), a.after.clone()),
+            (lock.name.as_str(), vec![0x05], vec![0x04])
+        );
+        let u = undo(&mut elm, &lock, &log).unwrap().unwrap();
+        assert_eq!(
+            (u.setting.as_str(), u.before.clone(), u.after.clone()),
+            (lock.name.as_str(), vec![0x08], vec![0x09])
+        );
+        assert_eq!(read(&mut elm, &lock).unwrap().1.as_deref(), Some("on"));
+        assert_eq!(read(&mut elm, &fade).unwrap().1.as_deref(), Some("long"));
+        // another name for the lock's very bit, never changed: no change of it (the lock's lines are not its)
+        never(
+            &mut elm,
+            &SettingDef {
+                name: "Cluster: lock when driving off".into(),
+                ..lock.clone()
+            },
+        );
+        // two whole-value settings on A002 (as learned before ICA-102, or with no read before the write): A, then B, then
+        // undo A puts back A's value from before, not B's
+        let whole = |name: &str| SettingDef {
+            name: name.into(),
+            mask: None,
+            ..lock.clone()
+        };
+        let (wa, wb) = (
+            whole("Cluster: comfort byte"),
+            whole("Cluster: lighting byte"),
+        );
+        change(&mut elm, &wa, &[0x01], &log).unwrap().unwrap();
+        change(&mut elm, &wb, &[0x03], &log).unwrap().unwrap();
+        let u = undo(&mut elm, &wa, &log).unwrap().unwrap();
+        assert_eq!(
+            (u.setting.as_str(), u.before.clone(), u.after.clone()),
+            (wa.name.as_str(), vec![0x03], vec![0x09])
+        );
+        assert_eq!(raw(&mut elm), vec![0x09]);
+        let b = last_change(&log, &wb).unwrap();
+        assert_eq!(
+            (b.setting.as_str(), b.before.clone(), b.after.clone()),
+            (wb.name.as_str(), vec![0x01], vec![0x03])
+        );
+        never(&mut elm, &whole("Cluster: something else"));
+        // the fade, never undone, still has its own change
+        assert_eq!(last_change(&log, &fade).unwrap().after, vec![0x08]);
+        // a name with a tab in it is kept in the log as one field and still found
+        let tabbed = whole("Cluster:\tcomfort");
+        change(&mut elm, &tabbed, &[0x05], &log).unwrap().unwrap();
+        assert_eq!(
+            last_change(&log, &tabbed).unwrap().setting,
+            "Cluster: comfort"
+        );
+        assert_eq!(
+            undo(&mut elm, &tabbed, &log).unwrap().unwrap().after,
+            vec![0x09]
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
