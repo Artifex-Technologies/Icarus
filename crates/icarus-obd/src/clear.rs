@@ -242,13 +242,13 @@ mod tests {
         assert!(!uds::module_dtcs(&mut elm, 0x7B0, 0x7B8)
             .unwrap()
             .unwrap()
-            .1
+            .codes
             .is_empty());
         clear_module(&mut elm, 0x7B0, 0x7B8, Dialect::Kwp).unwrap();
         assert!(uds::module_dtcs(&mut elm, 0x7B0, 0x7B8)
             .unwrap()
             .unwrap()
-            .1
+            .codes
             .is_empty());
     }
 }

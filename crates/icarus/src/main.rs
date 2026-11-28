@@ -1103,30 +1103,48 @@ fn show_module(s: &uds::Scanned) {
             if i == 0 { "identification" } else { "" }
         );
     }
-    match codes {
-        Err(why) => println!("     trouble codes     none of Icarus's requests gave them\n                       ({why})"),
-        Ok((dialect, codes)) => {
-            let lang = if *dialect == uds::Dialect::Uds {
-                "UDS"
-            } else {
-                "KWP2000"
-            };
-            if codes.is_empty() {
-                println!("     trouble codes     none ({lang})");
-            }
-            for c in codes {
-                let ftb = c
-                    .failure_type
-                    .map(|f| format!("-{f:02X}"))
-                    .unwrap_or_default();
-                println!(
-                    "     trouble code      {}{ftb}  {} ({lang})",
-                    c.code,
-                    c.states.join(", ")
-                );
-            }
-        }
+    for line in code_lines(codes) {
+        println!("{line}");
     }
+}
+
+/// A module's codes as `obd module` and `obd scan` print them: each code with a failure bit, and for a module that lists
+/// every code it can set with none failed (UDS `19 02 FF` on Toyota's engine and transmission), one line saying so
+/// (ICA-207).
+fn code_lines(codes: &uds::CodesRead) -> Vec<String> {
+    let read = match codes {
+        Err(why) => {
+            return vec![format!(
+                "     trouble codes     none of Icarus's requests gave them\n                       ({why})"
+            )]
+        }
+        Ok(read) => read,
+    };
+    let lang = if read.dialect == uds::Dialect::Uds {
+        "UDS"
+    } else {
+        "KWP2000"
+    };
+    if let Some(clean) = read.none_failed() {
+        return vec![format!("     trouble codes     {clean} ({lang})")];
+    }
+    let mut out: Vec<String> = read
+        .codes
+        .iter()
+        .map(|c| {
+            let ftb = c
+                .failure_type
+                .map(|f| format!("-{f:02X}"))
+                .unwrap_or_default();
+            format!(
+                "     trouble code      {}{ftb}  {} ({lang})",
+                c.code,
+                c.states.join(", ")
+            )
+        })
+        .collect();
+    out.extend(read.others().map(|m| format!("                       {m}")));
+    out
 }
 
 fn profiles() -> Vec<vehicles::Profile> {
@@ -2030,19 +2048,23 @@ fn obd_clear(elm: &mut dyn Link, args: &Args) -> Result<(), String> {
             if let Some(why) = clear::refused(tx, rx, &name) {
                 return Err(why);
             }
-            let (d, codes) = uds::module_dtcs(elm, tx.into(), rx.into())
+            let read = uds::module_dtcs(elm, tx.into(), rx.into())
                 .map_err(e)?
                 .map_err(|why| format!("{tx:03X} did not give its codes ({why})"))?;
-            println!(
-                "{tx:03X} has {} code(s): {}",
-                codes.len(),
-                codes
-                    .iter()
-                    .map(|c| c.code.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-            Some((tx, rx, d))
+            match read.none_failed() {
+                Some(clean) => println!("{tx:03X}: {clean}"),
+                None => println!(
+                    "{tx:03X} has {} code(s): {}{}",
+                    read.codes.len(),
+                    read.codes
+                        .iter()
+                        .map(|c| c.code.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    read.others().map(|m| format!(" ({m})")).unwrap_or_default()
+                ),
+            }
+            Some((tx, rx, read.dialect))
         }
     };
     println!("{}", clear::WARNING);
@@ -2950,6 +2972,41 @@ mod tests {
     }
 
     use super::*;
+
+    /// ICA-207: `obd module`/`obd scan` say a module that lists every code it can set, none failed, is clean, and still
+    /// print a code with a failure bit.
+    #[test]
+    fn a_module_listing_only_codes_it_can_set_prints_clean() {
+        let mut elm = Elm::connect(Box::new(icarus_obd::sim::SimCar::new())).unwrap();
+        for (tx, n) in [(0x700, 6), (0x701, 4)] {
+            let codes = uds::module_dtcs(&mut elm, tx, tx + 8).unwrap();
+            assert_eq!(
+                code_lines(&codes),
+                vec![format!(
+                    "     trouble codes     no trouble codes ({n} it can set, none failed) (UDS)"
+                )],
+                "{tx:03X}"
+            );
+        }
+        let code = |c: &str, status: u8| uds::ModuleDtc {
+            code: c.into(),
+            failure_type: Some(0),
+            status,
+            states: vec![],
+        };
+        let mixed = uds::ModuleCodes::split(
+            uds::Dialect::Uds,
+            vec![
+                code("P0100", 0x50),
+                code("P0301", 0x08),
+                code("P0115", 0x40),
+            ],
+        );
+        let lines = code_lines(&Ok(mixed));
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].contains("P0301-00"), "{lines:?}");
+        assert!(lines[1].ends_with("and 2 more it can set, none failed"));
+    }
 
     /// ICA-192: --read-only is taken out wherever it stands (before the command, after it, twice), and nothing else is: the
     /// Garage's `read-only` word and the options around it stay.

@@ -1223,6 +1223,42 @@ pub(crate) mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
+    /// ICA-207: the Modules page gets the engine and transmission at 700/701 (which list every code they can set, none
+    /// failed) as clean, with no code rows, and the engine's failed P0171 at 7E0 still as a code.
+    #[test]
+    fn the_modules_page_shows_a_module_listing_only_codes_it_can_set_as_clean() {
+        let mut elm = Elm::connect(Box::new(icarus_obd::sim::SimCar::new())).unwrap();
+        let got = std::sync::Mutex::new(Vec::new());
+        scan(&mut elm, &vehicles::builtin(), None, false, &|e| {
+            if let Event::Module(m) = e {
+                got.lock().unwrap().push(m);
+            }
+        })
+        .unwrap();
+        let got = got.into_inner().unwrap();
+        let at = |tx: u32| {
+            let m = got.iter().find(|m| m.addr.tx == tx).unwrap();
+            m.dtcs.as_ref().unwrap().clone()
+        };
+        for (tx, n) in [(0x700, 6), (0x701, 4)] {
+            let read = at(tx);
+            assert!(read.codes.is_empty(), "{tx:03X}: {:?}", read.codes);
+            assert_eq!(
+                crate::clean_codes_label(&read, "UDS").as_deref(),
+                Some(format!("No trouble codes ({n} it can set, none failed) (UDS)").as_str())
+            );
+        }
+        let engine = at(0x7E0);
+        assert_eq!(engine.codes[0].code, "P0171");
+        assert_eq!(crate::clean_codes_label(&engine, "UDS"), None);
+        let cluster = at(0x7C0);
+        assert_eq!(
+            crate::clean_codes_label(&cluster, "UDS").as_deref(),
+            Some("No trouble codes (UDS)"),
+            "a module that lists none"
+        );
+    }
+
     /// ICA-208/112 through the window's worker: Record drive writes rows with standard and module columns, goes on when the
     /// adapter dies (opened again by the worker: the same file), and Stop closes it with its row count.
     #[test]

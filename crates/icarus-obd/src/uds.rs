@@ -55,7 +55,9 @@ pub fn check_read_only(data: &[u8]) -> Result<(), ObdError> {
     )))
 }
 
-/// What a negative response code (`7F <service> <code>`) means.
+/// What a negative response code (`7F <service> <code>`) means, in words that say what to do where there is something to
+/// do: ISO 14229-1's codes (UDS), with ISO 14230-3's own 23 and 80 (KWP2000). Only the codes both leave reserved are
+/// "another refusal".
 pub fn nrc(code: u8) -> &'static str {
     match code {
         0x10 => "general reject",
@@ -65,13 +67,49 @@ pub fn nrc(code: u8) -> &'static str {
         0x14 => "response too long",
         0x21 => "busy, repeat the request",
         0x22 => "conditions not correct (engine running? speed? session?)",
+        // KWP2000 (ISO 14230-3): the routine was started but has not finished
+        0x23 => "routine not finished yet: ask for its result again in a moment",
         0x24 => "request sequence error",
+        0x25 => "no answer from a part this module needed (a sensor or module behind it): check its wiring and power",
+        0x26 => "a fault stops this: read this module's trouble codes and fix them first",
         0x31 => "request out of range (this identifier does not exist here)",
         0x33 => "security access denied",
+        0x34 => "authentication required: the module wants a login Icarus does not do",
         0x35 => "invalid key",
+        0x36 => "too many wrong keys: leave the ignition on and wait before trying again",
+        0x37 => "the module's wait after a wrong key has not run out: wait (often 10 seconds or more) and try again",
+        0x38..=0x4F => "refused by the module's secure-link rules (extended data link security)",
+        0x50..=0x5D => "authentication failed: the module did not accept the certificate or proof offered",
+        0x70 => "upload or download not accepted (programming refused)",
+        0x71 => "transfer suspended (programming stopped)",
+        0x72 => "programming failed: the module could not erase or write its memory",
+        0x73 => "programming block out of sequence (wrong block counter)",
         0x78 => "response pending",
         0x7E => "sub-function not supported in this session",
         0x7F => "service not supported in this session",
+        // KWP2000 (ISO 14230-3): the service needs another diagnostic session
+        0x80 => "service not supported in this diagnostic session",
+        // the vehicle-condition codes: what the module wants changed first
+        0x81 => "engine speed too high: let it idle",
+        0x82 => "engine speed too low: start the engine or raise the idle",
+        0x83 => "the engine is running: turn the engine off (ignition on)",
+        0x84 => "the engine is not running: start the engine",
+        0x85 => "the engine has not run long enough: let it run a while",
+        0x86 => "temperature too high: let it cool down",
+        0x87 => "temperature too low: let the engine warm up",
+        0x88 => "vehicle speed too high: stop the vehicle",
+        0x89 => "vehicle speed too low: this needs the vehicle moving",
+        0x8A => "throttle or accelerator pedal too far down: take your foot off",
+        0x8B => "throttle or accelerator pedal not down far enough: press the pedal",
+        0x8C => "transmission not in Neutral: put it in Neutral",
+        0x8D => "transmission not in gear: put it in gear",
+        0x8F => "brake not applied: press the brake pedal",
+        0x90 => "shift lever not in Park: put it in Park",
+        0x91 => "torque converter clutch locked: slow down or stop so it releases",
+        0x92 => "voltage too high: check the charger or the charging system",
+        0x93 => "voltage too low: connect a battery charger",
+        0x94 => "a resource the module needs is busy for now: try again in a moment",
+        0xF0..=0xFE => "a maker-specific condition not met",
         _ => "another refusal",
     }
 }
@@ -315,9 +353,65 @@ pub enum Dialect {
     Kwp,
 }
 
-/// A module's codes as read: the dialect and the codes, or, when no request gave them, what each request got
+/// A module's codes as read (`ModuleCodes`), or, when no request gave them, what each request got
 /// ("19 02 FF: refused, service not supported; 13: no answer").
-pub type CodesRead = Result<(Dialect, Vec<ModuleDtc>), String>;
+pub type CodesRead = Result<ModuleCodes, String>;
+
+/// The UDS status bits that say a code has failed (ISO 14229-1's status of a code): failing now (bit 0), failed this
+/// cycle (1), pending (2), confirmed (3), failed since codes were cleared (5) and warning light requested (7). The other
+/// two, "not tested since codes were cleared" (4) and "not tested this cycle" (6), say only that a test has not run yet.
+pub const UDS_FAILED: u8 = 0b1010_1111;
+
+/// Whether a UDS status byte has any of the failure bits (`UDS_FAILED`).
+pub fn uds_failed(status: u8) -> bool {
+    status & UDS_FAILED != 0
+}
+
+/// A module's trouble codes: those that failed, and how many more it listed without any failure bit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModuleCodes {
+    /// The language it answered in.
+    pub dialect: Dialect,
+    /// The codes to show: on UDS those whose status has a failure bit (`UDS_FAILED`); every code KWP2000 gives.
+    pub codes: Vec<ModuleDtc>,
+    /// The codes it listed with none of the failure bits. UDS `19 02 FF` asks for every code whose status has any bit set,
+    /// and many modules (Toyota's engine and transmission among them) answer with every code they can set, marked only
+    /// "not tested this cycle" or "not tested since codes were cleared": codes it can set, not findings.
+    pub not_failed: usize,
+}
+
+impl ModuleCodes {
+    /// Codes as a module listed them, split: on UDS a code with none of the failure bits is counted, not kept.
+    pub fn split(dialect: Dialect, all: Vec<ModuleDtc>) -> ModuleCodes {
+        let (codes, rest): (Vec<_>, Vec<_>) = all
+            .into_iter()
+            .partition(|c| dialect == Dialect::Kwp || uds_failed(c.status));
+        ModuleCodes {
+            dialect,
+            codes,
+            not_failed: rest.len(),
+        }
+    }
+
+    /// What to say for a module with no code to show: "no trouble codes (93 it can set, none failed)", or "no trouble
+    /// codes" when it listed none at all; `None` when it has one.
+    pub fn none_failed(&self) -> Option<String> {
+        if !self.codes.is_empty() {
+            return None;
+        }
+        Some(match self.not_failed {
+            0 => "no trouble codes".to_string(),
+            n => format!("no trouble codes ({n} it can set, none failed)"),
+        })
+    }
+
+    /// For a module with codes to show, the others it listed: "and 91 more it can set, none failed"; `None` when there
+    /// are no others, or no code to show (`none_failed` says it then).
+    pub fn others(&self) -> Option<String> {
+        (!self.codes.is_empty() && self.not_failed > 0)
+            .then(|| format!("and {} more it can set, none failed", self.not_failed))
+    }
+}
 
 /// The read-only ways of asking a module for its codes, in order: UDS `19 02` with the status mask FF, then 2F, 09 and 08
 /// (a module may refuse a mask it does not support with "request out of range"); KWP2000 `18` (status 02, then 00, every
@@ -341,8 +435,9 @@ fn hex_req(r: &[u8]) -> String {
         .join(" ")
 }
 
-/// A module's trouble codes, by the first request in `CODE_REQUESTS` that gives them. Once the module refuses UDS's
-/// service outright ("service not supported", 11), the other UDS masks are skipped.
+/// A module's trouble codes, by the first request in `CODE_REQUESTS` that gives them; on UDS only those with a failure
+/// bit are kept as codes, the rest counted (`ModuleCodes::split`). Once the module refuses UDS's service outright
+/// ("service not supported", 11), the other UDS masks are skipped.
 pub fn module_dtcs(elm: &mut dyn Link, tx: u32, rx: u32) -> Result<CodesRead, ObdError> {
     let mut tried: Vec<String> = Vec::new();
     let mut skip_uds = false;
@@ -357,7 +452,7 @@ pub fn module_dtcs(elm: &mut dyn Link, tx: u32, rx: u32) -> Result<CodesRead, Ob
             _ => parse_kwp13_dtcs(&a.data),
         });
         if let Some(v) = parsed {
-            return Ok(Ok((*dialect, v)));
+            return Ok(Ok(ModuleCodes::split(*dialect, v)));
         }
         let what = match got.as_ref().and_then(|a| a.refusal()) {
             Some((_, code)) => {
@@ -878,6 +973,145 @@ mod tests {
             nrc(0x31),
             "request out of range (this identifier does not exist here)"
         );
+    }
+
+    /// ICA-207: only "not tested since codes were cleared" (bit 4) and "not tested this cycle" (bit 6) are not failures.
+    #[test]
+    fn uds_failure_bits() {
+        for b in 0..8 {
+            assert_eq!(uds_failed(1 << b), b != 4 && b != 6, "bit {b}");
+        }
+        assert!(!uds_failed(0x50) && !uds_failed(0x00));
+        assert!(uds_failed(0x59) && uds_failed(0x70));
+    }
+
+    /// ICA-207: a module that answers `19 02 FF` with every code it can set (the simulated engine and transmission at
+    /// 700/701, as a 2017 Tacoma's did) has no codes, only a count; a code with any failure bit is still a code; KWP2000
+    /// codes are as before.
+    #[test]
+    fn a_module_listing_every_code_it_can_set_has_none_failed() {
+        let mut elm = Elm::connect(Box::new(SimCar::new())).unwrap();
+        for (tx, n) in [(0x700, 6), (0x701, 4)] {
+            let read = module_dtcs(&mut elm, tx, tx + 8).unwrap().unwrap();
+            assert_eq!(
+                (read.dialect, read.codes.len(), read.not_failed),
+                (Dialect::Uds, 0, n),
+                "{tx:03X}"
+            );
+            assert_eq!(
+                read.none_failed().as_deref(),
+                Some(format!("no trouble codes ({n} it can set, none failed)").as_str())
+            );
+            assert_eq!(read.others(), None);
+        }
+        let engine = module_dtcs(&mut elm, 0x7E0, 0x7E8).unwrap().unwrap();
+        assert_eq!(
+            (
+                engine.codes[0].code.as_str(),
+                engine.not_failed,
+                engine.none_failed()
+            ),
+            ("P0171", 0, None)
+        );
+        let none = module_dtcs(&mut elm, 0x780, 0x788).unwrap().unwrap();
+        assert_eq!(none.none_failed().as_deref(), Some("no trouble codes"));
+        let abs = module_dtcs(&mut elm, 0x7B0, 0x7B8).unwrap().unwrap();
+        assert_eq!(
+            (abs.dialect, abs.codes[0].code.as_str()),
+            (Dialect::Kwp, "C1241")
+        );
+        // each failure bit alone keeps its code, beside two that only were not tested
+        let mut codes = vec![0x01, 0x00, 0x00, 0x50, 0x01, 0x15, 0x00, 0x40];
+        for (i, b) in [0, 1, 2, 3, 5, 7].into_iter().enumerate() {
+            codes.extend([0x03, i as u8, 0x00, (1u8 << b) | 0x50]);
+        }
+        let mut elm = Elm::connect(Box::new(SimCar::new().with_codes(0x700, &codes))).unwrap();
+        let read = module_dtcs(&mut elm, 0x700, 0x708).unwrap().unwrap();
+        assert_eq!(
+            read.codes
+                .iter()
+                .map(|c| c.code.as_str())
+                .collect::<Vec<_>>(),
+            ["P0300", "P0301", "P0302", "P0303", "P0304", "P0305"]
+        );
+        assert_eq!(read.not_failed, 2);
+        assert_eq!(read.none_failed(), None);
+        assert_eq!(
+            read.others().as_deref(),
+            Some("and 2 more it can set, none failed")
+        );
+    }
+
+    /// ICA-109: every negative response code of ISO 14229-1 (and KWP2000's own 23 and 80) has words; only reserved codes
+    /// are "another refusal".
+    #[test]
+    fn every_refusal_code_has_words() {
+        for (code, want) in [
+            (0x10, "general reject"),
+            (0x11, "service not supported"),
+            (0x12, "sub-function not supported"),
+            (0x13, "wrong message length or format"),
+            (0x14, "response too long"),
+            (0x21, "busy, repeat the request"),
+            (0x22, "conditions not correct"),
+            (0x23, "routine not finished yet"),
+            (0x24, "request sequence error"),
+            (0x25, "no answer from a part this module needed"),
+            (0x26, "a fault stops this: read this module's trouble codes"),
+            (0x31, "request out of range"),
+            (0x33, "security access denied"),
+            (0x34, "authentication required"),
+            (0x35, "invalid key"),
+            (0x36, "too many wrong keys"),
+            (0x37, "wait after a wrong key has not run out"),
+            (0x38, "secure-link rules"),
+            (0x4F, "secure-link rules"),
+            (0x50, "authentication failed"),
+            (0x5D, "authentication failed"),
+            (0x70, "upload or download not accepted"),
+            (0x71, "transfer suspended"),
+            (0x72, "programming failed"),
+            (0x73, "out of sequence"),
+            (0x78, "response pending"),
+            (0x7E, "sub-function not supported in this session"),
+            (0x7F, "service not supported in this session"),
+            (0x80, "service not supported in this diagnostic session"),
+            (0x81, "engine speed too high: let it idle"),
+            (0x82, "engine speed too low: start the engine"),
+            (0x83, "the engine is running: turn the engine off"),
+            (0x84, "the engine is not running: start the engine"),
+            (0x85, "has not run long enough"),
+            (0x86, "temperature too high: let it cool"),
+            (0x87, "temperature too low: let the engine warm up"),
+            (0x88, "vehicle speed too high: stop the vehicle"),
+            (0x89, "vehicle speed too low"),
+            (0x8A, "pedal too far down: take your foot off"),
+            (0x8B, "not down far enough: press the pedal"),
+            (0x8C, "not in Neutral: put it in Neutral"),
+            (0x8D, "not in gear: put it in gear"),
+            (0x8F, "brake not applied: press the brake pedal"),
+            (0x90, "not in Park: put it in Park"),
+            (0x91, "torque converter clutch locked"),
+            (0x92, "voltage too high"),
+            (0x93, "voltage too low: connect a battery charger"),
+            (0x94, "busy for now: try again"),
+            (0xF0, "a maker-specific condition not met"),
+            (0xFE, "a maker-specific condition not met"),
+        ] {
+            assert!(nrc(code).contains(want), "{code:02X}: {}", nrc(code));
+        }
+        let reserved = |c: u8| {
+            matches!(c, 0x00..=0x0F | 0x15..=0x20 | 0x27..=0x30 | 0x32 | 0x5E..=0x6F | 0x74..=0x77
+                | 0x79..=0x7D | 0x8E | 0x95..=0xEF | 0xFF)
+        };
+        for c in 0..=0xFF {
+            assert_eq!(
+                nrc(c) == "another refusal",
+                reserved(c),
+                "{c:02X}: {}",
+                nrc(c)
+            );
+        }
     }
 
     /// Bits 6-5 together are one state: 0x40 alone is a maturing (intermittent) code, not one present now.
@@ -1411,7 +1645,9 @@ mod tests {
             id.contains(&("part number", "89221-ICARUS".to_string())),
             "{id:?}"
         );
-        let (d, codes) = codes.unwrap();
+        let ModuleCodes {
+            dialect: d, codes, ..
+        } = codes.unwrap();
         assert_eq!((d, codes[0].code.as_str()), (Dialect::Uds, "B1234"));
         // another module at the same gateway, its own address
         let tpms = crate::vehicles::ModuleAddr {
@@ -1423,7 +1659,7 @@ mod tests {
         // afterwards normal addressing: 750 without an address byte reaches nothing, the engine answers as before
         assert!(!present(&mut elm, 0x750, 0x758).unwrap());
         assert_eq!(
-            module_dtcs(&mut elm, 0x7E0, 0x7E8).unwrap().unwrap().1[0].code,
+            module_dtcs(&mut elm, 0x7E0, 0x7E8).unwrap().unwrap().codes[0].code,
             "P0171"
         );
         // reset even when what ran for the module failed
@@ -1515,7 +1751,9 @@ mod tests {
             id.contains(&("part number", "57100-ICARUS".to_string())),
             "{id:?}"
         );
-        let (d, codes) = module_dtcs(&mut elm, vsa.tx, vsa.rx()).unwrap().unwrap();
+        let ModuleCodes {
+            dialect: d, codes, ..
+        } = module_dtcs(&mut elm, vsa.tx, vsa.rx()).unwrap().unwrap();
         assert_eq!((d, codes[0].code.as_str()), (Dialect::Uds, "C0210"));
         let log = sent.lock().unwrap().clone();
         for c in ["ATCP18", "ATSHDA28F1", "ATCRA18DAF128", "ATFCSH18DA28F1"] {
@@ -1569,7 +1807,7 @@ mod tests {
             module_dtcs(&mut elm, 0x241, 0x641).unwrap().unwrap(),
         );
         assert!(identity.contains(&("part number", "ICARUS-GM-BCM".to_string())));
-        assert_eq!(codes.1[0].code, "B1234");
+        assert_eq!(codes.codes[0].code, "B1234");
         assert!(sent.lock().unwrap().contains(&"ATCRA641\r".to_string()));
         // the transmission at 7E2 answers from 7EA, in the broadcast too
         assert!(crate::j1979::supported(&mut elm)
@@ -1618,7 +1856,7 @@ mod tests {
             id.contains(&("part number", "ICARUS-FORD-BCM".to_string())),
             "{id:?}"
         );
-        assert_eq!(codes.unwrap().1[0].code, "B1342");
+        assert_eq!(codes.unwrap().codes[0].code, "B1342");
         // in order: the switch, the module's header, filter and flow control, its requests, then the way back last
         let log = taken(&sent);
         let at = |c: &str| {
@@ -1765,27 +2003,37 @@ mod tests {
                 assert_eq!(got, id);
             }
         }
-        let (d, codes) = module_dtcs(&mut elm, 0x7E0, 0x7E0 + 8).unwrap().unwrap();
+        let ModuleCodes {
+            dialect: d, codes, ..
+        } = module_dtcs(&mut elm, 0x7E0, 0x7E0 + 8).unwrap().unwrap();
         assert_eq!((d, codes[0].code.as_str()), (Dialect::Uds, "P0171"));
-        let (d, codes) = module_dtcs(&mut elm, 0x7B0, 0x7B0 + 8).unwrap().unwrap();
+        let ModuleCodes {
+            dialect: d, codes, ..
+        } = module_dtcs(&mut elm, 0x7B0, 0x7B0 + 8).unwrap().unwrap();
         assert_eq!(
             (d, codes[0].code.as_str()),
             (Dialect::Kwp, "C1241"),
             "the ABS speaks KWP2000 only"
         );
-        let (_, codes) = module_dtcs(&mut elm, 0x780, 0x780 + 8).unwrap().unwrap();
+        let ModuleCodes { codes, .. } = module_dtcs(&mut elm, 0x780, 0x780 + 8).unwrap().unwrap();
         assert!(codes.is_empty());
-        let (d, codes) = module_dtcs(&mut elm, 0x7C0, 0x7C0 + 8).unwrap().unwrap();
+        let ModuleCodes {
+            dialect: d, codes, ..
+        } = module_dtcs(&mut elm, 0x7C0, 0x7C0 + 8).unwrap().unwrap();
         assert_eq!(
             (d, codes.len()),
             (Dialect::Uds, 0),
             "a 'response pending' is waited out, not taken as the answer"
         );
         // the transmission refuses the status mask FF ("request out of range") and gives its codes to mask 2F
-        let (d, codes) = module_dtcs(&mut elm, 0x7E1, 0x7E9).unwrap().unwrap();
+        let ModuleCodes {
+            dialect: d, codes, ..
+        } = module_dtcs(&mut elm, 0x7E1, 0x7E9).unwrap().unwrap();
         assert_eq!((d, codes.len()), (Dialect::Uds, 0));
         // the air conditioning refuses UDS and KWP2000's 18 and answers ISO 14230's 13
-        let (d, codes) = module_dtcs(&mut elm, 0x7C4, 0x7CC).unwrap().unwrap();
+        let ModuleCodes {
+            dialect: d, codes, ..
+        } = module_dtcs(&mut elm, 0x7C4, 0x7CC).unwrap().unwrap();
         assert_eq!(
             (d, codes[0].code.as_str(), codes[0].states.clone()),
             (Dialect::Kwp, "B1421", vec!["stored"])

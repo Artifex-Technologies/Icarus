@@ -365,15 +365,21 @@ pub fn markdown(d: &Diagnosis) -> String {
                         "- trouble codes: none of Icarus's requests gave them ({why})"
                     );
                 }
-                Ok((_, list)) if list.is_empty() => {
-                    let _ = writeln!(o, "- no trouble codes");
-                }
-                Ok((_, list)) => {
-                    let _ = writeln!(o);
-                    for c in list {
-                        code_block(&mut o, &c.code, &c.states.join(", "), d);
+                Ok(read) => match read.none_failed() {
+                    // a module listing every code it can set (UDS 19 02 FF), none failed, is clean (ICA-207)
+                    Some(clean) => {
+                        let _ = writeln!(o, "- {clean}");
                     }
-                }
+                    None => {
+                        let _ = writeln!(o);
+                        for c in &read.codes {
+                            code_block(&mut o, &c.code, &c.states.join(", "), d);
+                        }
+                        if let Some(more) = read.others() {
+                            let _ = writeln!(o, "- {more}");
+                        }
+                    }
+                },
             }
             let _ = writeln!(o);
         }
@@ -504,6 +510,41 @@ mod tests {
         ] {
             assert!(md.contains(want), "missing {want:?} in\n{md}");
         }
+        // ICA-207: the engine and transmission at 700/701 list every code they can set (19 02 FF), none failed: clean,
+        // not a list of findings
+        for (head, n) in [
+            ("### 700 engine (UDS)\n", 6),
+            ("### 701 transmission (UDS)\n", 4),
+        ] {
+            let at = md.find(head).unwrap_or_else(|| panic!("{head:?} in\n{md}"));
+            let rest = at + head.len();
+            let section = &md[at..md[rest..].find("### ").map_or(md.len(), |e| rest + e)];
+            assert!(
+                section.contains(&format!("- no trouble codes ({n} it can set, none failed)")),
+                "{section}"
+            );
+            assert!(!section.contains("**P0"), "{section}");
+        }
+        for listed in ["P0100", "P0300", "P0705", "P0750", "not tested this cycle"] {
+            assert!(!md.contains(listed), "{listed} listed in\n{md}");
+        }
+        // a code with a failure bit is still listed, beside the count of the rest
+        let mixed = [
+            0x01, 0x00, 0x00, 0x50, // P0100 not tested: not listed
+            0x03, 0x01, 0x00, 0x24, // P0301 pending, failed since cleared: listed
+            0x01, 0x15, 0x00, 0x10, // P0115 not tested: not listed
+        ];
+        let mut elm = Elm::connect(Box::new(SimCar::new().with_codes(0x700, &mixed))).unwrap();
+        let md = markdown(&collect(&mut elm, &vehicles::builtin(), true).unwrap());
+        let at = md.find("### 700 engine (UDS)\n").unwrap();
+        let section = &md[at..md[at..].find("### 701").map_or(md.len(), |e| at + e)];
+        assert!(
+            section.contains("**P0301** (pending, failed since codes were cleared)")
+                && section.contains("- and 2 more it can set, none failed")
+                && !section.contains("P0100")
+                && !section.contains("no trouble codes"),
+            "{section}"
+        );
         let p = default_path(&Diagnosis {
             when: "2026-11-07 19:40".into(),
             ..Default::default()

@@ -417,20 +417,24 @@ fn vehicle_modules_on(
                     m.tx, m.name
                 )
             }
-            Ok((_, codes)) if codes.is_empty() => {
-                o += &format!("{:03X} {}: no codes.\n", m.tx, m.name)
-            }
-            Ok((_, codes)) => {
-                o += &format!("{:03X} {}:\n", m.tx, m.name);
-                for c in codes {
-                    o += &code_line(
-                        &c.code,
-                        &format!(" ({})", c.states.join(", ")),
-                        profile.as_ref(),
-                    );
-                    o += "\n";
+            // a module listing every code it can set, none failed (UDS 19 02 FF), is clean (ICA-207)
+            Ok(read) => match read.none_failed() {
+                Some(clean) => o += &format!("{:03X} {}: {clean}.\n", m.tx, m.name),
+                None => {
+                    o += &format!("{:03X} {}:\n", m.tx, m.name);
+                    for c in &read.codes {
+                        o += &code_line(
+                            &c.code,
+                            &format!(" ({})", c.states.join(", ")),
+                            profile.as_ref(),
+                        );
+                        o += "\n";
+                    }
+                    if let Some(more) = read.others() {
+                        o += &format!("{more}.\n");
+                    }
                 }
-            }
+            },
         }
     }
     if o.is_empty() {
@@ -730,6 +734,21 @@ mod tests {
         let text = vehicle_modules_on(&mut elm, &all, &open).unwrap();
         assert!(text.contains("7C0 instrument cluster"), "{text}");
         assert!(!text.contains("not asked"), "{text}");
+        // ICA-207: the engine and transmission at 700/701 list every code they can set, none failed: clean, none listed
+        for clean in [
+            "700 engine (UDS): no trouble codes (6 it can set, none failed).",
+            "701 transmission (UDS): no trouble codes (4 it can set, none failed).",
+        ] {
+            assert!(text.contains(clean), "{clean:?} in {text}");
+        }
+        assert!(
+            !text.contains("P0100") && !text.contains("not tested"),
+            "{text}"
+        );
+        assert!(
+            text.contains("P0171"),
+            "a failed code is still listed: {text}"
+        );
         let toyota = all.iter_mut().find(|p| p.id == "toyota").unwrap();
         toyota
             .modules

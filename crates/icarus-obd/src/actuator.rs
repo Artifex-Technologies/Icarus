@@ -731,4 +731,37 @@ mod tests {
             .unwrap();
         assert!(e.contains("conditions not correct"), "{e}");
     }
+
+    /// ICA-109: a test the module refuses for a condition only it knows says what to do: 7F 2F 90 "put it in Park",
+    /// 7F 2F 83 "turn the engine off"; control is handed back and the session left as on any failed start.
+    #[test]
+    fn a_refused_test_says_what_to_do() {
+        crate::lock::switch_for_test(&[]);
+        for (code, name, want) in [
+            (
+                0x90,
+                "Cooling fan",
+                "shift lever not in Park: put it in Park",
+            ),
+            (
+                0x83,
+                "Throttle",
+                "the engine is running: turn the engine off",
+            ),
+        ] {
+            let def = crate::sim::tests()
+                .into_iter()
+                .find(|t| t.name.starts_with(name))
+                .unwrap();
+            let mut elm =
+                Elm::connect(Box::new(SimCar::engine_off().refusing_outputs(code))).unwrap();
+            let e = start(&mut elm, &def, 30.0).err().unwrap();
+            assert!(e.contains(want), "{code:02X}: {e}");
+            let sent = elm.take_sent();
+            assert!(
+                sent.iter().any(|(_, _, d)| d.as_slice() == [0x10, 0x01]),
+                "back to the default session: {sent:02X?}"
+            );
+        }
+    }
 }

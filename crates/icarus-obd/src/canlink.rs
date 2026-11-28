@@ -876,8 +876,11 @@ mod tests {
             "{id:?}"
         );
         // the cluster says "response pending" first: waited out, then its codes
-        let (d, codes) = uds::module_dtcs(&mut l, 0x7C0, 0x7C8).unwrap().unwrap();
-        assert_eq!((d, codes.len()), (uds::Dialect::Uds, 0));
+        let read = uds::module_dtcs(&mut l, 0x7C0, 0x7C8).unwrap().unwrap();
+        assert_eq!((read.dialect, read.codes.len()), (uds::Dialect::Uds, 0));
+        // the engine's own address (700) lists every code it can set, none failed: no codes, counted (ICA-207)
+        let read = uds::module_dtcs(&mut l, 0x700, 0x708).unwrap().unwrap();
+        assert_eq!((read.codes.len(), read.not_failed), (0, 6));
         // nothing at 702: no answer, not an error
         assert!(!uds::present(&mut l, 0x702, 0x70A).unwrap());
         // behind the gateway at 750: every frame carries the module's address byte first, the answers too
@@ -962,10 +965,10 @@ mod tests {
             .map(|m| m.tx)
             .collect();
         assert_eq!(found, crate::sim::HONDA_MODULES);
-        let (_, codes) = uds::module_dtcs(&mut l, 0x18DA_28F1, 0x18DA_F128)
+        let read = uds::module_dtcs(&mut l, 0x18DA_28F1, 0x18DA_F128)
             .unwrap()
             .unwrap();
-        assert_eq!(codes[0].code, "C0210");
+        assert_eq!(read.codes[0].code, "C0210");
     }
 
     /// ICA-103: on raw CAN the sweep's probe hears a module wherever it answers from: one at 710 answering from 77A (not

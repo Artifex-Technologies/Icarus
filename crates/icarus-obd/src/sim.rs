@@ -282,7 +282,30 @@ pub struct SimCar {
     /// The adapter takes a receive filter and mask, or an STN pass filter, and then shows no answer through them
     /// (`with_wide_filter_deaf`).
     wide_deaf: bool,
+    /// Trouble codes a test gives a module in place of its own (`with_codes`): (request ID, the codes as it sends them).
+    codes_for: Vec<(u32, Vec<u8>)>,
+    /// The engine refuses every output test it is asked to start with this code (`refusing_outputs`), past Icarus's own
+    /// checks: a condition only the module knows (not in Park, the engine running).
+    outputs_refused: Option<u8>,
 }
+
+/// The simulated engine's codes at 700 (UDS, `19 02 FF`): codes it can set, none failed (made up; ICA-207).
+const SUPPORTED_ONLY_ENGINE: &[u8] = &[
+    0x01, 0x00, 0x00, 0x50, // P0100 not tested since cleared, not tested this cycle
+    0x01, 0x01, 0x00, 0x50, // P0101
+    0x01, 0x10, 0x00, 0x10, // P0110 not tested since cleared
+    0x01, 0x15, 0x00, 0x50, // P0115
+    0x01, 0x20, 0x00, 0x40, // P0120 not tested this cycle
+    0x03, 0x00, 0x00, 0x50, // P0300
+];
+
+/// The simulated transmission's codes at 701, likewise none failed.
+const SUPPORTED_ONLY_TRANSMISSION: &[u8] = &[
+    0x07, 0x05, 0x00, 0x50, // P0705
+    0x07, 0x10, 0x00, 0x50, // P0710
+    0x07, 0x15, 0x00, 0x10, // P0715
+    0x07, 0x50, 0x00, 0x40, // P0750
+];
 
 impl Default for SimCar {
     fn default() -> Self {
@@ -351,6 +374,8 @@ impl SimCar {
             blocks: Vec::new(),
             once: Vec::new(),
             wide_deaf: false,
+            codes_for: Vec::new(),
+            outputs_refused: None,
         }
     }
 
@@ -484,6 +509,23 @@ impl SimCar {
     pub(crate) fn with_chatter(mut self, from: u32, msg: &[u8]) -> SimCar {
         self.chatter.push((from, msg.to_vec()));
         self
+    }
+
+    /// The same vehicle with the module at `tx` giving `codes` (as it sends them: UDS 4 bytes a code, the status last) in
+    /// place of its own.
+    #[cfg(test)]
+    pub(crate) fn with_codes(mut self, tx: u32, codes: &[u8]) -> SimCar {
+        self.codes_for.push((tx, codes.to_vec()));
+        self
+    }
+
+    /// The same vehicle with the engine refusing every output test it is asked to start with negative response `code`.
+    #[cfg(test)]
+    pub(crate) fn refusing_outputs(self, code: u8) -> SimCar {
+        SimCar {
+            outputs_refused: Some(code),
+            ..self
+        }
     }
 
     /// The same vehicle with the module at `tx` keeping an as-built block, DE00 to DE`last` (read with 22 whatever else
@@ -1029,9 +1071,11 @@ impl SimCar {
             (Make::Ford, 0x727) if ms => (b"ICARUS-FORD-ACM", true, &[]),
             (Make::Toyota, 0x7E0) => (b"89661-ICARUS", true, &[0x01, 0x71, 0x00, 0x09]),
             (Make::Toyota, 0x7E1) => (b"35010-ICARUS", true, &[]),
-            // the engine and transmission computers' own diagnostic addresses (UDS), beside OBD-II's 7E0/7E1
-            (Make::Toyota, 0x700) => (b"89663-ICARUS", true, &[]),
-            (Make::Toyota, 0x701) => (b"89535-ICARUS", true, &[]),
+            // the engine and transmission computers' own diagnostic addresses (UDS), beside OBD-II's 7E0/7E1: as on a
+            // real truck (ICA-207), `19 02 FF` lists every code each can set, none failed, only "not tested since codes
+            // were cleared" (10) and "not tested this cycle" (40)
+            (Make::Toyota, 0x700) => (b"89663-ICARUS", true, SUPPORTED_ONLY_ENGINE),
+            (Make::Toyota, 0x701) => (b"89535-ICARUS", true, SUPPORTED_ONLY_TRANSMISSION),
             (Make::Toyota, 0x7B0) => (b"89540-ICARUS", false, &[0x52, 0x41, 0x60]),
             (Make::Toyota, 0x780) => (b"89170-ICARUS", true, &[]),
             (Make::Toyota, 0x7C0) => (b"83800-ICARUS", true, &[]),
@@ -1052,10 +1096,15 @@ impl SimCar {
             (Make::Gm, 0x243) => (b"ICARUS-GM-EBCM", true, &[]),
             _ => return None,
         };
+        let given = self
+            .codes_for
+            .iter()
+            .find(|c| c.0 == tx)
+            .map(|c| c.1.clone());
         let codes: &[u8] = if self.cleared.contains(&tx) {
             &[]
         } else {
-            codes
+            given.as_deref().unwrap_or(codes)
         };
         // several identifiers in one read (22 hi lo hi lo...: longer than a CAN frame from three on, STPX on an OBDLink):
         // one answer with each identifier the module has and its value, in the order asked
@@ -1098,6 +1147,9 @@ impl SimCar {
                 }
                 if !self.extended.contains(&tx) {
                     return refuse(0x22);
+                }
+                if let Some(code) = self.outputs_refused.filter(|_| *param == 0x03) {
+                    return refuse(code);
                 }
                 match param {
                     0x00 => {
@@ -1161,7 +1213,17 @@ impl SimCar {
                     self.meter_busy = false;
                     return refuse(0x78);
                 }
-                Some([&[0x59, 0x02, *mask][..], codes].concat())
+                // the codes whose status shares a bit with the mask, as ISO 14229-1 has a module answer
+                let matching = codes
+                    .chunks(4)
+                    .filter(|c| c.get(3).is_some_and(|s| s & mask != 0));
+                Some(
+                    [
+                        &[0x59, 0x02, *mask][..],
+                        &matching.collect::<Vec<_>>().concat(),
+                    ]
+                    .concat(),
+                )
             }
             ([0x18, ..], false) => Some([&[0x58, (codes.len() / 3) as u8][..], codes].concat()),
             // settings: the cluster's chime (UDS, changed only in the extended session), the ABS module's buzzer (KWP2000,

@@ -1255,8 +1255,8 @@ impl App {
             }
         }
         for m in &self.modules {
-            if let Ok((_, dtcs)) = &m.dtcs {
-                for d in dtcs {
+            if let Ok(read) = &m.dtcs {
+                for d in &read.codes {
                     found.push((d.code.clone(), m.addr.name.clone()));
                 }
             }
@@ -1959,13 +1959,12 @@ impl App {
                                 .weak(),
                         );
                     }
-                    Ok((d, codes)) => {
+                    Ok(read) => {
+                        let (d, codes) = (&read.dialect, &read.codes);
                         let lang = if *d == Dialect::Uds { "UDS" } else { "KWP2000" };
-                        if codes.is_empty() {
-                            ui.label(
-                                RichText::new(format!("No trouble codes ({lang})"))
-                                    .color(pal.green),
-                            );
+                        // a module listing every code it can set, none failed (UDS 19 02 FF), is clean (ICA-207)
+                        if let Some(clean) = clean_codes_label(read, lang) {
+                            ui.label(RichText::new(clean).color(pal.green));
                         }
                         for c in codes {
                             let confirmed = c.states.iter().any(|s| {
@@ -1982,6 +1981,9 @@ impl App {
                                 vehicle,
                                 &mut links,
                             );
+                        }
+                        if let Some(more) = read.others() {
+                            ui.label(RichText::new(more).small().color(pal.dim));
                         }
                         // airbag modules: never cleared by Icarus (clear::refused); say so where the button would be. The
                         // clear path takes 11-bit IDs on the main bus only: a 29-bit module, one answering outside
@@ -5018,6 +5020,19 @@ fn code_extra(states: &[&str], failure_type: Option<u8>, lang: &str, advanced: b
         .map(|f| format!(" -{f:02X}"))
         .unwrap_or_default();
     format!("{words}{ftb}, {lang}")
+}
+
+/// The Modules page's line for a module with no code to show (ICA-207): "No trouble codes (93 it can set, none failed)
+/// (UDS)" for one that lists every code it can set with none failed, "No trouble codes (UDS)" for one that lists none.
+fn clean_codes_label(read: &icarus_obd::uds::ModuleCodes, lang: &str) -> Option<String> {
+    let clean = read.none_failed()?;
+    let mut c = clean.chars();
+    let first = c.next().map(|f| f.to_uppercase().collect::<String>());
+    Some(format!(
+        "{}{} ({lang})",
+        first.unwrap_or_default(),
+        c.as_str()
+    ))
 }
 
 /// A live value's name (ICA-76): in Advanced with its PID number first.
