@@ -787,6 +787,8 @@ pub(crate) fn run_with(
                     Ok(how) => how,
                     Err(m) => format!("could not watch: {m}"),
                 };
+                // what still waits for its module's answer is noted as unanswered, not learned (ICA-221)
+                a.finish();
                 let mut last = view(&a, t0.elapsed().as_secs_f64(), false, Some(ended));
                 last.learning = learning;
                 if learning {

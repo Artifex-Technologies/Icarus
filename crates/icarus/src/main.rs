@@ -2387,6 +2387,8 @@ fn bus_watch(
             println!("  (none of the IDs seen is in it)");
         }
     }
+    // what still waits for its module's answer when the watch ends is noted as unanswered, not learned (ICA-221)
+    an.finish();
     if !an.settings.is_empty() {
         println!("\nSettings another tool changed (add them to the vehicle's profile, then find out what each one is):\n");
         for s in &an.settings {
@@ -2544,6 +2546,7 @@ fn cmd_learn(a: &[String], fence: icarus_obd::fence::Fence) -> Result<(), String
         let port = serial_port(path, *baud).map_err(|x| format!("{path}: {x}"))?;
         watch_slcan(port, *bitrate, start, |f| step(&mut an, f))?;
     }
+    an.finish();
     let modules = vin
         .as_deref()
         .and_then(|v| vehicles::for_vin(&all, v))

@@ -173,6 +173,10 @@ pub fn describe(msg: &[u8]) -> String {
     )
 }
 
+/// How long a request waits for its module's answer, in seconds, from the request or the module's last "response
+/// pending" (`7F .. 78`): UDS's longest wait after a pending answer (P2*, 5 s; ISO 14229-2).
+pub const ANSWER_WAIT: f64 = 5.0;
+
 #[derive(Default)]
 pub struct Analyzer {
     pub ids: BTreeMap<u32, IdStats>,
@@ -189,9 +193,15 @@ pub struct Analyzer {
     /// The last value each (module, identifier, KWP2000?) was read as, and writes waiting for the module's answer.
     read_values: HashMap<(u16, u16, bool), Vec<u8>>,
     pending_writes: HashMap<(u16, u16, bool), Vec<u8>>,
-    /// Routine starts (`31 01`) waiting for the module's answer, by (module, routine), as the entry each would be: one is
-    /// learned when the module says it started (`71 01`), noted when it refuses (`7F 31`).
-    pending_routines: HashMap<(u16, u16), crate::service::ServiceDef>,
+    /// Routine starts (`31 01`) waiting for the module's answer, by (module, routine), as the entry each would be, with
+    /// when it was sent (or last said pending): one is learned when the module says it started (`71 01`), noted when it
+    /// refuses (`7F 31`) or gives no answer in time (`ANSWER_WAIT`).
+    pending_routines: HashMap<(u16, u16), (crate::service::ServiceDef, f64)>,
+    /// Output tests (`2F .. 03`, `30 .. 07`) waiting for the module's answer, by (module, output, KWP2000?), the same way:
+    /// learned on `6F` / `70`, noted on a refusal or no answer (ICA-221).
+    pending_tests: HashMap<(u16, u16, bool), (TestDef, f64)>,
+    /// The time of the frame being read.
+    now: f64,
     /// Modules another tool has in the extended diagnostic session.
     extended: HashSet<u16>,
     /// What the person said they were about to do in the other tool (`mark`), with the time: newest last.
@@ -254,6 +264,8 @@ impl Analyzer {
 
     pub fn add(&mut self, f: &Frame) {
         self.frames += 1;
+        self.now = f.at;
+        self.expire(|at| f.at - at > ANSWER_WAIT);
         let s = self.ids.entry(f.id).or_insert_with(|| IdStats {
             first: f.at,
             ..Default::default()
@@ -374,33 +386,9 @@ impl Analyzer {
             }
             [0x7B, lid, ..] => self.setting_written(rx_tx, *lid as u16, Protocol::Kwp),
             // 78 is "response pending", not a refusal: the answer is still to come
-            [0x7F, 0x31, code] if *code != 0x78 => {
-                let mut refused: Vec<u16> = self
-                    .pending_routines
-                    .keys()
-                    .filter(|k| k.0 == rx_tx)
-                    .map(|k| k.1)
-                    .collect();
-                refused.sort();
-                self.pending_routines.retain(|k, _| k.0 != rx_tx);
-                let what = if refused.is_empty() {
-                    "routine control".to_string()
-                } else {
-                    format!(
-                        "start of routine {}",
-                        refused
-                            .iter()
-                            .map(|r| format!("{r:04X}"))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )
-                };
-                self.note(format!(
-                    "{rx_tx:03X} refused the tool's {what}: {}",
-                    crate::uds::nrc(*code)
-                ));
-            }
-            [0x7F, sid @ (0x2E | 0x3B | 0x2F | 0x30), code] if *code != 0x78 => {
+            [0x7F, sid @ 0x2F..=0x31, 0x78] => self.still_pending(rx_tx, *sid),
+            [0x7F, sid @ 0x2F..=0x31, code] => self.refused_pending(rx_tx, *sid, *code),
+            [0x7F, sid @ (0x2E | 0x3B), code] if *code != 0x78 => {
                 let kwp = *sid == 0x3B;
                 self.pending_writes.retain(|k, _| !(k.0 == rx_tx && k.2 == kwp));
                 self.note(format!(
@@ -545,6 +533,7 @@ impl Analyzer {
                 // comes after it (that answer could be to a write sent unlocked); a routine start the same
                 self.pending_writes.retain(|k, _| k.0 != tx);
                 self.pending_routines.retain(|k, _| k.0 != tx);
+                self.pending_tests.retain(|k, _| k.0 != tx);
                 if self.unlocked.insert(tx) {
                     self.note(format!(
                         "{tx:03X}: security access (level {level:02X}): the tool unlocked the module. Icarus never does \
@@ -565,7 +554,11 @@ impl Analyzer {
                 return false;
             }
             // the module's answer to a write the tool sent it unlocked: nothing to learn from either (the write was noted)
-            [0x6E | 0x7B | 0x71, ..] if self.unlocked.contains(&tx.wrapping_sub(8)) => return true,
+            [0x6E | 0x7B | 0x71 | 0x6F | 0x70, ..]
+                if self.unlocked.contains(&tx.wrapping_sub(8)) =>
+            {
+                return true
+            }
             _ => {}
         }
         if !self.unlocked.contains(&tx) {
@@ -597,10 +590,109 @@ impl Analyzer {
         true
     }
 
+    /// The module answering on `rx_tx` + 8 said "response pending" (`7F sid 78`): its waiting requests of that service
+    /// wait on from now.
+    fn still_pending(&mut self, rx_tx: u16, sid: u8) {
+        let now = self.now;
+        match sid {
+            0x31 => self
+                .pending_routines
+                .iter_mut()
+                .filter(|(k, _)| k.0 == rx_tx)
+                .for_each(|(_, v)| v.1 = now),
+            _ => self
+                .pending_tests
+                .iter_mut()
+                .filter(|(k, _)| k.0 == rx_tx && k.2 == (sid == 0x30))
+                .for_each(|(_, v)| v.1 = now),
+        }
+    }
+
+    /// The module refused the tool's routine control (`7F 31 xx`) or output control (`7F 2F xx`, `7F 30 xx`): what of
+    /// that service was waiting on it is noted with the refusal in words, not learned.
+    fn refused_pending(&mut self, rx_tx: u16, sid: u8, code: u8) {
+        let mut what: Vec<String> = match sid {
+            0x31 => {
+                let w = self
+                    .pending_routines
+                    .keys()
+                    .filter(|k| k.0 == rx_tx)
+                    .map(|k| format!("start of routine {:04X}", k.1))
+                    .collect();
+                self.pending_routines.retain(|k, _| k.0 != rx_tx);
+                w
+            }
+            _ => {
+                let kwp = sid == 0x30;
+                let w = self
+                    .pending_tests
+                    .iter()
+                    .filter(|(k, _)| k.0 == rx_tx && k.2 == kwp)
+                    .map(|(k, (t, _))| {
+                        format!(
+                            "output control {:0w$X} (to {})",
+                            k.1,
+                            hex(&t.on),
+                            w = if kwp { 2 } else { 4 }
+                        )
+                    })
+                    .collect();
+                self.pending_tests
+                    .retain(|k, _| !(k.0 == rx_tx && k.2 == kwp));
+                w
+            }
+        };
+        what.sort();
+        let what = if what.is_empty() {
+            service(sid).to_string()
+        } else {
+            what.join(", ")
+        };
+        self.note(format!(
+            "{rx_tx:03X} refused the tool's {what}: {}",
+            crate::uds::nrc(code)
+        ));
+    }
+
+    /// Requests waiting for an answer for which `gone(sent)` holds are noted as unanswered and dropped.
+    fn expire(&mut self, gone: impl Fn(f64) -> bool) {
+        if self.pending_routines.is_empty() && self.pending_tests.is_empty() {
+            return;
+        }
+        let mut what: Vec<String> = Vec::new();
+        self.pending_routines.retain(|(tx, r), (_, at)| {
+            let keep = !gone(*at);
+            if !keep {
+                what.push(format!("{tx:03X}: routine {r:04X} started"));
+            }
+            keep
+        });
+        self.pending_tests.retain(|(tx, out, kwp), (t, at)| {
+            let keep = !gone(*at);
+            if !keep {
+                what.push(format!(
+                    "{tx:03X}: output control {out:0w$X} (to {})",
+                    hex(&t.on),
+                    w = if *kwp { 2 } else { 4 }
+                ));
+            }
+            keep
+        });
+        what.sort();
+        for w in what {
+            self.note(format!("{w}: no answer seen, not learned"));
+        }
+    }
+
+    /// The watch has ended: what still waits for an answer is noted as unanswered (call before `learning::session_text`).
+    pub fn finish(&mut self) {
+        self.expire(|_| true);
+    }
+
     /// The module `tx` said it started `routine` (`71 01`): the start the tool sent it, if one is waiting, becomes a
     /// service entry. A start the module refused (`7F 31`) is noted, not learned; one still pending (`7F 31 78`) waits.
     fn routine_started(&mut self, tx: u16, routine: u16) {
-        let Some(s) = self.pending_routines.remove(&(tx, routine)) else {
+        let Some((s, _)) = self.pending_routines.remove(&(tx, routine)) else {
             return;
         };
         if !self
@@ -613,7 +705,8 @@ impl Analyzer {
         }
     }
 
-    /// An output-control request from another tool becomes a test (the most cautious conditions, unchecked).
+    /// What another tool sent or a module answered: an output test or a routine start waits for its answer, a setting for
+    /// its write's (the most cautious conditions, unchecked).
     fn learn(&mut self, tx: u16, msg: &[u8]) {
         if self.after_unlock(tx, msg) {
             return;
@@ -656,7 +749,7 @@ impl Analyzer {
                     .or_else(|| self.fence.refuses(tx.into(), s.rx().into()))
                 {
                     None => {
-                        self.pending_routines.insert((tx, routine), s);
+                        self.pending_routines.insert((tx, routine), (s, self.now));
                     }
                     Some(why) => self.note(format!("{tx:03X} routine {routine:04X}: {why}")),
                 }
@@ -667,6 +760,20 @@ impl Analyzer {
             self.routine_started(tx.wrapping_sub(8), u16::from_be_bytes([*hi, *lo]));
             return;
         }
+        // an output test another tool ran: kept until the module answers, learned when it takes it (`test_accepted`)
+        match msg {
+            [0x6F, hi, lo, 0x03, ..] => {
+                return self.test_accepted(
+                    tx.wrapping_sub(8),
+                    u16::from_be_bytes([*hi, *lo]),
+                    false,
+                )
+            }
+            [0x70, lid, 0x07, ..] => {
+                return self.test_accepted(tx.wrapping_sub(8), *lid as u16, true)
+            }
+            _ => {}
+        }
         let (protocol, out, state) = match msg {
             [0x2F, hi, lo, 0x03, state @ ..] if !state.is_empty() && state.len() <= 4 => {
                 (Protocol::Uds, u16::from_be_bytes([*hi, *lo]), state)
@@ -676,22 +783,6 @@ impl Analyzer {
             }
             _ => return,
         };
-        if let Some(t) = self
-            .learned
-            .iter_mut()
-            .find(|t| t.module == tx && t.id == out && t.protocol == protocol)
-        {
-            // several different one-byte settings: a setting with a range rather than on/off
-            if state.len() == 1 && t.on.len() == 1 && t.on[0] != state[0] {
-                t.control = Control::Percent;
-                t.warning = format!(
-                    "{} Seen with several settings; check its scaling (now: percent x {}).",
-                    t.warning.split(" Seen with").next().unwrap_or(""),
-                    t.scale
-                );
-            }
-            return;
-        }
         let default = format!(
             "Learned: output {out:0w$X} on {tx:03X}",
             w = if protocol == Protocol::Uds { 4 } else { 2 }
@@ -716,11 +807,37 @@ impl Analyzer {
             .or_else(|| self.fence.refuses(tx.into(), t.rx().into()))
         {
             None => {
-                self.name_for(String::new(), true);
-                self.learned.push(t);
+                self.pending_tests
+                    .insert((tx, out, protocol == Protocol::Kwp), (t, self.now));
             }
             Some(why) => self.note(format!("{tx:03X} output {out:X}: {why}")),
         }
+    }
+
+    /// The module `tx` took the tool's output control of `out` (`6F .. 03`, `70 .. 07`): the request waiting for it
+    /// becomes a test, or, on a test learned before, another setting of it.
+    fn test_accepted(&mut self, tx: u16, out: u16, kwp: bool) {
+        let Some((t, _)) = self.pending_tests.remove(&(tx, out, kwp)) else {
+            return;
+        };
+        if let Some(l) = self
+            .learned
+            .iter_mut()
+            .find(|l| l.module == tx && l.id == out && l.protocol == t.protocol)
+        {
+            // several different one-byte settings: a setting with a range rather than on/off
+            if t.on.len() == 1 && l.on.len() == 1 && l.on[0] != t.on[0] {
+                l.control = Control::Percent;
+                l.warning = format!(
+                    "{} Seen with several settings; check its scaling (now: percent x {}).",
+                    l.warning.split(" Seen with").next().unwrap_or(""),
+                    l.scale
+                );
+            }
+            return;
+        }
+        self.name_for(String::new(), true);
+        self.learned.push(t);
     }
 }
 
@@ -1369,6 +1486,8 @@ mod tests {
         );
     }
 
+    /// A shop tool's throttle and KWP2000 tests as the simulated bus plays them (sim.rs's monitor script), each answer
+    /// after its request.
     #[test]
     fn a_shop_tool_running_a_throttle_test_is_learned() {
         let mut a = Analyzer::default();
@@ -1378,9 +1497,13 @@ mod tests {
             (0x7E0, &[0x05, 0x2F, 0xF0, 0x02, 0x03, 0x4C]),
             (0x7E8, &[0x05, 0x6F, 0xF0, 0x02, 0x03, 0x4C]),
             (0x7E0, &[0x05, 0x2F, 0xF0, 0x02, 0x03, 0x80]),
+            (0x7E8, &[0x05, 0x6F, 0xF0, 0x02, 0x03, 0x80]),
             (0x7E0, &[0x04, 0x2F, 0xF0, 0x02, 0x00]),
+            (0x7E8, &[0x04, 0x6F, 0xF0, 0x02, 0x00]),
             (0x7B0, &[0x04, 0x30, 0x10, 0x07, 0x01]),
+            (0x7B8, &[0x03, 0x70, 0x10, 0x07]),
             (0x780, &[0x05, 0x2F, 0x12, 0x34, 0x03, 0x01]),
+            (0x788, &[0x05, 0x6F, 0x12, 0x34, 0x03, 0x01]),
         ];
         for (i, (id, d)) in convo.iter().enumerate() {
             a.add(&f(*id, d, i as f64));
@@ -1391,7 +1514,7 @@ mod tests {
             a.log
         );
         assert!(a.log[2].contains("output control: F002, short-term adjustment to 4C"));
-        assert!(a.log[5].contains("return control to the module"));
+        assert!(a.log[6].contains("return control to the module"));
         assert_eq!(
             a.learned.len(),
             2,
@@ -1412,6 +1535,79 @@ mod tests {
         let toml = format!("name = \"x\"\n{}", to_toml(&a.learned[1]));
         let p = crate::vehicles::parse("x", "test", &toml).unwrap();
         assert_eq!((p.tests[0].id, p.tests[0].checked), (0x10, false));
+    }
+
+    /// ICA-221: an output test is learned only once the module takes it (`6F` / `70`, after any number of `7F .. 78`
+    /// "response pending"); one the module refused is noted with the refusal in words, and one that gets no answer within
+    /// `ANSWER_WAIT` (or by the end of the watch) is noted as unanswered. Each answer comes after its request.
+    #[test]
+    fn an_output_test_is_learned_only_when_the_module_takes_it() {
+        let mut a = Analyzer::default();
+        a.mark("Radiator fan", 0.0);
+        watch(
+            &mut a,
+            &[
+                (0x7E0, vec![0x02, 0x10, 0x03]),
+                (0x7E8, vec![0x02, 0x50, 0x03]),
+                // refused: conditions not correct
+                (0x7E0, vec![0x05, 0x2F, 0xF0, 0x01, 0x03, 0x01]),
+                (0x7E8, vec![0x03, 0x7F, 0x2F, 0x22]),
+                // pending twice, then taken
+                (0x7E0, vec![0x05, 0x2F, 0xF0, 0x03, 0x03, 0x01]),
+                (0x7E8, vec![0x03, 0x7F, 0x2F, 0x78]),
+                (0x7E8, vec![0x03, 0x7F, 0x2F, 0x78]),
+                (0x7E8, vec![0x05, 0x6F, 0xF0, 0x03, 0x03, 0x01]),
+                // KWP2000, refused: request out of range
+                (0x7B0, vec![0x04, 0x30, 0x20, 0x07, 0x01]),
+                (0x7B8, vec![0x03, 0x7F, 0x30, 0x31]),
+            ],
+            1.0,
+        );
+        // no answer: noted once the wait has passed and more of the bus has been read
+        watch(
+            &mut a,
+            &[(0x7C0, vec![0x05, 0x2F, 0xA0, 0x10, 0x03, 0x01])],
+            20.0,
+        );
+        watch(&mut a, &[(0x7E0, vec![0x02, 0x3E, 0x00])], 30.0);
+        // and one still waiting when the watch ends
+        watch(&mut a, &[(0x7B0, vec![0x04, 0x30, 0x21, 0x07, 0x02])], 40.0);
+        a.finish();
+        assert_eq!(
+            a.learned
+                .iter()
+                .map(|t| (t.module, t.id, t.name.as_str(), t.on.clone()))
+                .collect::<Vec<_>>(),
+            [(0x7E0, 0xF003, "Radiator fan", vec![0x01])],
+            "{:?}",
+            a.notes
+        );
+        for want in [
+            "7E0 refused the tool's output control F001 (to 01): conditions not correct",
+            "7B0 refused the tool's output control 20 (to 01): request out of range",
+            "7C0: output control A010 (to 01): no answer seen, not learned",
+            "7B0: output control 21 (to 02): no answer seen, not learned",
+        ] {
+            assert!(
+                a.notes.iter().any(|n| n.contains(want)),
+                "{want}: {:?}",
+                a.notes
+            );
+        }
+        assert_eq!(a.notes.len(), 4, "{:?}", a.notes);
+        // a refusal of an output test takes no write waiting on the same module with it
+        let mut b = Analyzer::default();
+        watch(
+            &mut b,
+            &[
+                (0x7C0, vec![0x04, 0x2E, 0xA0, 0x01, 0x00]),
+                (0x7C0, vec![0x05, 0x2F, 0xF0, 0x01, 0x03, 0x01]),
+                (0x7C8, vec![0x03, 0x7F, 0x2F, 0x22]),
+                (0x7C8, vec![0x03, 0x6E, 0xA0, 0x01]),
+            ],
+            1.0,
+        );
+        assert_eq!((b.settings.len(), b.learned.len()), (1, 0), "{:?}", b.notes);
     }
 
     #[test]
