@@ -11,8 +11,25 @@ use std::io;
 use std::time::{Duration, Instant};
 
 /// Serial speeds an ELM327 or STN adapter is found at, most likely first: OBDLink's USB cables (EX, SX) at 115200, the
-/// ELM327's own 38400, then the faster and slower ones some clones use.
-pub const SERIAL_SPEEDS: [u32; 5] = [115_200, 38_400, 500_000, 230_400, 9_600];
+/// ELM327's own 38400, then the faster and slower ones some clones use, and last the ones only a bus watch asks for
+/// (`WATCH_SPEEDS`), where an adapter stays when the watch did not get to put it back (the program killed, a panic).
+pub const SERIAL_SPEEDS: [u32; 7] = [
+    115_200, 38_400, 500_000, 230_400, 9_600, 1_000_000, 2_000_000,
+];
+
+/// Whether `baud` is a speed a bus watch may have left an adapter at (`WATCH_SPEEDS`).
+fn watch_speed(baud: u32) -> bool {
+    WATCH_SPEEDS.stn.contains(&baud) || WATCH_SPEEDS.elm.contains(&baud)
+}
+
+/// How the adapter is reset when it is set up: `ATZ`, as if its power went off and on, or `ATWS`, the warm start that
+/// keeps a speed `AT BRD` or `STBR` set (the ELM327 datasheet: AT Z loses it, AT WS keeps it, and is "preferred" when
+/// the speed was changed).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Reset {
+    Full,
+    Warm,
+}
 
 /// Opens the adapter `target` names and speaks to it (`Elm::connect`). A serial adapter that does not answer, or answers
 /// nonsense, at its speed is tried at the other usual ones (`SERIAL_SPEEDS`): only the adapter is spoken to, never the
@@ -44,7 +61,7 @@ pub fn listen_target(
     protocol: u8,
 ) -> Result<(Elm, Option<String>), String> {
     use crate::port::Target;
-    let how = |p: Box<dyn Port>| Elm::listen(p, protocol);
+    let how = |p: Box<dyn Port>, reset: Reset| Elm::listen_with(p, protocol, reset);
     match target {
         Target::Serial { path, baud } => connect_serial_with(
             path,
@@ -63,7 +80,9 @@ pub fn listen_target(
         }
         t => {
             let port = t.open().map_err(|e| e.to_string())?;
-            how(port).map(|e| (e, None)).map_err(|e| e.to_string())
+            how(port, Reset::Full)
+                .map(|e| (e, None))
+                .map_err(|e| e.to_string())
         }
     }
 }
@@ -74,25 +93,50 @@ fn connect_serial(
     first: u32,
     open: &mut dyn FnMut(u32) -> io::Result<Box<dyn Port>>,
 ) -> Result<(Elm, Option<String>), String> {
-    connect_serial_with(path, first, open, &Elm::connect)
+    connect_serial_with(path, first, open, &Elm::connect_with)
 }
 
-/// `connect_serial` with the adapter set up by `how` (`Elm::connect`, or `Elm::listen` for a listener).
+/// `connect_serial` with the adapter set up by `how` (`Elm::connect_with`, or `Elm::listen_with` for a listener).
+///
+/// At a speed a bus watch asks for (`watch_speed`), other than the one given, the adapter may be one a watch left there:
+/// it is set up with a warm start (`Reset::Warm`; an `ATZ` would send it back to its power-on speed before it answered,
+/// and nothing would be found). At one only a watch asks for (1 and 2 Mbaud) it is then put back by its handshake
+/// (`Elm::switch_speed`) at the speed given, or 115200 when that is a watch speed too, so the next program finds it
+/// where it looks first; one at 500000, a speed some adapters are set to, is left there.
 fn connect_serial_with(
     path: &str,
     first: u32,
     open: &mut dyn FnMut(u32) -> io::Result<Box<dyn Port>>,
-    how: &dyn Fn(Box<dyn Port>) -> Result<Elm, ObdError>,
+    how: &dyn Fn(Box<dyn Port>, Reset) -> Result<Elm, ObdError>,
 ) -> Result<(Elm, Option<String>), String> {
     let mut tried: Vec<u32> = vec![];
     let mut first_err: Option<ObdError> = None;
     for baud in std::iter::once(first).chain(SERIAL_SPEEDS.into_iter().filter(|b| *b != first)) {
         let port = open(baud).map_err(|e| format!("{path}: {e}"))?;
-        match how(port) {
-            Ok(elm) => {
-                let note = (baud != first).then(|| {
-                    format!("{path} answered at {baud} baud, not {first} ({path}@{baud} names it)")
-                });
+        let warm = baud != first && watch_speed(baud);
+        // 500000 is a speed some adapters are set to as well: one found there is warm-started and left there
+        let left = warm && !SERIAL_SPEEDS[..5].contains(&baud);
+        match how(port, if warm { Reset::Warm } else { Reset::Full }) {
+            Ok(mut elm) => {
+                let note = if left {
+                    let back = if watch_speed(first) { 115_200 } else { first };
+                    Some(match elm.switch_speed(back) {
+                        Ok(true) => format!(
+                            "{path} answered at {baud} baud, where a bus watch left it, and is put back at {back}"
+                        ),
+                        Ok(false) => format!(
+                            "{path} answered at {baud} baud, where a bus watch left it, and did not go back to {back}: \
+                             it stays at {baud} until it is unplugged from the OBD port"
+                        ),
+                        Err(e) => return Err(format!("{path}: {e}")),
+                    })
+                } else {
+                    (baud != first).then(|| {
+                        format!(
+                            "{path} answered at {baud} baud, not {first} ({path}@{baud} names it)"
+                        )
+                    })
+                };
                 return Ok((elm, note));
             }
             Err(e @ (ObdError::Timeout(_) | ObdError::Adapter(_))) => {
@@ -105,7 +149,8 @@ fn connect_serial_with(
     let speeds: Vec<String> = tried.iter().map(|b| b.to_string()).collect();
     Err(format!(
         "{}; {path} was tried at {} baud. An OBDLink EX or SX takes its power from the vehicle: it answers only when plugged \
-         into the OBD port",
+         into the OBD port. If it is plugged in, unplug it from the OBD port for a few seconds and plug it back in (that \
+         resets it, whatever speed a program left it at), then try again",
         first_err.map(|e| e.to_string()).unwrap_or_default(),
         speeds.join(", ")
     ))
@@ -347,7 +392,12 @@ const LINE_ERRORS: [&str; 12] = [
 impl Elm {
     /// Resets the adapter, sets it up, and finds the vehicle's protocol (the vehicle's ignition must be on).
     pub fn connect(port: Box<dyn Port>) -> Result<Elm, ObdError> {
-        let mut elm = Elm::setup(port, "ATSP0")?;
+        Elm::connect_with(port, Reset::Full)
+    }
+
+    /// `connect`, resetting the adapter as `reset` says.
+    pub(crate) fn connect_with(port: Box<dyn Port>, reset: Reset) -> Result<Elm, ObdError> {
+        let mut elm = Elm::setup(port, "ATSP0", reset)?;
         // the first request makes the adapter try each protocol until one answers
         elm.protocol = Protocol::Other(0);
         let first = elm.raw_request("0100", Duration::from_secs(15))?;
@@ -366,12 +416,21 @@ impl Elm {
     /// the bus, not even the protocol search `connect` makes with its first request. Watch with `monitor` or `monitor_ids`,
     /// which make the adapter silent first (it acknowledges nothing).
     pub fn listen(port: Box<dyn Port>, protocol: u8) -> Result<Elm, ObdError> {
+        Elm::listen_with(port, protocol, Reset::Full)
+    }
+
+    /// `listen`, resetting the adapter as `reset` says.
+    pub(crate) fn listen_with(
+        port: Box<dyn Port>,
+        protocol: u8,
+        reset: Reset,
+    ) -> Result<Elm, ObdError> {
         if !(1..=0xC).contains(&protocol) {
             return Err(ObdError::Adapter(format!(
                 "no protocol {protocol:X} to listen on"
             )));
         }
-        let mut elm = Elm::setup(port, &format!("ATSP{protocol:X}"))?;
+        let mut elm = Elm::setup(port, &format!("ATSP{protocol:X}"), reset)?;
         elm.protocol = Protocol::from_number(protocol);
         Ok(elm)
     }
@@ -382,8 +441,9 @@ impl Elm {
     }
 
     /// Reset and setup: echo, line feeds and spaces as Icarus reads them, headers on, the protocol command `sp`; then the
-    /// adapter's chip (STI) and the battery's voltage. Only the adapter is spoken to.
-    fn setup(port: Box<dyn Port>, sp: &str) -> Result<Elm, ObdError> {
+    /// adapter's chip (STI) and the battery's voltage. Only the adapter is spoken to. A warm start (`Reset::Warm`) that
+    /// the adapter does not know (no ID in its answer) is followed by `ATZ`.
+    fn setup(port: Box<dyn Port>, sp: &str, how: Reset) -> Result<Elm, ObdError> {
         let mut elm = Elm {
             port,
             id: String::new(),
@@ -406,7 +466,14 @@ impl Elm {
             refused: Default::default(),
             spared: 0,
         };
-        let reset = elm.command("ATZ", Duration::from_secs(4))?;
+        let named = |r: &[String]| r.iter().any(|l| l.to_uppercase().contains("ELM"));
+        let mut reset = match how {
+            Reset::Warm => elm.command("ATWS", Duration::from_secs(4))?,
+            Reset::Full => vec![],
+        };
+        if !named(&reset) {
+            reset = elm.command("ATZ", Duration::from_secs(4))?;
+        }
         elm.id = reset
             .iter()
             .rev()
@@ -938,7 +1005,8 @@ impl Elm {
     ///   F8 00 1C 00 00 00") lost their last bytes. Off, each frame shows whole. It goes back on (`ATCAF1`) when the watch
     ///   ends, and, if that fails, before the next request, since requests need it.
     ///
-    /// - On a serial line whose speed can change (`Port::speed`: a USB cable, not Bluetooth or Wi-Fi), the line is sped up
+    /// - On a USB cable (`Port::wired`, with a speed that can change: `Port::speed`; never Bluetooth, `/dev/rfcomm0`
+    ///   included, or Wi-Fi), the line is sped up
     ///   for the watch (`raise_speed`: `STBR` on an STN, `ATBRD` on an ELM327, by the adapter's own handshake) and put
     ///   back as soon as it ends, so a busy bus does not fill the adapter's buffer (ICA-213); an adapter that refuses or
     ///   does not confirm is watched at the speed it was at. The result says the speed watched at when it changed.
@@ -998,13 +1066,24 @@ impl Elm {
             None => watched,
             Some((from, to)) => {
                 let back = self.switch_speed(from);
+                let watched = watched.map_err(|e| match &back {
+                    Ok(true) => e,
+                    Ok(false) => ObdError::Adapter(format!(
+                        "{e}; the adapter is still at {to} baud, not {from} (it goes back when it is unplugged from \
+                         the OBD port for a few seconds; Icarus also finds it there next time)"
+                    )),
+                    Err(b) => ObdError::Adapter(format!(
+                        "{e}; the adapter may still be at {to} baud, not {from} ({b}): unplug it from the OBD port for a \
+                         few seconds"
+                    )),
+                });
                 watched.map(|how| match back {
                     Ok(true) => format!(
                         "{how}; watched at {to} baud, the adapter's serial link back at {from} afterwards"
                     ),
                     Ok(false) => format!(
                         "{how}; watched at {to} baud, and the adapter's serial link did not go back to {from} (it stays \
-                         at {to} until the adapter is unplugged or reset)"
+                         at {to} until the adapter is unplugged from the OBD port; Icarus also finds it there next time)"
                     ),
                     Err(e) => format!("{how}; watched at {to} baud, and then {e}"),
                 })
@@ -1030,7 +1109,7 @@ impl Elm {
     /// with the adapter's own handshake (`switch_speed`); Some((the speed before, the one now)) when one took, None when
     /// none did (a clone that does not know the command answers `?`, and the watch goes on at the speed it was at).
     fn raise_speed(&mut self) -> Result<Option<(u32, u32)>, ObdError> {
-        let Some(from) = self.port.speed() else {
+        let Some(from) = self.port.speed().filter(|_| self.port.wired()) else {
             return Ok(None);
         };
         if self.speed_command(from).is_none() {
@@ -1076,7 +1155,14 @@ impl Elm {
     /// the old speed by itself. Ok(true) when both sides now run at `to`; Ok(false) when the adapter refused (`?`: a clone
     /// that does not know the command, or a speed it cannot make) or did not confirm, both sides at the old speed again;
     /// an error only when the adapter answers at neither speed.
+    ///
+    /// Only on a cable (`Port::wired`: a USB serial port): a serial line to a Bluetooth adapter (`/dev/rfcomm0`, the MX+)
+    /// or a pty standing in for a Wi-Fi one has a speed that carries nothing, and the adapter's own serial link there
+    /// goes to its radio, so it is never asked.
     fn switch_speed(&mut self, to: u32) -> Result<bool, ObdError> {
+        if !self.port.wired() {
+            return Ok(false);
+        }
         let (Some(from), Some(cmd)) = (self.port.speed(), self.speed_command(to)) else {
             return Ok(false);
         };
@@ -1771,8 +1857,9 @@ mod tests {
             .err()
             .unwrap();
         assert!(
-            e.contains("38400, 115200, 500000, 230400, 9600")
-                && e.contains("power from the vehicle"),
+            e.contains("38400, 115200, 500000, 230400, 9600, 1000000, 2000000")
+                && e.contains("power from the vehicle")
+                && e.contains("unplug it from the OBD port for a few seconds"),
             "{e}"
         );
         // a port that cannot be opened is said at once
@@ -1782,6 +1869,82 @@ mod tests {
         .err()
         .unwrap();
         assert!(e.starts_with("/dev/ttyUSB9:"), "{e}");
+    }
+
+    /// One simulated adapter behind every port opened on it, as a cable is: the computer's side set to the speed the port
+    /// is opened at, the adapter's kept as it was.
+    struct Shared(std::sync::Arc<std::sync::Mutex<crate::sim::SimCar>>);
+    impl crate::port::Port for Shared {
+        fn send(&mut self, d: &[u8]) -> io::Result<()> {
+            self.0.lock().unwrap().send(d)
+        }
+        fn recv(&mut self, b: &mut [u8], t: Duration) -> io::Result<usize> {
+            self.0.lock().unwrap().recv(b, t)
+        }
+        fn wired(&self) -> bool {
+            self.0.lock().unwrap().wired()
+        }
+        fn speed(&self) -> Option<u32> {
+            self.0.lock().unwrap().speed()
+        }
+        fn set_speed(&mut self, baud: u32) -> io::Result<()> {
+            self.0.lock().unwrap().set_speed(baud)
+        }
+    }
+
+    /// What `connect_serial` gives.
+    type Connected = Result<(Elm, Option<String>), String>;
+
+    /// Connects to `car` as `connect_target` does to a serial port given at 115200: (the adapter, the note, both sides'
+    /// speeds after).
+    fn connect_shared(car: crate::sim::SimCar) -> (Connected, Option<(u32, u32)>) {
+        let car = std::sync::Arc::new(std::sync::Mutex::new(car));
+        let r = super::connect_serial("/dev/ttyUSB0", 115_200, &mut |b| {
+            car.lock().unwrap().set_speed(b)?;
+            Ok(Box::new(Shared(car.clone())) as Box<dyn crate::port::Port>)
+        });
+        let speeds = car.lock().unwrap().speeds();
+        (r, speeds)
+    }
+
+    /// An OBDLink EX a bus watch left at 2 Mbaud (the program killed before it put the speed back) is found at the end of
+    /// the search, set up with a warm start (an ATZ would have sent it to 115200 before it answered), and put back at
+    /// 115200, where the next program finds it first.
+    #[test]
+    fn an_adapter_left_at_a_watch_speed_is_found_and_put_back() {
+        let (r, speeds) = connect_shared(crate::sim::SimCar::obdlink_ex().left_at(2_000_000));
+        let (mut elm, note) = r.unwrap();
+        let note = note.unwrap();
+        assert!(
+            note.contains("answered at 2000000 baud, where a bus watch left it")
+                && note.contains("put back at 115200"),
+            "{note}"
+        );
+        assert_eq!(speeds, Some((115_200, 115_200)));
+        assert!(elm.measure_voltage().is_some(), "and it answers there");
+        // the next connection finds it at once
+        let car = crate::sim::SimCar::obdlink_ex();
+        let (r, _) = connect_shared(car);
+        assert_eq!(r.unwrap().1, None);
+    }
+
+    /// An ELM327 a watch left at 500 kbps is found there with a warm start, so ATZ does not move it away while it is being
+    /// asked; 500000 being a speed some adapters are set to, it is left there.
+    #[test]
+    fn an_adapter_left_at_500k_is_found_with_a_warm_start() {
+        let car = crate::sim::SimCar::new()
+            .on_serial(115_200)
+            .knowing_brd()
+            .left_at(500_000);
+        let (r, speeds) = connect_shared(car);
+        let (mut elm, note) = r.unwrap();
+        assert!(
+            note.unwrap()
+                .contains("answered at 500000 baud, not 115200"),
+            "the usual note"
+        );
+        assert_eq!(speeds, Some((500_000, 500_000)));
+        assert!(elm.measure_voltage().is_some());
     }
 
     #[test]

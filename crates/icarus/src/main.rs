@@ -881,6 +881,17 @@ fn adapter_target(args: &Args) -> Result<(String, Target), String> {
     Ok((spec, target))
 }
 
+/// Whether the link `connect` opened is a cable all the way (ICA-206, DESIGN.md rule 5): asked of the link itself
+/// (`Link::wired`, its open port or interface), never of where `spec`, the adapter as written, leads now; `spec` only
+/// names it in the refusal.
+fn cable(link: &dyn Link, spec: &str) -> Result<(), String> {
+    if link.wired() {
+        Ok(())
+    } else {
+        Err(format!("{spec}, as it was opened, is not one Linux puts on USB (Bluetooth, Wi-Fi and built-in serial ports are not)"))
+    }
+}
+
 /// The link to the vehicle: an ELM327/STN adapter, a Linux CAN interface (`can0`, spoken to over SocketCAN), or a J2534
 /// cable (`openport`) through Icarus's own driver for it.
 fn connect(args: &Args) -> Result<Box<dyn Link>, String> {
@@ -1658,7 +1669,8 @@ fn obd_service(args: &Args) -> Result<(), String> {
     };
     // asked of the port connect() opened (ICA-206), as the window asks it: a symlink moved since cannot change it
     let mut elm = connect(args)?;
-    let wired = elm.wired();
+    let (spec, _) = adapter_target(args)?;
+    let wired = cable(&*elm, &spec).is_ok();
     let list = vehicle_services(&mut elm)?;
     let s = list
         .iter()
@@ -1885,9 +1897,9 @@ fn obd_setting(args: &Args, undo: bool) -> Result<(), String> {
     // must be a cable (ICA-206: asked of the open port, not of where the path leads now)
     let mut elm = connect(args)?;
     let (spec, _) = adapter_target(args)?;
-    if !elm.wired() {
-        return Err(format!("changing a setting writes the module's memory: use a wired adapter (a USB cable); {spec} is not one Linux puts on USB (Bluetooth, Wi-Fi and built-in serial ports are not)"));
-    }
+    cable(&*elm, &spec).map_err(|why| {
+        format!("changing a setting writes the module's memory: use a wired adapter (a USB cable); {why}")
+    })?;
     let (vin, list) = vehicle_settings(&mut elm)?;
     note_dropped(&mut elm);
     let n = name.to_lowercase();
@@ -2227,7 +2239,11 @@ fn bus_watch(
         .map(|v| v.parse().map_err(|_| "--seconds needs a number"))
         .transpose()?
         .unwrap_or(10.0);
+    // Ctrl+C, a closed terminal (SIGHUP) and SIGTERM all end the watch the same way, so an adapter whose serial speed was
+    // raised for it is put back (ICA-213)
     actuator::catch_interrupt();
+    actuator::catch_terminate();
+    actuator::catch_hangup();
     let mut an = bus::Analyzer::watching(fence);
     if j1939 {
         an.j1939 = Some(Default::default());
@@ -2235,6 +2251,10 @@ fn bus_watch(
     let start = std::time::Instant::now();
     let mut printed = 0u64;
     let mut step = |an: &mut bus::Analyzer, f: Option<bus::Frame>| {
+        if actuator::interrupted() {
+            // nothing printed: a closed terminal makes printing fail, and the watch must end, not panic
+            return false;
+        }
         if let Some(f) = f {
             if raw {
                 println!(
@@ -2412,11 +2432,17 @@ fn cmd_learn(a: &[String], fence: icarus_obd::fence::Fence) -> Result<(), String
             }
         }
     });
+    // as for bus watch: every way of ending it lets a raised serial speed be put back (ICA-213)
     actuator::catch_interrupt();
+    actuator::catch_terminate();
+    actuator::catch_hangup();
     let mut an = bus::Analyzer::watching(fence);
     let start = std::time::Instant::now();
     let mut printed = 0u64;
     let mut step = |an: &mut bus::Analyzer, f: Option<bus::Frame>| {
+        if actuator::interrupted() {
+            return false;
+        }
         if let Some(f) = f {
             an.add(&f);
         }
@@ -2973,6 +2999,31 @@ mod tests {
     }
 
     use super::*;
+
+    /// ICA-206: `obd setting` and `obd service` judge the link connect() opened, not the adapter as written. `sim` as
+    /// written is wired (`Target::wired`), but a link opened on a port that is not a cable is refused; a link opened on a
+    /// cable is taken whatever its path, as written, would say now (here a Bluetooth port's name).
+    #[test]
+    fn settings_and_routines_ask_the_open_link_whether_it_is_a_cable() {
+        /// The simulated adapter behind a port that is not a cable.
+        struct Radio(icarus_obd::sim::SimCar);
+        impl icarus_obd::port::Port for Radio {
+            fn send(&mut self, d: &[u8]) -> std::io::Result<()> {
+                self.0.send(d)
+            }
+            fn recv(&mut self, b: &mut [u8], t: std::time::Duration) -> std::io::Result<usize> {
+                self.0.recv(b, t)
+            }
+        }
+        assert!(Target::parse("sim").unwrap().wired());
+        let radio: Box<dyn Link> =
+            Box::new(Elm::connect(Box::new(Radio(icarus_obd::sim::SimCar::new()))).unwrap());
+        let e = cable(&*radio, "sim").unwrap_err();
+        assert!(e.contains("sim, as it was opened, is not"), "{e}");
+        let wired: Box<dyn Link> =
+            Box::new(Elm::connect(Box::new(icarus_obd::sim::SimCar::new())).unwrap());
+        assert!(cable(&*wired, "/dev/rfcomm0").is_ok());
+    }
 
     /// ICA-207: `obd module`/`obd scan` say a module that lists every code it can set, none failed, is clean, and still
     /// print a code with a failure bit.

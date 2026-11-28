@@ -176,18 +176,33 @@ impl crate::canlink::Frames for CanSocket {
                 &mut len,
             )
         };
-        if r != 0 || sa.family != AF_CAN as libc::sa_family_t || sa.ifindex <= 0 {
-            return false;
-        }
-        let mut name = [0 as libc::c_char; libc::IF_NAMESIZE];
-        if unsafe { libc::if_indextoname(sa.ifindex as libc::c_uint, name.as_mut_ptr()) }.is_null()
-        {
-            return false;
-        }
-        let name = unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) };
-        name.to_str()
-            .is_ok_and(|n| crate::port::Target::Can(n.to_string()).wired())
+        r == 0 && bound_on_usb(&crate::port::ThisComputer, sa.family, sa.ifindex, &name_of)
     }
+}
+
+/// The interface numbered `index` now, by its name (if_indextoname).
+fn name_of(index: libc::c_uint) -> Option<String> {
+    let mut name = [0 as libc::c_char; libc::IF_NAMESIZE];
+    if unsafe { libc::if_indextoname(index, name.as_mut_ptr()) }.is_null() {
+        return None;
+    }
+    let name = unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) };
+    name.to_str().ok().map(str::to_string)
+}
+
+/// Whether a CAN socket bound as getsockname says (`family`, `ifindex`) is on a CAN adapter on USB: a CAN socket's
+/// address, an interface bound (index above 0), whose name now (`name_of`) is a CAN interface `pc`'s sysfs puts on USB
+/// (`Target::Can(..).wired_on`).
+fn bound_on_usb(
+    pc: &dyn crate::port::Computer,
+    family: libc::sa_family_t,
+    ifindex: libc::c_int,
+    name_of: &dyn Fn(libc::c_uint) -> Option<String>,
+) -> bool {
+    family == AF_CAN as libc::sa_family_t
+        && ifindex > 0
+        && name_of(ifindex as libc::c_uint)
+            .is_some_and(|n| crate::port::Target::Can(n).wired_on(pc))
 }
 
 // rtnetlink (linux/rtnetlink.h, if_link.h, can/netlink.h): the link's CAN bit timing
@@ -296,6 +311,33 @@ pub fn bitrate_in(answer: &[u8]) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ICA-206: a CAN socket is judged by the interface it is bound to, by its index, read on a made-up laptop whose
+    /// CANable (on USB) is can0 and whose vcan0 is virtual: bound to the CANable it is wired; to the vcan, to no
+    /// interface, to one gone, or not a CAN socket at all, it is not.
+    #[test]
+    fn a_can_socket_is_judged_by_the_interface_it_is_bound_to() {
+        let pc = crate::port::tests::laptop();
+        let names = |i: libc::c_uint| match i {
+            3 => Some("can0".to_string()),
+            4 => Some("vcan0".to_string()),
+            _ => None,
+        };
+        let can = AF_CAN as libc::sa_family_t;
+        assert!(bound_on_usb(&pc, can, 3, &names));
+        assert!(!bound_on_usb(&pc, can, 4, &names), "a vcan");
+        assert!(
+            !bound_on_usb(&pc, can, 0, &names),
+            "bound to every interface"
+        );
+        assert!(!bound_on_usb(&pc, can, 9, &names), "an interface gone");
+        assert!(!bound_on_usb(
+            &pc,
+            libc::AF_INET as libc::sa_family_t,
+            3,
+            &names
+        ));
+    }
 
     /// One attribute, padded to four bytes as the kernel writes it.
     fn attr(kind: u16, payload: &[u8]) -> Vec<u8> {

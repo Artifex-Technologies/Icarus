@@ -18,8 +18,9 @@ pub trait Port {
         false
     }
     /// The speed this computer's side of a serial line runs at (baud), when this port is a serial line whose speed can be
-    /// changed (`open_serial`); None for anything else (a Bluetooth socket, TCP, a stand-in), whose adapter is then never
-    /// asked to change its own (`Elm::monitor_ids`).
+    /// changed (`open_serial`); None for anything else (a Bluetooth socket, TCP, a stand-in). The adapter is asked to
+    /// change its own (`Elm::monitor_ids`) only when the port has a speed and is `wired` too: `/dev/rfcomm0` or a pty
+    /// has a speed, which carries nothing.
     fn speed(&self) -> Option<u32> {
         None
     }
@@ -860,7 +861,7 @@ pub(crate) mod tests {
     use super::*;
 
     /// A made-up computer in a scratch folder: its `/dev` and `/sys` under `root`, laid out as Linux lays them out.
-    struct Made {
+    pub(crate) struct Made {
         root: PathBuf,
     }
 
@@ -958,7 +959,7 @@ pub(crate) mod tests {
     /// controller, which is on USB; with a udev symlink to it), an FTDI cable plugged into another computer and attached
     /// here over USB/IP (ttyUSB1), a socat pty standing in for a Wi-Fi adapter, the built-in serial port, a CANable (gs_usb
     /// can0) and a vcan. Each tty also by its device number (`dev/char`), as an open port is judged.
-    fn laptop() -> Made {
+    pub(crate) fn laptop() -> Made {
         let m = Made::new("laptop");
         let ftdi = format!("{HUB}/1-1/1-1:1.0/ttyUSB0");
         m.tty("ttyUSB0", Some(&ftdi), &format!("{ftdi}/tty/ttyUSB0"));
@@ -1573,6 +1574,17 @@ pub(crate) mod tests {
                 && e.contains("one connection at a time"),
             "{e}"
         );
+        // the adapter as Icarus opens it (`Target::Tcp`): given up at TCP_LIMIT
+        let t = std::time::Instant::now();
+        let e = Target::Tcp(addr.to_string()).open().err().unwrap();
+        let took = t.elapsed();
+        assert!(
+            took >= TCP_LIMIT - Duration::from_millis(100)
+                && took < TCP_LIMIT + Duration::from_secs(3),
+            "{took:?}"
+        );
+        assert_eq!(e.kind(), io::ErrorKind::TimedOut, "{e}");
+        assert!(e.to_string().contains("one connection at a time"), "{e}");
         // a port nothing listens on is refused at once, in the same words
         let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let gone = free.local_addr().unwrap();

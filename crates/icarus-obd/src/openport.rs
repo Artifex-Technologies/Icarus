@@ -545,6 +545,8 @@ mod tests {
         sent: Arc<Mutex<Vec<String>>>,
         filters: Vec<u32>,
         millivolts: u32,
+        /// The port is on a USB cable (`Port::wired`).
+        wired: bool,
     }
 
     impl Cable {
@@ -559,6 +561,7 @@ mod tests {
                     sent: sent.clone(),
                     filters: Vec::new(),
                     millivolts: 12_600,
+                    wired: false,
                 },
                 sent,
             )
@@ -663,6 +666,21 @@ mod tests {
                 buf[i] = b;
             }
             Ok(n)
+        }
+
+        fn wired(&self) -> bool {
+            self.wired
+        }
+    }
+
+    /// ICA-206: an OpenPort link is as wired as the serial port it holds, as it was opened.
+    #[test]
+    fn an_openport_link_is_judged_by_its_port() {
+        for on_usb in [true, false] {
+            let (mut cable, _) = Cable::new(SimCar::new());
+            cable.wired = on_usb;
+            let l = PassThruLink::connect(OpenPort::open(cable).unwrap()).unwrap();
+            assert_eq!(l.wired(), on_usb);
         }
     }
 

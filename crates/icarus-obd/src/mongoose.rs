@@ -467,6 +467,8 @@ mod tests {
         battery: bool,
         filter: bool,
         bitrate: u32,
+        /// The port is on a USB cable (`Port::wired`).
+        wired: bool,
     }
 
     impl Cable {
@@ -479,6 +481,7 @@ mod tests {
                 battery: true,
                 filter: false,
                 bitrate: 0,
+                wired: false,
             }
         }
 
@@ -573,6 +576,22 @@ mod tests {
                 buf[i] = b;
             }
             Ok(n)
+        }
+
+        fn wired(&self) -> bool {
+            self.wired
+        }
+    }
+
+    /// ICA-206: a Mongoose link is as wired as the serial port the cable was opened on.
+    #[test]
+    fn a_mongoose_link_is_judged_by_its_port() {
+        for on_usb in [true, false] {
+            let mut cable = Cable::new();
+            cable.wired = on_usb;
+            let l =
+                CanLink::connect(Mongoose::open(cable, 500_000).unwrap(), "/dev/ttyACM0").unwrap();
+            assert_eq!(l.wired(), on_usb);
         }
     }
 

@@ -495,6 +495,22 @@ impl SimCar {
         }
     }
 
+    /// The same adapter on its serial line (`on_serial`), left at `baud` by a program that changed its speed and did not
+    /// put it back (killed during a bus watch): its power-on speed stays what `on_serial` gave, which ATZ goes back to.
+    #[cfg(test)]
+    pub(crate) fn left_at(mut self, baud: u32) -> SimCar {
+        if let Some(line) = self.serial.as_mut() {
+            line.adapter = baud;
+        }
+        self
+    }
+
+    /// Both sides of the modelled serial line: (the adapter's speed, the computer's).
+    #[cfg(test)]
+    pub(crate) fn speeds(&self) -> Option<(u32, u32)> {
+        self.serial.as_ref().map(|s| (s.adapter, s.host))
+    }
+
     /// A speed change asked for (`STBR`, `ATBRD`): to `baud`, if the adapter is on a modelled serial line and can make it.
     fn change_speed(&mut self, baud: Option<u32>) {
         let lies = self.brd_lies;
@@ -1636,13 +1652,14 @@ impl SimCar {
             .to_uppercase();
         let ok = vec!["OK".to_string()];
         let reply: Vec<String> = match c.as_str() {
-            "ATZ" => {
+            "ATZ" | "ATWS" => {
                 (self.echo, self.headers, self.spaces) = (true, false, true);
                 (self.caf, self.csm, self.cmm) = (true, !self.loud, u8::from(self.loud));
                 (self.header, self.filter, self.priority) = (self.functional(), None, 0x18);
                 self.ms = false;
-                // a reset puts the serial speed back too (the ELM327 datasheet: a speed set by AT BRD lasts until AT Z)
-                if let Some(line) = self.serial.as_mut() {
+                // a full reset puts the serial speed back too (the ELM327 datasheet: a speed set by AT BRD lasts until
+                // AT Z; the warm start AT WS keeps it)
+                if let Some(line) = self.serial.as_mut().filter(|_| c == "ATZ") {
                     (line.adapter, line.switch) = (line.power_on, None);
                 }
                 vec!["".into(), ELM_ID.into()]
@@ -2335,6 +2352,8 @@ pub(crate) mod recording {
         pub once: bool,
         /// A command whose sending fails (the link to the adapter lost), with nothing reaching the adapter.
         pub broken: Option<&'static str>,
+        /// The port is not a cable (a serial line to a Bluetooth adapter, `/dev/rfcomm0`), though it has a speed.
+        pub unwired: bool,
         pending: Vec<u8>,
     }
 
@@ -2349,6 +2368,7 @@ pub(crate) mod recording {
                 unknown: None,
                 once: false,
                 broken: None,
+                unwired: false,
                 pending: Vec::new(),
             };
             (r, sent)
@@ -2411,6 +2431,11 @@ pub(crate) mod recording {
                 self.sent.lock().unwrap().push(format!("SPEED {baud}"));
             }
             self.car.set_speed(baud)
+        }
+
+        /// As the simulated adapter says (it is), unless `unwired`.
+        fn wired(&self) -> bool {
+            !self.unwired && self.car.wired()
         }
     }
 }
@@ -2894,6 +2919,28 @@ mod monitor_tests {
             "{log:?}"
         );
         assert!(elm.measure_voltage().is_some());
+    }
+
+    /// ICA-213: a serial port that is not a cable (the MX+ over Bluetooth as `/dev/rfcomm0`, which has a speed that
+    /// carries nothing, and whose STN talks to its radio over its serial link) is never asked to change speed.
+    #[test]
+    fn a_port_that_is_not_a_cable_is_never_asked_to_change_speed() {
+        use crate::sim::recording::Recorder;
+        let stn = SimCar {
+            stn: true,
+            ..SimCar::new()
+        };
+        let (mut port, log) = Recorder::new(stn.on_serial(115_200));
+        port.unwired = true;
+        let mut elm = Elm::listen(Box::new(port), 6).unwrap();
+        let (frames, full, how) = watch_until(&mut elm, 100);
+        assert_eq!((frames, full, how.as_str()), (100, false, "stopped"));
+        let log = log.lock().unwrap().clone();
+        assert!(
+            !log.iter()
+                .any(|l| l.starts_with("STBR") || l.starts_with("ATBRD") || l.starts_with("SPEED")),
+            "{log:?}"
+        );
     }
 
     /// ICA-213: an adapter that answers the speed change OK and never finishes the handshake is found again at its old
